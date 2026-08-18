@@ -8,7 +8,9 @@ from datetime import date
 BASE=Path(__file__).resolve().parent
 NUT=BASE/"banco_nutrientes.db"
 DIA=BASE/"diario_alimentar.db"
-HOST, PORT = "0.0.0.0", 5000
+import os
+HOST = "0.0.0.0"
+PORT = int(os.environ.get("PORT", 5000))
 MEALS=["Café da manhã","Almoço","Lanche","Jantar","Ceia"]
 
 NUTS=[
