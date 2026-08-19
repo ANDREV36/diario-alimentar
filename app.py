@@ -232,7 +232,7 @@ body:before{content:"";position:fixed;inset:0;background:linear-gradient(180deg,
 main{max-width:1120px;margin:0 auto;padding:12px 18px 40px}
 header{position:sticky;top:0;z-index:20;background:rgba(5,12,24,.68)!important;backdrop-filter:none;border-bottom:1px solid rgba(255,255,255,.08)}
 header .headrow{max-width:1120px;margin:auto;padding:10px 18px}
-header h1{display:none} header p{display:none}
+header h1{display:none} header p{display:block}
 .hero{background:linear-gradient(135deg,rgba(7,18,35,.91),rgba(16,31,55,.78));border:1px solid rgba(255,255,255,.13);border-radius:24px;padding:22px;margin-bottom:14px;box-shadow:0 18px 55px rgba(0,0,0,.28);backdrop-filter:blur(12px)}
 .heroTop{display:flex;justify-content:space-between;align-items:flex-start;gap:15px}
 .eyebrow{font-size:11px;letter-spacing:1.5px;color:#8fd8ff;font-weight:800}
@@ -426,11 +426,11 @@ main{
 <div class="card" id="consumedFoodsCard">
   <h2 style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:0">
     <span>Alimentos consumidos</span>
-    <button id="consumedFoodsToggle" onclick="toggleConsumedFoods()" aria-expanded="false"
+    <button id="consumedFoodsToggle" onclick="toggleConsumedFoods()" aria-expanded="true"
       style="width:42px;height:34px;padding:0;border:1px solid #ffffff25;border-radius:10px;background:#111827;color:#fff;font-size:20px;line-height:1;cursor:pointer"
-      title="Mostrar ou ocultar alimentos consumidos">▼</button>
+      title="Mostrar ou ocultar alimentos consumidos">▲</button>
   </h2>
-  <div id="items" style="display:none;margin-top:12px"></div>
+  <div id="items" style="display:block;margin-top:12px"></div>
 </div>
 
 <div class="bottomDashboard card">
@@ -451,10 +451,6 @@ main{
 </div>
 <div class="card"><h2>📊 Resumo do dia</h2><button onclick="openSummary()" style="width:100%;padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:16px">📊 VER RESUMO DO DIA</button></div>
 <div class="card"><h2>💧 Hidratação</h2><div id="waterBox"></div>
-<div class="card"><h2>📅 Acumulado do período</h2>
-<button onclick="openPeriod()" style="width:100%;padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:16px">
-📅 VER ACUMULADO DO PERÍODO
-</button></div>
 <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:10px">
 <button onclick="addWater(200)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 200 ml</button>
 <button onclick="addWater(300)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 300 ml</button>
@@ -462,6 +458,10 @@ main{
 <button onclick="addWater(750)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 750 ml</button>
 <button onclick="addWater(1000)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 1 L</button>
 <button onclick="customWater()" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">✏️ Outra</button></div></div>
+<div class="card"><h2>📅 Acumulado do período</h2>
+<button onclick="openPeriod()" style="width:100%;padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:16px">
+📅 VER ACUMULADO DO PERÍODO
+</button></div>
 </main>
 <div id="nutrientTooltip"></div>
 
@@ -605,9 +605,15 @@ main{
 
 <script>
 let profileName="";
+function renderProfileGreeting(){
+  const hero=document.getElementById("heroGreeting");
+  const header=document.getElementById("greeting");
+  if(hero) hero.textContent=profileName?`Olá, ${profileName}! 👋`:"Olá! 👋";
+  if(header) header.textContent=profileName?`Bom dia, ${profileName}! 👋 · Seu controle diário, seu melhor resultado.` : "Alimentação, nutrientes e histórico";
+}
 function updateHeroFromDay(j){
   const g=j.goals||{}, t=j.daily||{};
-  document.getElementById("heroGreeting").textContent=profileName?`Olá, ${profileName}! 👋`:"Olá! 👋";
+  renderProfileGreeting();
   const d=document.getElementById("day").value;
   document.getElementById("heroDate").textContent=new Date(d+"T12:00:00").toLocaleDateString("pt-BR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"});
   document.getElementById("heroKcal").textContent=`${fmt(t.energia_kcal)} / ${fmt(g.calorias_kcal)} kcal`;
@@ -630,8 +636,8 @@ async function loadProfile(){
     document.getElementById('profileSex').value=j.sexo||'';
     document.getElementById('profileActivity').value=j.atividade||'';
     document.getElementById('profileGoal').value=j.objetivo||'';
-    if(profileName) document.getElementById('greeting').textContent=`Bom dia, ${profileName}! 👋 · Seu controle diário, seu melhor resultado.`;
-    else openProfile(true);
+    renderProfileGreeting();
+    if(!profileName) openProfile(true);
   }catch(e){console.error(e)}
 }
 function openProfile(first=false){
@@ -744,7 +750,7 @@ async function saveProfile(){
   const goals=window.profileCalculatedGoals||calculateProfileGoals();
   if(goals) await api('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(goals)});
   profileName=name;
-  document.getElementById('greeting').textContent=`Bom dia, ${name}! 👋 · Seu controle diário, seu melhor resultado.`;
+  renderProfileGreeting();
   closeProfile();
   await refresh();
 }
@@ -859,7 +865,18 @@ async function saveFood(){
     alert("Alimento atualizado na base.");
   }catch(e){alert("Não foi possível salvar: "+e.message)}
 }
-async function add(){if(!chosen){alert("Selecione um alimento.");return}let w=Number(weight.value);if(w<=0){alert("Peso inválido.");return}await api("/api/consume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,refeicao:meal,alimento_id:chosen.id,alimento_nome:chosen.nome,quantidade_g:w})});searchEl.value="";foods.innerHTML="";sel.textContent="Nenhum alimento selecionado.";chosen=null;refresh()}
+async function add(){
+  if(!chosen){alert("Selecione um alimento.");return}
+  const w=Number(weight.value);
+  if(w<=0){alert("Peso inválido.");return}
+  try{
+    await api("/api/consume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,refeicao:meal,alimento_id:chosen.id,alimento_nome:chosen.nome,quantidade_g:w})});
+    searchEl.value="";foods.innerHTML="";sel.textContent="Nenhum alimento selecionado.";chosen=null;
+    const list=document.getElementById("items"), toggle=document.getElementById("consumedFoodsToggle");
+    if(list){list.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
+    await refresh();
+  }catch(e){alert("Não foi possível adicionar o alimento: "+e.message)}
+}
 
 const nutrientTip=document.getElementById("nutrientTooltip");
 let tipCache={};
@@ -917,8 +934,9 @@ async function refresh(){
   try{
     const j=await api("/api/day?data="+day.value+"&refeicao="+encodeURIComponent(meal));
     items.innerHTML=j.items.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" g · "+fmt(x.kcal)+" kcal</div></div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
+    if(j.items.length){const toggle=document.getElementById("consumedFoodsToggle");items.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
     draw(partial,j.partial);
-    drawWater(j.water,j.goals.agua_ml);
+    await drawWater(j.water,j.goals.agua_ml);
     updateHeroFromDay(j);
     renderBottomProgress(j);
     setTimeout(()=>{updateHeroFromDay(j);renderBottomProgress(j)},150);
@@ -954,7 +972,7 @@ async function drawWater(w,goal){
   <div style="margin-top:12px"><b>Registros de hoje</b>${entries.length?entries.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.10)"><span>💧 ${fmt(Number(x.quantidade_ml)/1000)} L <small style="color:#94a3b8">${esc(x.hora||'')}</small></span><button onclick="deleteWater(${x.id})" style="padding:5px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.15);background:#26364a;color:#fff">Excluir</button></div>`).join(''):`<div style="font-size:12px;color:#94a3b8;margin-top:7px">Nenhum registro de água.</div>`}</div>`;
 }
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
-async function addWater(ml){try{await api("/api/water",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,quantidade_ml:ml})});refresh();}catch(e){alert(e.message)}}
+async function addWater(ml){try{await api("/api/water",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,quantidade_ml:ml})});await refresh();}catch(e){alert("Não foi possível registrar a água: "+e.message)}}
 async function customWater(){let v=prompt("Quantidade de água em ml:","500");if(v===null)return;let ml=Number(v);if(!(ml>0)){alert("Quantidade inválida.");return}await addWater(ml)}
 async function openSummary(){let j=await api("/api/summary?data="+day.value);let a=[['energia_kcal','calorias_kcal','🔥 Calorias','kcal'],['proteina_g','proteina_g','💪 Proteína','g'],['carboidrato_g','carboidratos_g','🍚 Carboidratos','g'],['lipidios_g','gorduras_g','🥑 Gorduras','g'],['fibra_g','fibras_g','🌱 Fibras','g'],['sodio_mg','sodio_mg','🧂 Sódio','mg']];document.getElementById("summaryContent").innerHTML=a.map(x=>{let v=Number(j.daily[x[0]]||0),m=Number(j.goals[x[1]]||0),p=pct(v,m),left=Math.max(0,m-v);return `<div class="metric nutrient-source" data-nutrient="${x[0]}" data-start="${day.value}" data-end="${day.value}" style="margin-bottom:8px"><small>${x[2]} ⓘ</small><b>${fmt(v)} / ${fmt(m)} ${x[3]}</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${p}%;background:#22a447"></div></div><small>${m>0?(x[1]==='sodio_mg'?'Restam ':'Faltam ')+fmt(left)+' '+x[3]:''}</small></div>`}).join('')+`<div class="metric"><small>💧 Água</small><b>${fmt(j.water/1000)} / ${fmt(Number(j.goals.agua_ml||0)/1000)} L</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${pct(j.water,Number(j.goals.agua_ml||0))}%;background:#1683ff"></div></div><small>${Number(j.goals.agua_ml||0)>0?fmt(Math.max(0,Number(j.goals.agua_ml)-Number(j.water))/1000)+' L restantes':''}</small></div>`;document.getElementById("goalForm").innerHTML=[['calorias_kcal','🔥 Calorias','kcal'],['proteina_g','💪 Proteína','g'],['carboidratos_g','🍚 Carboidratos','g'],['gorduras_g','🥑 Gorduras','g'],['fibras_g','🌱 Fibras','g'],['sodio_mg','🧂 Sódio','mg'],['agua_ml','💧 Água','ml']].map(x=>`<div class="metric"><small>${x[1]}</small><input id="g_${x[0]}" type="number" step="0.01" value="${j.goals[x[0]]??''}" style="width:100%;padding:9px;border:1px solid #ddd;border-radius:8px"><small>${x[2]}</small></div>`).join('');document.getElementById("summaryModal").style.display="block"}
 function closeSummary(){document.getElementById("summaryModal").style.display="none"}
@@ -1089,7 +1107,7 @@ class H(BaseHTTPRequestHandler):
                     f=c.execute("SELECT energia_kcal FROM alimentos WHERE id=?",(x["alimento_id"],)).fetchone();z=x["quantidade_g"]/100
                     items.append({"id":x["id"],"refeicao":x["refeicao"],"alimento_nome":x["alimento_nome"],"quantidade_g":x["quantidade_g"],"kcal":(f["energia_kcal"] or 0)*z if f else 0})
             finally:c.close()
-            c=ddb();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) FROM hidratacao WHERE data=?",(d,)).fetchone()[0];g=c.execute("SELECT * FROM metas WHERE id=1").fetchone();c.close();self.js({"items":items,"daily":calc(rows),"partial":calc([x for x in rows if x["refeicao"]==m]),"water":float(water or 0),"goals":dict(g)});return
+            c=ddb();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE data=?",(d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas WHERE id=1").fetchone();c.close();self.js({"items":items,"daily":calc(rows),"partial":calc([x for x in rows if x["refeicao"]==m]),"water":float(water or 0),"goals":dict(g)});return
         if p.path.startswith("/api/food/"):
             try:
                 food_id=int(p.path.rsplit("/",1)[1])
@@ -1144,7 +1162,7 @@ class H(BaseHTTPRequestHandler):
             c=ddb()
             try:
                 rows=c.execute("SELECT * FROM consumo WHERE data>=? AND data<=? ORDER BY data,id",(start,end)).fetchall()
-                water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) FROM hidratacao WHERE data>=? AND data<=?",(start,end)).fetchone()[0]
+                water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE data>=? AND data<=?",(start,end)).fetchone()["total_water"]
                 g=c.execute("SELECT * FROM metas WHERE id=1").fetchone()
             finally:c.close()
             days=(d2-d1).days+1
@@ -1158,7 +1176,7 @@ class H(BaseHTTPRequestHandler):
         if p.path=="/api/summary":
             q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];c=ddb()
             try:
-                rows=c.execute("SELECT * FROM consumo WHERE data=?",(d,)).fetchall();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) FROM hidratacao WHERE data=?",(d,)).fetchone()[0];g=c.execute("SELECT * FROM metas WHERE id=1").fetchone()
+                rows=c.execute("SELECT * FROM consumo WHERE data=?",(d,)).fetchall();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE data=?",(d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas WHERE id=1").fetchone()
             finally:c.close()
             self.js({"daily":calc(rows),"water":float(water or 0),"goals":dict(g)})
             return
@@ -1270,3 +1288,4 @@ if __name__=="__main__":
     if not NUT.exists(): print("ERRO: banco_nutrientes.db não encontrado.");input("ENTER para sair...");raise SystemExit
     print("V27 MOBILE iniciado.");print("No PC: http://127.0.0.1:5000");print("Para encerrar: Ctrl+C")
     ThreadingHTTPServer((HOST,PORT),H).serve_forever()
+
