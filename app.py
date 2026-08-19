@@ -3,56 +3,175 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import sqlite3, json
+import psycopg
+from psycopg.rows import dict_row
 from datetime import date
-
-BASE=Path(__file__).resolve().parent
-NUT=BASE/"banco_nutrientes.db"
-DIA=BASE/"diario_alimentar.db"
 import os
+
+BASE = Path(__file__).resolve().parent
+
+NUT = BASE / "banco_nutrientes.db"
+DIA = BASE / "diario_alimentar.db"
+
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 5000))
-MEALS=["Café da manhã","Almoço","Lanche","Jantar","Ceia"]
 
-NUTS=[
-("energia_kcal","Calorias","kcal"),("proteina_g","Proteína","g"),
-("carboidrato_g","Carboidratos","g"),("lipidios_g","Gorduras","g"),
-("fibra_g","Fibras","g"),("calcio_mg","Cálcio","mg"),
-("magnesio_mg","Magnésio","mg"),("manganes_mg","Manganês","mg"),
-("fosforo_mg","Fósforo","mg"),("ferro_mg","Ferro","mg"),
-("sodio_mg","Sódio","mg"),("potassio_mg","Potássio","mg"),
-("cobre_mg","Cobre","mg"),("zinco_mg","Zinco","mg"),
-("vitamina_c_mg","Vitamina C","mg"),("tiamina_mg","B1","mg"),
-("riboflavina_mg","B2","mg"),("niacina_mg","B3","mg"),
-("piridoxina_mg","B6","mg"),("colesterol_mg","Colesterol","mg")]
+MEALS = ["Café da manhã", "Almoço", "Lanche", "Jantar", "Ceia"]
+
+NUTS = [
+    ("energia_kcal", "Calorias", "kcal"),
+    ("proteina_g", "Proteína", "g"),
+    ("carboidrato_g", "Carboidratos", "g"),
+    ("lipidios_g", "Gorduras", "g"),
+    ("fibra_g", "Fibras", "g"),
+    ("calcio_mg", "Cálcio", "mg"),
+    ("magnesio_mg", "Magnésio", "mg"),
+    ("manganes_mg", "Manganês", "mg"),
+    ("fosforo_mg", "Fósforo", "mg"),
+    ("ferro_mg", "Ferro", "mg"),
+    ("sodio_mg", "Sódio", "mg"),
+    ("potassio_mg", "Potássio", "mg"),
+    ("cobre_mg", "Cobre", "mg"),
+    ("zinco_mg", "Zinco", "mg"),
+    ("vitamina_c_mg", "Vitamina C", "mg"),
+    ("tiamina_mg", "B1", "mg"),
+    ("riboflavina_mg", "B2", "mg"),
+    ("niacina_mg", "B3", "mg"),
+    ("piridoxina_mg", "B6", "mg"),
+    ("colesterol_mg", "Colesterol", "mg")
+]
 
 def ndb():
     c=sqlite3.connect(NUT);c.row_factory=sqlite3.Row;return c
 def ddb():
-    c=sqlite3.connect(DIA);c.row_factory=sqlite3.Row
-    c.execute("""CREATE TABLE IF NOT EXISTS consumo(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,data TEXT NOT NULL,refeicao TEXT NOT NULL,
-    alimento_id INTEGER,alimento_nome TEXT NOT NULL,quantidade_g REAL NOT NULL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS hidratacao(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,data TEXT NOT NULL,hora TEXT NOT NULL,quantidade_ml REAL NOT NULL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS metas(
-    id INTEGER PRIMARY KEY CHECK(id=1),calorias_kcal REAL,proteina_g REAL,carboidratos_g REAL,
-    gorduras_g REAL,fibras_g REAL,sodio_mg REAL,agua_ml REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS perfil(
-    id INTEGER PRIMARY KEY CHECK(id=1),nome TEXT NOT NULL DEFAULT '',
-    idade INTEGER,sexo TEXT,peso_kg REAL,altura_cm REAL,
-    atividade TEXT,objetivo TEXT,peso_meta_kg REAL,ritmo_kg_semana REAL)""")
-    prow=c.execute("SELECT id FROM perfil WHERE id=1").fetchone()
+    database_url = os.environ.get("DATABASE_URL")
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL não configurada no ambiente.")
+
+    class DB:
+        def __init__(self):
+            self.conn = psycopg.connect(
+                database_url,
+                row_factory=dict_row
+            )
+
+        def execute(self, sql, params=None):
+            # Mantém compatibilidade com o código antigo que usa ?
+            sql = sql.replace("?", "%s")
+            return self.conn.execute(sql, params)
+
+        def commit(self):
+            self.conn.commit()
+
+        def close(self):
+            self.conn.close()
+
+    c = DB()
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS consumo(
+            id BIGSERIAL PRIMARY KEY,
+            data TEXT NOT NULL,
+            refeicao TEXT NOT NULL,
+            alimento_id INTEGER,
+            alimento_nome TEXT NOT NULL,
+            quantidade_g REAL NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS hidratacao(
+            id BIGSERIAL PRIMARY KEY,
+            data TEXT NOT NULL,
+            hora TEXT NOT NULL,
+            quantidade_ml REAL NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS metas(
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            calorias_kcal REAL,
+            proteina_g REAL,
+            carboidratos_g REAL,
+            gorduras_g REAL,
+            fibras_g REAL,
+            sodio_mg REAL,
+            agua_ml REAL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS perfil(
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            nome TEXT NOT NULL DEFAULT '',
+            idade INTEGER,
+            sexo TEXT,
+            peso_kg REAL,
+            altura_cm REAL,
+            atividade TEXT,
+            objetivo TEXT,
+            peso_meta_kg REAL,
+            ritmo_kg_semana REAL
+        )
+    """)
+
+    prow = c.execute(
+        "SELECT id FROM perfil WHERE id=1"
+    ).fetchone()
+
     if not prow:
-        c.execute("INSERT INTO perfil(id,nome) VALUES(1,'')")
+        c.execute(
+            "INSERT INTO perfil(id,nome) VALUES(1,'')"
+        )
+
     # Migração segura para bancos já existentes.
-    pcols=[r["name"] for r in c.execute("PRAGMA table_info(perfil)").fetchall()]
-    for col,typ in [("idade","INTEGER"),("sexo","TEXT"),("peso_kg","REAL"),("altura_cm","REAL"),("atividade","TEXT"),("objetivo","TEXT"),("peso_meta_kg","REAL"),("ritmo_kg_semana","REAL")]:
+    pcols = [
+        r["column_name"]
+        for r in c.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name='perfil'
+        """).fetchall()
+    ]
+
+    for col, typ in [
+        ("idade", "INTEGER"),
+        ("sexo", "TEXT"),
+        ("peso_kg", "REAL"),
+        ("altura_cm", "REAL"),
+        ("atividade", "TEXT"),
+        ("objetivo", "TEXT"),
+        ("peso_meta_kg", "REAL"),
+        ("ritmo_kg_semana", "REAL")
+    ]:
         if col not in pcols:
-            c.execute(f"ALTER TABLE perfil ADD COLUMN {col} {typ}")
-    row=c.execute("SELECT id FROM metas WHERE id=1").fetchone()
+            c.execute(
+                f"ALTER TABLE perfil ADD COLUMN {col} {typ}"
+            )
+
+    row = c.execute(
+        "SELECT id FROM metas WHERE id=1"
+    ).fetchone()
+
     if not row:
-        c.execute("INSERT INTO metas(id,calorias_kcal,proteina_g,carboidratos_g,gorduras_g,fibras_g,sodio_mg,agua_ml) VALUES(1,2300,180,220,70,30,2000,4000)")
-    c.commit();return c
+        c.execute("""
+            INSERT INTO metas(
+                id,
+                calorias_kcal,
+                proteina_g,
+                carboidratos_g,
+                gorduras_g,
+                fibras_g,
+                sodio_mg,
+                agua_ml
+            )
+            VALUES(1,2300,180,220,70,30,2000,4000)
+        """)
+
+    c.commit()
+    return c
 def calc(rows):
     t={x[0]:0.0 for x in NUTS};c=ndb()
     try:
