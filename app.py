@@ -1270,4 +1270,3 @@ if __name__=="__main__":
     if not NUT.exists(): print("ERRO: banco_nutrientes.db não encontrado.");input("ENTER para sair...");raise SystemExit
     print("V27 MOBILE iniciado.");print("No PC: http://127.0.0.1:5000");print("Para encerrar: Ctrl+C")
     ThreadingHTTPServer((HOST,PORT),H).serve_forever()
-
