@@ -1,6 +1,0 @@
-diario_alimentar.db
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-.env

@@ -5,8 +5,13 @@ from urllib.parse import urlparse, parse_qs
 import sqlite3, json
 import psycopg
 from psycopg.rows import dict_row
-from datetime import date
+from datetime import date, datetime, timedelta
 import os
+import base64, hashlib, hmac, secrets, csv, io, re, math
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 BASE = Path(__file__).resolve().parent
 
@@ -15,6 +20,10 @@ DIA = BASE / "diario_alimentar.db"
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 5000))
+SESSION_COOKIE = "diario_session"
+SESSION_DAYS = 30
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-only-change-this-secret")
+VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
 
 MEALS = ["Café da manhã", "Almoço", "Lanche", "Jantar", "Ceia"]
 
@@ -98,7 +107,8 @@ def ddb():
             gorduras_g REAL,
             fibras_g REAL,
             sodio_mg REAL,
-            agua_ml REAL
+            agua_ml REAL,
+            manual_override BOOLEAN NOT NULL DEFAULT FALSE
         )
     """)
 
@@ -116,6 +126,88 @@ def ddb():
             ritmo_kg_semana REAL
         )
     """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios(
+            id BIGSERIAL PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            senha_hash TEXT NOT NULL,
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS sessoes(
+            id BIGSERIAL PRIMARY KEY,
+            usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            token_hash TEXT NOT NULL UNIQUE,
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expira_em TIMESTAMPTZ NOT NULL
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS perfis(
+            usuario_id BIGINT PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
+            nome TEXT NOT NULL DEFAULT '', idade INTEGER, sexo TEXT, peso_kg REAL,
+            altura_cm REAL, atividade TEXT, objetivo TEXT, peso_meta_kg REAL,
+            ritmo_kg_semana REAL
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS metas_usuario(
+            usuario_id BIGINT PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
+            calorias_kcal REAL NOT NULL DEFAULT 2300,
+            proteina_g REAL NOT NULL DEFAULT 180,
+            carboidratos_g REAL NOT NULL DEFAULT 220,
+            gorduras_g REAL NOT NULL DEFAULT 70,
+            fibras_g REAL NOT NULL DEFAULT 30,
+            sodio_mg REAL NOT NULL DEFAULT 2000,
+            agua_ml REAL NOT NULL DEFAULT 4000,
+            manual_override BOOLEAN NOT NULL DEFAULT FALSE,
+            atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS favoritos(
+            id BIGSERIAL PRIMARY KEY,
+            usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            alimento_id INTEGER NOT NULL, alimento_nome TEXT NOT NULL,
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(usuario_id, alimento_id)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS porcoes(
+            id BIGSERIAL PRIMARY KEY,
+            usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            alimento_id INTEGER NOT NULL, alimento_nome TEXT NOT NULL,
+            nome TEXT NOT NULL, quantidade_g REAL NOT NULL,
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(usuario_id, alimento_id, nome)
+        )
+    """)
+    for table in ("consumo", "hidratacao"):
+        exists = c.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name=? AND column_name='usuario_id'
+        """, (table,)).fetchone()
+        if not exists:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN usuario_id BIGINT")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_consumo_usuario_data ON consumo(usuario_id, data)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_hidratacao_usuario_data ON hidratacao(usuario_id, data)")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS alimentos_usuario(
+            id BIGSERIAL PRIMARY KEY,
+            usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            nome TEXT NOT NULL,
+            energia_kcal REAL, proteina_g REAL, carboidrato_g REAL,
+            lipidios_g REAL, fibra_g REAL, colesterol_mg REAL,
+            calcio_mg REAL, magnesio_mg REAL, fosforo_mg REAL, ferro_mg REAL,
+            sodio_mg REAL, potassio_mg REAL, zinco_mg REAL, vitamina_c_mg REAL,
+            porcao_valor REAL, porcao_unidade TEXT, base_calculo TEXT DEFAULT '100g',
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(), atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_alimentos_usuario_nome ON alimentos_usuario(usuario_id, nome)")
 
     prow = c.execute(
         "SELECT id FROM perfil WHERE id=1"
@@ -151,6 +243,18 @@ def ddb():
                 f"ALTER TABLE perfil ADD COLUMN {col} {typ}"
             )
 
+    # Migração para registrar quando as metas foram alteradas manualmente.
+    mcols = [
+        r["column_name"]
+        for r in c.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name='metas'
+        """).fetchall()
+    ]
+    if "manual_override" not in mcols:
+        c.execute("ALTER TABLE metas ADD COLUMN manual_override BOOLEAN NOT NULL DEFAULT FALSE")
+
     row = c.execute(
         "SELECT id FROM metas WHERE id=1"
     ).fetchone()
@@ -172,16 +276,82 @@ def ddb():
 
     c.commit()
     return c
-def calc(rows):
-    t={x[0]:0.0 for x in NUTS};c=ndb()
+def _hash_password(password):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode('utf-8'), salt=salt, n=2**14, r=8, p=1)
+    return base64.urlsafe_b64encode(salt + digest).decode('ascii')
+
+def _verify_password(password, encoded):
     try:
+        raw = base64.urlsafe_b64decode(encoded.encode('ascii'))
+        salt, expected = raw[:16], raw[16:]
+        actual = hashlib.scrypt(password.encode('utf-8'), salt=salt, n=2**14, r=8, p=1)
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+def _token_hash(token):
+    return hmac.new(SESSION_SECRET.encode('utf-8'), token.encode('utf-8'), hashlib.sha256).hexdigest()
+
+def _cookie_value(handler, name):
+    raw = handler.headers.get('Cookie', '')
+    for piece in raw.split(';'):
+        key, _, value = piece.strip().partition('=')
+        if key == name:
+            return value
+    return ''
+
+def _ensure_user_records(c, user_id, migrate_legacy=False):
+    legacy_profile = c.execute('SELECT * FROM perfil WHERE id=1').fetchone() if migrate_legacy else None
+    legacy_goals = c.execute('SELECT * FROM metas WHERE id=1').fetchone() if migrate_legacy else None
+    if migrate_legacy:
+        c.execute('UPDATE consumo SET usuario_id=? WHERE usuario_id IS NULL', (user_id,))
+        c.execute('UPDATE hidratacao SET usuario_id=? WHERE usuario_id IS NULL', (user_id,))
+    p = legacy_profile or {}
+    c.execute('''INSERT INTO perfis(usuario_id,nome,idade,sexo,peso_kg,altura_cm,atividade,objetivo,peso_meta_kg,ritmo_kg_semana)
+                 VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(usuario_id) DO NOTHING''',
+              (user_id, p.get('nome',''), p.get('idade'), p.get('sexo'), p.get('peso_kg'),
+               p.get('altura_cm'), p.get('atividade'), p.get('objetivo'), p.get('peso_meta_kg'),
+               p.get('ritmo_kg_semana')))
+    g = legacy_goals or {}
+    c.execute('''INSERT INTO metas_usuario(usuario_id,calorias_kcal,proteina_g,carboidratos_g,gorduras_g,fibras_g,sodio_mg,agua_ml,manual_override)
+                 VALUES(?,?,?,?,?,?,?,?,FALSE) ON CONFLICT(usuario_id) DO NOTHING''',
+              (user_id, g.get('calorias_kcal',2300), g.get('proteina_g',180), g.get('carboidratos_g',220),
+               g.get('gorduras_g',70), g.get('fibras_g',30), g.get('sodio_mg',2000), g.get('agua_ml',4000)))
+
+def _current_user(handler):
+    token = _cookie_value(handler, SESSION_COOKIE)
+    if not token:
+        return None
+    c = ddb()
+    try:
+        row = c.execute('''SELECT u.id, u.email FROM sessoes s JOIN usuarios u ON u.id=s.usuario_id
+                           WHERE s.token_hash=? AND s.expira_em>NOW()''', (_token_hash(token),)).fetchone()
+        return dict(row) if row else None
+    finally:
+        c.close()
+
+def _session_cookie(token, max_age=SESSION_DAYS*86400):
+    secure = '; Secure' if os.environ.get('RENDER') else ''
+    return f'{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'
+
+def calc(rows,user_id=None):
+    t={x[0]:0.0 for x in NUTS};nc=ndb();pc=None
+    try:
+        if user_id is not None: pc=ddb()
         for r in rows:
-            f=c.execute("SELECT * FROM alimentos WHERE id=?",(r["alimento_id"],)).fetchone()
+            aid=int(r["alimento_id"])
+            if aid<0 and pc:
+                f=pc.execute("SELECT * FROM alimentos_usuario WHERE id=? AND usuario_id=?",(-aid,user_id)).fetchone()
+            else:
+                f=nc.execute("SELECT * FROM alimentos WHERE id=?",(aid,)).fetchone()
             if not f:continue
             z=float(r["quantidade_g"])/100
             for k,_,_ in NUTS:
                 if k in f.keys() and f[k] is not None:t[k]+=float(f[k])*z
-    finally:c.close()
+    finally:
+        nc.close()
+        if pc:pc.close()
     return t
 
 HTML=r"""
@@ -392,7 +562,7 @@ main{
 #nutrientTooltip .tipVal{color:#b9c9d8;white-space:nowrap}
 #nutrientTooltip .tipEmpty{color:#aab8c7}
 </style></head><body>
-<header><div class="headrow"><div><h1 id="appTitle">V38 · Diário Alimentar</h1><p id="greeting">Alimentação, nutrientes e histórico</p></div><button class="profileBtn" onclick="openProfile()">👤 Perfil</button></div></header>
+<div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V38 · Diário Alimentar</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
 <main>
 <section class="hero">
   <div class="heroTop">
@@ -421,6 +591,8 @@ main{
 <input id="search" class="search" placeholder="Digite o nome do alimento..."><div id="foods" class="foods"></div>
 <div class="add"><input id="weight" type="number" value="100" min="0.1" step="0.1"><button onclick="add()">ADICIONAR</button></div>
 <div id="sel" class="sel">Nenhum alimento selecionado.</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:9px"><button onclick="favoriteChosen()" style="flex:1;padding:10px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">☆ FAVORITO</button><button onclick="savePortion()" style="flex:1;padding:10px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">💾 SALVAR PORÇÃO</button></div>
+<div id="personalLists" style="margin-top:10px"></div>
 <button id="newBase" style="display:none;margin-top:9px;width:100%;padding:11px;border:1px solid #111827;border-radius:10px;background:#111827;color:white;font-weight:bold" onclick="openNewFood()">NOVO ALIMENTO</button>
 <button id="editBase" style="display:none;margin-top:9px;width:100%;padding:11px;border:1px solid #ddd;border-radius:10px;background:white;font-weight:bold" onclick="openFoodEditor()">EDITAR ALIMENTO DA BASE</button></div>
 <div class="card" id="consumedFoodsCard">
@@ -459,9 +631,8 @@ main{
 <button onclick="addWater(1000)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 1 L</button>
 <button onclick="customWater()" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">✏️ Outra</button></div></div>
 <div class="card"><h2>📅 Acumulado do período</h2>
-<button onclick="openPeriod()" style="width:100%;padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:16px">
-📅 VER ACUMULADO DO PERÍODO
-</button></div>
+<button onclick="openPeriod()" style="width:100%;padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:16px">📅 VER ACUMULADO DO PERÍODO</button>
+<button onclick="exportDay()" style="width:100%;padding:12px;margin-top:8px;border:1px solid #ffffff30;border-radius:12px;background:#16263a;color:#fff;font-weight:bold;font-size:14px">⬇️ EXPORTAR DIÁRIO EM CSV</button></div>
 </main>
 <div id="nutrientTooltip"></div>
 
@@ -531,13 +702,15 @@ main{
       <button onclick="closeSummary()" style="border:1px solid #475569;background:#1e293b;color:#f8fafc;border-radius:10px;padding:8px 12px;font-size:18px">✕</button>
     </div>
     <div style="font-size:12px;color:#cbd5e1;margin:6px 0 12px">Acumulado registrado até este momento.</div>
+    <div id="goalModeNotice" style="font-size:12px;color:#9fe6b0;margin:6px 0 12px"></div>
     <div id="summaryContent"></div>
     <hr style="border:0;border-top:1px solid #334155;margin:16px 0">
     <h2>🎯 Metas diárias</h2>
     <div id="goalForm" class="metrics"></div>
     <div style="display:flex;gap:8px;margin-top:14px">
       <button onclick="closeSummary()" style="flex:1;padding:12px;border:1px solid #475569;border-radius:10px;background:#1e293b;color:#f8fafc">FECHAR</button>
-      <button onclick="saveGoals()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#111827;color:#fff;font-weight:bold">SALVAR METAS</button>
+      <button onclick="saveGoals()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#111827;color:#fff;font-weight:bold">SALVAR METAS MANUAIS</button>
+      <button onclick="applyCalculatedGoals()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22a447;color:#06210f;font-weight:bold">USAR CÁLCULO DO PERFIL</button>
     </div>
   </div>
 </div>
@@ -568,6 +741,7 @@ main{
 
     <div id="periodInfo" style="margin-top:12px"></div>
     <div id="periodContent"></div>
+    <div id="historyChart" style="margin-top:14px"></div>
 
     <div style="display:flex;gap:8px;margin-top:14px">
       <button onclick="closePeriod()" style="flex:1;padding:12px;border:1px solid #475569;border-radius:10px;background:#1e293b;color:#f8fafc">FECHAR</button>
@@ -747,8 +921,11 @@ async function saveProfile(){
     objetivo:document.getElementById('profileGoal').value
   };
   await api('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-  const goals=window.profileCalculatedGoals||calculateProfileGoals();
-  if(goals) await api('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(goals)});
+  const currentGoals=await api('/api/goals');
+  if(!currentGoals.manual_override){
+    const goals=calculateProfileGoals();
+    if(goals) await api('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...goals,manual_override:false})});
+  }
   profileName=name;
   renderProfileGreeting();
   closeProfile();
@@ -770,6 +947,12 @@ function fmt(x){return Number(x||0).toLocaleString("pt-BR",{minimumFractionDigit
 function escAttr(s){return String(s).replace(/&/g,'&amp;').replace(/\"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 async function api(u,o={}){let r=await fetch(u,o),j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}
+function setAuthStatus(msg){const el=document.getElementById("authStatus");if(el)el.textContent=msg||""}
+function showApp(user){document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>refresh())}
+async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user)}catch(e){setAuthStatus(e.message)}}
+async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user)}catch(e){setAuthStatus(e.message)}}
+async function logout(){await fetch("/api/auth/logout");location.reload()}
+async function bootstrap(){const j=await fetch("/api/me").then(r=>r.json());if(j.authenticated)showApp(j.user);else document.getElementById("authScreen").style.display="flex"}
 function mealsUI(){const icons={"Café da manhã":"☕","Almoço":"🍽️","Lanche":"🥪","Jantar":"🍴","Ceia":"🌙"};mealsEl.innerHTML=meals.map(m=>"<button class='"+(m==meal?"on":"")+"' onclick='meal="+JSON.stringify(m)+";mealsUI();refresh()'>"+icons[m]+" "+m+"</button>").join("");pm.textContent=icons[meal]+" "+meal}
 async function search(){
   const q=searchEl.value.trim();
@@ -790,14 +973,40 @@ function selectFood(f){
   chosen=f;
   sel.textContent="Selecionado: "+f.nome;
   foods.innerHTML="";
-  document.getElementById("editBase").style.display="block";
+  const edit=document.getElementById("editBase");edit.style.display="block";edit.disabled=Number(f.id)>=0;edit.textContent=Number(f.id)<0?"EDITAR MEU ALIMENTO":"BASE COMPARTILHADA · SOMENTE LEITURA";edit.style.opacity=Number(f.id)<0?"1":".65";
   document.getElementById("newBase").style.display="none";
 }
+async function favoriteChosen(){
+  if(!chosen){alert("Selecione um alimento primeiro.");return}
+  try{await api("/api/favorite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({alimento_id:chosen.id,alimento_nome:chosen.nome})});await loadPersonalLists();alert("Alimento salvo nos favoritos.")}catch(e){alert(e.message)}
+}
+async function savePortion(){
+  if(!chosen){alert("Selecione um alimento primeiro.");return}
+  const nome=prompt("Nome da porção (ex.: 1 colher, 1 fatia):","Porção habitual");if(nome===null)return;
+  const q=Number(document.getElementById("weight").value);if(!(q>0)){alert("Informe uma quantidade válida.");return}
+  try{await api("/api/portion",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({alimento_id:chosen.id,alimento_nome:chosen.nome,nome,quantidade_g:q})});await loadPersonalLists();alert("Porção salva.")}catch(e){alert(e.message)}
+}
+async function loadPersonalLists(){
+  const box=document.getElementById("personalLists");if(!box)return;
+  try{const [fav,port]=await Promise.all([api("/api/favorites"),api("/api/portions")]);
+    const fhtml=fav.length?`<div style="font-size:12px;font-weight:bold;margin:8px 0 4px">⭐ Favoritos</div>`+fav.map(f=>`<button onclick='selectFood(${JSON.stringify({id:f.alimento_id,nome:f.alimento_nome})})' style="margin:3px;padding:7px 9px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff">${esc(f.alimento_nome)}</button>`).join(""):"";
+    const phtml=port.length?`<div style="font-size:12px;font-weight:bold;margin:8px 0 4px">💾 Porções salvas</div>`+port.map(p=>`<button onclick='selectFood(${JSON.stringify({id:p.alimento_id,nome:p.alimento_nome})});document.getElementById("weight").value=${Number(p.quantidade_g)||0}' style="margin:3px;padding:7px 9px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff">${esc(p.alimento_nome)} · ${esc(p.nome)} (${fmt(p.quantidade_g)} g)</button>`).join(""):"";
+    box.innerHTML=fhtml+phtml;
+  }catch(e){box.innerHTML=""}
+}
+function exportDay(){const d=day.value||isoDate(new Date());location.href="/api/export?start="+encodeURIComponent(d)+"&end="+encodeURIComponent(d)}
 const editFields=[["nome","Nome","text"],["energia_kcal","Calorias (kcal)","number"],["proteina_g","Proteína (g)","number"],["carboidrato_g","Carboidratos (g)","number"],["lipidios_g","Gorduras (g)","number"],["fibra_g","Fibras (g)","number"],["colesterol_mg","Colesterol (mg)","number"],["calcio_mg","Cálcio (mg)","number"],["magnesio_mg","Magnésio (mg)","number"],["fosforo_mg","Fósforo (mg)","number"],["ferro_mg","Ferro (mg)","number"],["sodio_mg","Sódio (mg)","number"],["potassio_mg","Potássio (mg)","number"],["zinco_mg","Zinco (mg)","number"],["vitamina_c_mg","Vitamina C (mg)","number"]];
 
+async function resizePhoto(file){
+  return await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>{const img=new Image();img.onload=()=>{const max=1600,scale=Math.min(1,max/Math.max(img.width,img.height)),cv=document.createElement("canvas");cv.width=Math.round(img.width*scale);cv.height=Math.round(img.height*scale);cv.getContext("2d").drawImage(img,0,0,cv.width,cv.height);resolve(cv.toDataURL("image/jpeg",.82))};img.onerror=reject;img.src=r.result};r.onerror=reject;r.readAsDataURL(file)})
+}
+async function readNutritionPhoto(){
+  const input=document.getElementById("nutritionPhoto"),status=document.getElementById("photoStatus");if(!input?.files?.[0]){alert("Escolha ou fotografe a tabela nutricional.");return}
+  try{status.textContent="Lendo a fotografia...";const image_data=await resizePhoto(input.files[0]);const j=await api("/api/read_nutrition_label",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image_data})});const d=j.data||{};for(const x of editFields){const el=document.getElementById("nf_"+x[0]);if(el&&d[x[0]]!==null&&d[x[0]]!==undefined)el.value=d[x[0]]}if(d.nome)document.getElementById("nf_nome").value=d.nome;status.textContent=(d.base_calculo&&d.base_calculo!=="100g"?"Confira a base de cálculo: "+d.base_calculo+". ":"")+"Confira todos os campos antes de salvar."}catch(e){status.textContent="";alert(e.message)}
+}
 function openNewFood(){
   const form=document.getElementById("newFoodForm");
-  form.innerHTML=editFields.map(x=>{
+  form.innerHTML="<div style='padding:10px;background:#eff6ff;border-radius:10px;margin-bottom:10px'><b>📷 Ler tabela nutricional</b><input id='nutritionPhoto' type='file' accept='image/*' capture='environment' style='display:block;margin-top:7px;width:100%'><button onclick='readNutritionPhoto()' style='margin-top:7px;padding:9px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:bold'>LER FOTO E PREENCHER</button><div id='photoStatus' style='font-size:12px;margin-top:6px;color:#334155'>A leitura preenche os campos, mas o salvamento só ocorre após sua conferência.</div></div>"+editFields.map(x=>{
     return "<label style='display:block;margin:9px 0;font-size:13px;font-weight:bold'>"+
       x[1]+"<input id='nf_"+x[0]+"' type='"+x[2]+"' "+
       (x[2]=="number"?"step='0.01'":"")+
@@ -827,6 +1036,7 @@ async function saveNewFood(){
 
 async function openFoodEditor(){
   if(!chosen){alert("Selecione um alimento primeiro.");return}
+  if(Number(chosen.id)>=0){alert("A base nutricional compartilhada é somente leitura. Cadastre uma versão personalizada se precisar alterá-la.");return}
   try{
     let j=await api("/api/food/"+chosen.id);
     let f=j.food;
@@ -974,9 +1184,18 @@ async function drawWater(w,goal){
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
 async function addWater(ml){try{await api("/api/water",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,quantidade_ml:ml})});await refresh();}catch(e){alert("Não foi possível registrar a água: "+e.message)}}
 async function customWater(){let v=prompt("Quantidade de água em ml:","500");if(v===null)return;let ml=Number(v);if(!(ml>0)){alert("Quantidade inválida.");return}await addWater(ml)}
-async function openSummary(){let j=await api("/api/summary?data="+day.value);let a=[['energia_kcal','calorias_kcal','🔥 Calorias','kcal'],['proteina_g','proteina_g','💪 Proteína','g'],['carboidrato_g','carboidratos_g','🍚 Carboidratos','g'],['lipidios_g','gorduras_g','🥑 Gorduras','g'],['fibra_g','fibras_g','🌱 Fibras','g'],['sodio_mg','sodio_mg','🧂 Sódio','mg']];document.getElementById("summaryContent").innerHTML=a.map(x=>{let v=Number(j.daily[x[0]]||0),m=Number(j.goals[x[1]]||0),p=pct(v,m),left=Math.max(0,m-v);return `<div class="metric nutrient-source" data-nutrient="${x[0]}" data-start="${day.value}" data-end="${day.value}" style="margin-bottom:8px"><small>${x[2]} ⓘ</small><b>${fmt(v)} / ${fmt(m)} ${x[3]}</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${p}%;background:#22a447"></div></div><small>${m>0?(x[1]==='sodio_mg'?'Restam ':'Faltam ')+fmt(left)+' '+x[3]:''}</small></div>`}).join('')+`<div class="metric"><small>💧 Água</small><b>${fmt(j.water/1000)} / ${fmt(Number(j.goals.agua_ml||0)/1000)} L</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${pct(j.water,Number(j.goals.agua_ml||0))}%;background:#1683ff"></div></div><small>${Number(j.goals.agua_ml||0)>0?fmt(Math.max(0,Number(j.goals.agua_ml)-Number(j.water))/1000)+' L restantes':''}</small></div>`;document.getElementById("goalForm").innerHTML=[['calorias_kcal','🔥 Calorias','kcal'],['proteina_g','💪 Proteína','g'],['carboidratos_g','🍚 Carboidratos','g'],['gorduras_g','🥑 Gorduras','g'],['fibras_g','🌱 Fibras','g'],['sodio_mg','🧂 Sódio','mg'],['agua_ml','💧 Água','ml']].map(x=>`<div class="metric"><small>${x[1]}</small><input id="g_${x[0]}" type="number" step="0.01" value="${j.goals[x[0]]??''}" style="width:100%;padding:9px;border:1px solid #ddd;border-radius:8px"><small>${x[2]}</small></div>`).join('');document.getElementById("summaryModal").style.display="block"}
+async function openSummary(){let j=await api("/api/summary?data="+day.value);document.getElementById("goalModeNotice").textContent=j.goals.manual_override?"As metas atuais foram ajustadas manualmente e não serão substituídas ao salvar o perfil ou recalcular os dados.":"As metas atuais estão no modo automático e podem ser atualizadas pelo cálculo do perfil.";let a=[['energia_kcal','calorias_kcal','🔥 Calorias','kcal'],['proteina_g','proteina_g','💪 Proteína','g'],['carboidrato_g','carboidratos_g','🍚 Carboidratos','g'],['lipidios_g','gorduras_g','🥑 Gorduras','g'],['fibra_g','fibras_g','🌱 Fibras','g'],['sodio_mg','sodio_mg','🧂 Sódio','mg']];document.getElementById("summaryContent").innerHTML=a.map(x=>{let v=Number(j.daily[x[0]]||0),m=Number(j.goals[x[1]]||0),p=pct(v,m),left=Math.max(0,m-v);return `<div class="metric nutrient-source" data-nutrient="${x[0]}" data-start="${day.value}" data-end="${day.value}" style="margin-bottom:8px"><small>${x[2]} ⓘ</small><b>${fmt(v)} / ${fmt(m)} ${x[3]}</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${p}%;background:#22a447"></div></div><small>${m>0?(x[1]==='sodio_mg'?'Restam ':'Faltam ')+fmt(left)+' '+x[3]:''}</small></div>`}).join('')+`<div class="metric"><small>💧 Água</small><b>${fmt(j.water/1000)} / ${fmt(Number(j.goals.agua_ml||0)/1000)} L</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${pct(j.water,Number(j.goals.agua_ml||0))}%;background:#1683ff"></div></div><small>${Number(j.goals.agua_ml||0)>0?fmt(Math.max(0,Number(j.goals.agua_ml)-Number(j.water))/1000)+' L restantes':''}</small></div>`;document.getElementById("goalForm").innerHTML=[['calorias_kcal','🔥 Calorias','kcal'],['proteina_g','💪 Proteína','g'],['carboidratos_g','🍚 Carboidratos','g'],['gorduras_g','🥑 Gorduras','g'],['fibras_g','🌱 Fibras','g'],['sodio_mg','🧂 Sódio','mg'],['agua_ml','💧 Água','ml']].map(x=>`<div class="metric"><small>${x[1]}</small><input id="g_${x[0]}" type="number" step="0.01" value="${j.goals[x[0]]??''}" style="width:100%;padding:9px;border:1px solid #ddd;border-radius:8px"><small>${x[2]}</small></div>`).join('');document.getElementById("summaryModal").style.display="block"}
 function closeSummary(){document.getElementById("summaryModal").style.display="none"}
-async function saveGoals(){let d={};for(const k of ['calorias_kcal','proteina_g','carboidratos_g','gorduras_g','fibras_g','sodio_mg','agua_ml'])d[k]=Number(document.getElementById('g_'+k).value)||0;await api('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});await refresh();await openSummary();alert('Metas salvas.')}
+async function saveGoals(){let d={manual_override:true};for(const k of ['calorias_kcal','proteina_g','carboidratos_g','gorduras_g','fibras_g','sodio_mg','agua_ml'])d[k]=Number(document.getElementById('g_'+k).value)||0;await api('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});await refresh();await openSummary();alert('Metas manuais salvas.')}
+async function applyCalculatedGoals(){
+  if(!confirm('Aplicar novamente as metas calculadas com base no perfil atual? Isso substituirá os valores manuais.'))return;
+  const goals=calculateProfileGoals();
+  if(!goals)return;
+  await api('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...goals,manual_override:false})});
+  await refresh();
+  await openSummary();
+  alert('Metas calculadas aplicadas.');
+}
 
 function isoDate(d){
   const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');
@@ -996,6 +1215,10 @@ function openPeriod(){
   loadPeriod();
 }
 function closePeriod(){document.getElementById("periodModal").style.display="none";}
+async function loadHistory(start,end){
+  const box=document.getElementById("historyChart");if(!box)return;
+  try{const j=await api("/api/history?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end));const max=Math.max(1,...j.days.map(x=>Number(x.energia_kcal||0)));box.innerHTML="<h3 style='margin:8px 0'>📈 Evolução diária</h3>"+`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div><small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"}catch(e){box.innerHTML=""}
+}
 function periodCard(key,label,icon,total,goal,unit,days,limit=false,start, end){
   total=Number(total||0);goal=Number(goal||0);
   const avg=days>0?total/days:0;
@@ -1044,6 +1267,7 @@ async function loadPeriod(){
           ["piridoxina_mg","B6","mg"],["colesterol_mg","Colesterol","mg"]
         ].map(x=>`<div class="metric nutrient-source" data-nutrient="${x[0]}" data-start="${j.start}" data-end="${j.end}"><small>${x[1]} ⓘ</small><b>${fmt(j.daily[x[0]])} ${x[2]}</b><small>Média: ${fmt(Number(j.daily[x[0]]||0)/days)} ${x[2]}/dia</small></div>`).join("")}</div>
       </details>`;
+    loadHistory(s,e);
   }catch(err){alert("Não foi possível carregar o período: "+err.message);}
 }
 
@@ -1059,19 +1283,47 @@ function draw(el,t){
 async function del(id){if(confirm("Excluir este alimento?")){await api("/api/consume/"+id,{method:"DELETE"});refresh()}}
 async function edit(id){let j=await api("/api/consume/"+id),x=j.item;let w=prompt("Peso em gramas:",x.quantidade_g);if(w===null)return;let r=prompt("Refeição:",x.refeicao);if(r===null)return;if(!meals.includes(r)||Number(w)<=0){alert("Dados inválidos.");return}await api("/api/consume/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({quantidade_g:Number(w),refeicao:r})});refresh()}
 const searchEl=document.getElementById("search"),foods=document.getElementById("foods"),items=document.getElementById("items"),partial=document.getElementById("partial"),daily=document.getElementById("daily"),sel=document.getElementById("sel"),mealsEl=document.getElementById("meals"),pm=document.getElementById("pm");
-searchEl.oninput=()=>{clearTimeout(timer);timer=setTimeout(search,120)};mealsUI();Promise.all([loadProfile(),refresh()]).then(()=>refresh());
+searchEl.oninput=()=>{clearTimeout(timer);timer=setTimeout(search,120)};bootstrap();
 </script></body></html>
 """
 
 class H(BaseHTTPRequestHandler):
-    def js(self,o,s=200):
-        b=json.dumps(o,ensure_ascii=False).encode();self.send_response(s);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b)
+    def js(self,o,s=200,headers=None):
+        b=json.dumps(o,ensure_ascii=False).encode();self.send_response(s);self.send_header("Content-Type", "application/json; charset=utf-8");self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");self.send_header("Content-Length",str(len(b)));
+        for k,v in (headers or {}).items(): self.send_header(k,v)
+        self.end_headers();self.wfile.write(b)
     def body(self):
         return json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))).decode() or "{}")
+    def require_user(self):
+        user=_current_user(self)
+        if not user:
+            self.js({"error":"Autenticação necessária"},401)
+            return None
+        c=ddb()
+        try:
+            _ensure_user_records(c,user["id"])
+            c.commit()
+        finally:
+            c.close()
+        self.user=user
+        return user
     def do_GET(self):
         p=urlparse(self.path)
         if p.path=="/":
             b=HTML.encode();self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");self.send_header("Pragma","no-cache");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
+        if p.path=="/health":
+            self.send_response(200);self.send_header("Content-Type","text/plain; charset=utf-8");self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(b"ok");return
+        if p.path=="/api/me":
+            user=_current_user(self)
+            if user:self.js({"authenticated":True,"user":user})
+            else:self.js({"authenticated":False})
+            return
+        if p.path=="/api/auth/logout":
+            token=_cookie_value(self,SESSION_COOKIE);c=ddb()
+            try:
+                if token:c.execute("DELETE FROM sessoes WHERE token_hash=?",(_token_hash(token),));c.commit()
+            finally:c.close()
+            self.js({"ok":True},headers={"Set-Cookie":_session_cookie("",0)});return
         if p.path=="/a_wide_high_resolution_panoramic_landscape_photo.png":
             img=BASE/"a_wide_high_resolution_panoramic_landscape_photo.png"
             if not img.exists():
@@ -1085,45 +1337,63 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(b)
             return
 
+        user=self.require_user()
+        if not user:return
+
         if p.path=="/api/profile":
             c=ddb()
-            try:r=c.execute("SELECT * FROM perfil WHERE id=1").fetchone()
+            try:r=c.execute("SELECT * FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
             self.js(dict(r) if r else {"nome":""})
             return
 
-        if p.path=="/api/foods":
-            q=parse_qs(p.query).get("q",[""])[0].lower();c=ndb()
-            try:r=c.execute("SELECT id,nome FROM alimentos WHERE lower(nome) LIKE ? ORDER BY nome LIMIT 50",(f"%{q}%",)).fetchall() if q else []
+        if p.path=="/api/goals":
+            c=ddb()
+            try:g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
-            self.js({"foods":[dict(x) for x in r]});return
+            self.js(dict(g) if g else {})
+            return
+
+        if p.path=="/api/foods":
+            q=parse_qs(p.query).get("q",[""])[0].lower()
+            if not q:self.js({"foods":[]});return
+            nc=ndb();pc=ddb()
+            try:
+                base=nc.execute("SELECT id,nome FROM alimentos WHERE lower(nome) LIKE ? ORDER BY nome LIMIT 50",(f"%{q}%",)).fetchall()
+                own=pc.execute("SELECT -id AS id,nome FROM alimentos_usuario WHERE usuario_id=? AND lower(nome) LIKE ? ORDER BY nome LIMIT 50",(self.user["id"],f"%{q}%")).fetchall()
+            finally:
+                nc.close();pc.close()
+            self.js({"foods":[dict(x) for x in list(own)+list(base)]});return
         if p.path=="/api/day":
             q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];m=q.get("refeicao",[MEALS[0]])[0];c=ddb()
-            try:rows=c.execute("SELECT * FROM consumo WHERE data=? ORDER BY id",(d,)).fetchall()
+            try:rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=? ORDER BY id",(self.user["id"],d,)).fetchall()
             finally:c.close()
-            c=ndb();items=[]
+            nc=ndb();pc=ddb();items=[]
             try:
                 for x in rows:
-                    f=c.execute("SELECT energia_kcal FROM alimentos WHERE id=?",(x["alimento_id"],)).fetchone();z=x["quantidade_g"]/100
+                    aid=int(x["alimento_id"])
+                    f=pc.execute("SELECT energia_kcal FROM alimentos_usuario WHERE id=? AND usuario_id=?",(-aid,self.user["id"])).fetchone() if aid<0 else nc.execute("SELECT energia_kcal FROM alimentos WHERE id=?",(aid,)).fetchone()
+                    z=x["quantidade_g"]/100
                     items.append({"id":x["id"],"refeicao":x["refeicao"],"alimento_nome":x["alimento_nome"],"quantidade_g":x["quantidade_g"],"kcal":(f["energia_kcal"] or 0)*z if f else 0})
-            finally:c.close()
-            c=ddb();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE data=?",(d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas WHERE id=1").fetchone();c.close();self.js({"items":items,"daily":calc(rows),"partial":calc([x for x in rows if x["refeicao"]==m]),"water":float(water or 0),"goals":dict(g)});return
-        if p.path.startswith("/api/food/"):
-            try:
-                food_id=int(p.path.rsplit("/",1)[1])
-            except ValueError:
-                self.js({"error":"ID inválido"},400)
-                return
-            c=ndb()
-            try:
-                row=c.execute("SELECT * FROM alimentos WHERE id=?",(food_id,)).fetchone()
-                if not row:
-                    self.js({"error":"Alimento não encontrado"},404)
-                else:
-                    self.js({"food":dict(row)})
             finally:
-                c.close()
-            return
+                nc.close();pc.close()
+            c=ddb();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone();c.close();self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"goals":dict(g)});return
+        if p.path.startswith("/api/food/"):
+            try: food_id=int(p.path.rsplit("/",1)[1])
+            except ValueError:
+                self.js({"error":"ID inválido"},400);return
+            if food_id<0:
+                c=ddb()
+                try: row=c.execute("SELECT * FROM alimentos_usuario WHERE id=? AND usuario_id=?",(-food_id,self.user["id"])).fetchone()
+                finally:c.close()
+                data=dict(row) if row else None
+                if data:data["id"]=food_id
+            else:
+                c=ndb()
+                try: row=c.execute("SELECT * FROM alimentos WHERE id=?",(food_id,)).fetchone()
+                finally:c.close()
+                data=dict(row) if row else None
+            self.js({"food":data} if data else {"error":"Alimento não encontrado"},200 if data else 404);return
 
 
         if p.path=="/api/nutrient_sources":
@@ -1135,21 +1405,35 @@ class H(BaseHTTPRequestHandler):
                 self.js({"error":"Nutriente inválido"},400);return
             c=ddb()
             try:
-                rows=c.execute("SELECT * FROM consumo WHERE data>=? AND data<=? ORDER BY data,id",(start,end)).fetchall()
+                rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
             finally:c.close()
-            c=ndb(); sources=[]
+            nc=ndb();pc=ddb();sources=[]
             try:
                 for r in rows:
-                    f=c.execute("SELECT * FROM alimentos WHERE id=?",(r["alimento_id"],)).fetchone()
+                    aid=int(r["alimento_id"]);f=pc.execute("SELECT * FROM alimentos_usuario WHERE id=? AND usuario_id=?",(-aid,self.user["id"])).fetchone() if aid<0 else nc.execute("SELECT * FROM alimentos WHERE id=?",(aid,)).fetchone()
                     if not f or nutrient not in f.keys() or f[nutrient] is None: continue
                     amount=float(f[nutrient])*float(r["quantidade_g"])/100.0
                     if abs(amount)<0.000001: continue
                     sources.append({"nome":r["alimento_nome"],"quantidade_g":float(r["quantidade_g"]),"refeicao":r["refeicao"],"data":r["data"],"valor":amount})
-            finally:c.close()
+            finally:
+                nc.close();pc.close()
             sources.sort(key=lambda x:x["valor"],reverse=True)
             self.js({"nutrient":nutrient,"total":sum(x["valor"] for x in sources),"sources":sources})
             return
 
+        if p.path=="/api/history":
+            q=parse_qs(p.query);start=q.get("start",[date.today().isoformat()])[0];end=q.get("end",[start])[0]
+            c=ddb()
+            try:
+                rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
+                waters=c.execute("SELECT data,COALESCE(SUM(quantidade_ml),0) AS water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? GROUP BY data ORDER BY data",(self.user["id"],start,end)).fetchall()
+            finally:c.close()
+            by_day={}
+            for r in rows:by_day.setdefault(r["data"],[]).append(r)
+            wmap={x["data"]:float(x["water"] or 0) for x in waters};d1=date.fromisoformat(start);d2=date.fromisoformat(end);out=[];cur=d1
+            while cur<=d2:
+                ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"]);out.append({"data":ds,"energia_kcal":t["energia_kcal"],"proteina_g":t["proteina_g"],"agua_ml":wmap.get(ds,0)});cur+=timedelta(days=1)
+            self.js({"days":out});return
         if p.path=="/api/period":
             q=parse_qs(p.query)
             start=q.get("start",[""])[0]
@@ -1161,38 +1445,138 @@ class H(BaseHTTPRequestHandler):
                 self.js({"error":"Datas inválidas"},400);return
             c=ddb()
             try:
-                rows=c.execute("SELECT * FROM consumo WHERE data>=? AND data<=? ORDER BY data,id",(start,end)).fetchall()
-                water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE data>=? AND data<=?",(start,end)).fetchone()["total_water"]
-                g=c.execute("SELECT * FROM metas WHERE id=1").fetchone()
+                rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
+                water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchone()["total_water"]
+                g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
             days=(d2-d1).days+1
             self.js({
                 "start":start,"end":end,"days":days,
                 "start_br":d1.strftime("%d/%m/%Y"),"end_br":d2.strftime("%d/%m/%Y"),
-                "daily":calc(rows),"water":float(water or 0),"goals":dict(g)
+                "daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":dict(g)
             })
             return
 
         if p.path=="/api/summary":
             q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];c=ddb()
             try:
-                rows=c.execute("SELECT * FROM consumo WHERE data=?",(d,)).fetchall();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE data=?",(d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas WHERE id=1").fetchone()
+                rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchall();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
-            self.js({"daily":calc(rows),"water":float(water or 0),"goals":dict(g)})
+            self.js({"daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":dict(g)})
             return
         if p.path=="/api/water":
             q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];c=ddb()
-            try: rows=c.execute("SELECT id,hora,quantidade_ml FROM hidratacao WHERE data=? ORDER BY id DESC",(d,)).fetchall()
+            try: rows=c.execute("SELECT id,hora,quantidade_ml FROM hidratacao WHERE usuario_id=? AND data=? ORDER BY id DESC",(self.user["id"],d,)).fetchall()
             finally:c.close()
             self.js([dict(r) for r in rows]);return
 
+        if p.path=="/api/favorites":
+            c=ddb()
+            try:r=c.execute("SELECT id,alimento_id,alimento_nome,criado_em FROM favoritos WHERE usuario_id=? ORDER BY alimento_nome",(self.user["id"],)).fetchall()
+            finally:c.close()
+            self.js([dict(x) for x in r]);return
+        if p.path=="/api/portions":
+            c=ddb()
+            try:r=c.execute("SELECT id,alimento_id,alimento_nome,nome,quantidade_g FROM porcoes WHERE usuario_id=? ORDER BY alimento_nome,nome",(self.user["id"],)).fetchall()
+            finally:c.close()
+            self.js([dict(x) for x in r]);return
+        if p.path=="/api/export":
+            q=parse_qs(p.query);start=q.get("start",[date.today().isoformat()])[0];end=q.get("end",[start])[0];c=ddb()
+            try:
+                rows=c.execute("SELECT data,refeicao,alimento_nome,quantidade_g FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
+                water=c.execute("SELECT data,hora,quantidade_ml FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
+            finally:c.close()
+            out=io.StringIO();w=csv.writer(out);w.writerow(["tipo","data","hora","refeicao","alimento","quantidade_g","quantidade_ml"])
+            for x in rows:w.writerow(["alimento",x["data"],"",x["refeicao"],x["alimento_nome"],x["quantidade_g"],""])
+            for x in water:w.writerow(["agua",x["data"],x["hora"],"","","",x["quantidade_ml"]])
+            b=out.getvalue().encode("utf-8-sig");self.send_response(200);self.send_header("Content-Type","text/csv; charset=utf-8");self.send_header("Content-Disposition",f'attachment; filename="diario_{start}_{end}.csv"');self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
         if p.path.startswith("/api/consume/"):
             i=int(p.path.rsplit("/",1)[1]);c=ddb()
-            try:r=c.execute("SELECT * FROM consumo WHERE id=?",(i,)).fetchone()
+            try:r=c.execute("SELECT * FROM consumo WHERE id=? AND usuario_id=?",(i,self.user["id"])).fetchone()
             finally:c.close()
             self.js({"item":dict(r)} if r else {"error":"Não encontrado"},200 if r else 404);return
         self.send_error(404)
     def do_POST(self):
+        if self.path=="/api/auth/register":
+            c=None
+            try:
+                x=self.body();email=str(x.get("email","")).strip().lower();password=str(x.get("password",""))
+                if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("Informe um e-mail válido.")
+                if len(password)<8: raise ValueError("A senha deve ter pelo menos 8 caracteres.")
+                c=ddb();existing=int(c.execute("SELECT COUNT(*) AS n FROM usuarios").fetchone()["n"])
+                row=c.execute("INSERT INTO usuarios(email,senha_hash) VALUES(?,?) RETURNING id,email",(email,_hash_password(password))).fetchone()
+                _ensure_user_records(c,row["id"],migrate_legacy=(existing==0));token=secrets.token_urlsafe(32)
+                c.execute("INSERT INTO sessoes(usuario_id,token_hash,expira_em) VALUES(?,?,NOW()+INTERVAL '30 days')",(row["id"],_token_hash(token)));c.commit()
+                self.js({"ok":True,"user":{"id":row["id"],"email":row["email"]}},headers={"Set-Cookie":_session_cookie(token)})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":"Não foi possível criar a conta: "+str(e)},400)
+            finally:
+                if c:c.close()
+            return
+        if self.path=="/api/auth/login":
+            c=None
+            try:
+                x=self.body();email=str(x.get("email","")).strip().lower();password=str(x.get("password",""));c=ddb()
+                row=c.execute("SELECT id,email,senha_hash FROM usuarios WHERE email=?",(email,)).fetchone()
+                if not row or not _verify_password(password,row["senha_hash"]): raise ValueError("E-mail ou senha inválidos.")
+                token=secrets.token_urlsafe(32);c.execute("INSERT INTO sessoes(usuario_id,token_hash,expira_em) VALUES(?,?,NOW()+INTERVAL '30 days')",(row["id"],_token_hash(token)));c.commit()
+                self.js({"ok":True,"user":{"id":row["id"],"email":row["email"]}},headers={"Set-Cookie":_session_cookie(token)})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},401)
+            finally:
+                if c:c.close()
+            return
+        user=self.require_user()
+        if not user:return
+        if self.path=="/api/favorite":
+            c=None
+            try:
+                x=self.body();aid=int(x.get("alimento_id"));nome=str(x.get("alimento_nome","")).strip()
+                if not nome:raise ValueError("Nome do alimento obrigatório.")
+                c=ddb();c.execute("INSERT INTO favoritos(usuario_id,alimento_id,alimento_nome) VALUES(?,?,?) ON CONFLICT(usuario_id,alimento_id) DO UPDATE SET alimento_nome=EXCLUDED.alimento_nome",(self.user["id"],aid,nome));c.commit();self.js({"ok":True})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+        if self.path=="/api/portion":
+            c=None
+            try:
+                x=self.body();aid=int(x.get("alimento_id"));nome=str(x.get("alimento_nome","")).strip();label=str(x.get("nome","")).strip();q=float(x.get("quantidade_g",0))
+                if not nome or not label or q<=0:raise ValueError("Informe nome, porção e quantidade válida.")
+                c=ddb();c.execute("INSERT INTO porcoes(usuario_id,alimento_id,alimento_nome,nome,quantidade_g) VALUES(?,?,?,?,?) ON CONFLICT(usuario_id,alimento_id,nome) DO UPDATE SET quantidade_g=EXCLUDED.quantidade_g,alimento_nome=EXCLUDED.alimento_nome",(self.user["id"],aid,nome,label,q));c.commit();self.js({"ok":True})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+        if self.path=="/api/read_nutrition_label":
+            try:
+                if not os.environ.get("OPENAI_API_KEY"):raise ValueError("A leitura por foto requer OPENAI_API_KEY no Render.")
+                if OpenAI is None:raise ValueError("A dependência openai não está instalada.")
+                x=self.body();image=str(x.get("image_data","")
+                )
+                if not image.startswith("data:image/"):raise ValueError("Imagem inválida.")
+                client_args={"api_key":os.environ.get("OPENAI_API_KEY")}
+                if os.environ.get("OPENAI_API_BASE"):client_args["base_url"]=os.environ.get("OPENAI_API_BASE")
+                client=OpenAI(**client_args)
+                schema={"nome":"string ou null","porcao_valor":"number ou null","porcao_unidade":"g, ml ou null","base_calculo":"100g, 100ml ou por_porcao","energia_kcal":"number ou null","proteina_g":"number ou null","carboidrato_g":"number ou null","lipidios_g":"number ou null","fibra_g":"number ou null","colesterol_mg":"number ou null","calcio_mg":"number ou null","magnesio_mg":"number ou null","fosforo_mg":"number ou null","ferro_mg":"number ou null","sodio_mg":"number ou null","potassio_mg":"number ou null","zinco_mg":"number ou null","vitamina_c_mg":"number ou null"}
+                prompt="Leia a tabela nutricional desta imagem. Retorne SOMENTE JSON válido com exatamente estas chaves: "+json.dumps(schema,ensure_ascii=False)+". Preserve os números da tabela e não invente valores. Se um campo não estiver legível, use null. Identifique se os valores são por 100 g, 100 ml ou por porção; não converta valores."
+                resp=client.chat.completions.create(model=VISION_MODEL,messages=[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":image,"detail":"high"}}]}],response_format={"type":"json_object"},max_tokens=1800)
+                raw=resp.choices[0].message.content or "{}";data=json.loads(raw)
+                original_base=data.get("base_calculo");portion=data.get("porcao_valor");unit=str(data.get("porcao_unidade") or "").lower();normalizado=False
+                if original_base=="por_porcao" and portion and float(portion)>0:
+                    factor=100.0/float(portion)
+                    for key in ["energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","zinco_mg","vitamina_c_mg"]:
+                        if isinstance(data.get(key),(int,float)):data[key]=round(float(data[key])*factor,4)
+                    data["base_calculo"]="100ml" if "ml" in unit else "100g";normalizado=True
+                allowed=set(schema);clean={k:data.get(k) for k in allowed};clean["base_calculo_original"]=original_base;clean["normalizado"]=normalizado;clean["confianca"]=float(data.get("confianca",0) or 0);self.js({"ok":True,"data":clean})
+            except Exception as e:self.js({"error":"Não foi possível ler a tabela: "+str(e)},400)
+            return
         if self.path=="/api/profile":
             c=None
             try:
@@ -1206,9 +1590,14 @@ class H(BaseHTTPRequestHandler):
                 objetivo=str(x.get("objetivo","")).strip() or None
                 peso_meta=float(x["peso_meta_kg"]) if str(x.get("peso_meta_kg","")).strip() else None
                 ritmo=float(x["ritmo_kg_semana"]) if str(x.get("ritmo_kg_semana","")).strip() else None
+                if idade is not None and not 10<=idade<=120:raise ValueError("Idade fora do intervalo permitido.")
+                if peso is not None and not 20<=peso<=400:raise ValueError("Peso fora do intervalo permitido.")
+                if altura is not None and not 100<=altura<=250:raise ValueError("Altura fora do intervalo permitido.")
+                if peso_meta is not None and not 20<=peso_meta<=400:raise ValueError("Peso-meta fora do intervalo permitido.")
+                if ritmo is not None and not 0<=ritmo<=1:raise ValueError("Ritmo fora do intervalo permitido.")
                 c=ddb()
-                c.execute("""UPDATE perfil SET nome=?,idade=?,sexo=?,peso_kg=?,altura_cm=?,atividade=?,objetivo=?,peso_meta_kg=?,ritmo_kg_semana=? WHERE id=1""",
-                          (name,idade,sexo,peso,altura,atividade,objetivo,peso_meta,ritmo))
+                c.execute("""UPDATE perfis SET nome=?,idade=?,sexo=?,peso_kg=?,altura_cm=?,atividade=?,objetivo=?,peso_meta_kg=?,ritmo_kg_semana=? WHERE usuario_id=?""",
+                          (name,idade,sexo,peso,altura,atividade,objetivo,peso_meta,ritmo,self.user["id"]))
                 c.commit();self.js({"ok":True})
             except Exception as e:
                 if c:c.rollback()
@@ -1222,7 +1611,8 @@ class H(BaseHTTPRequestHandler):
             try:
                 x=self.body();ml=float(x.get("quantidade_ml",0));
                 if ml<=0: raise ValueError("Quantidade de água inválida")
-                c=ddb();c.execute("INSERT INTO hidratacao(data,hora,quantidade_ml) VALUES(?,?,?)",(x.get("data",date.today().isoformat()),__import__('datetime').datetime.now().strftime('%H:%M'),ml));c.commit();self.js({"ok":True})
+                if ml>10000:raise ValueError("Quantidade de água muito alta para um único registro.")
+                c=ddb();c.execute("INSERT INTO hidratacao(usuario_id,data,hora,quantidade_ml) VALUES(?,?,?,?)",(self.user["id"],x.get("data",date.today().isoformat()),datetime.now().strftime("%H:%M"),ml));c.commit();self.js({"ok":True})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
@@ -1230,58 +1620,78 @@ class H(BaseHTTPRequestHandler):
                 if c:c.close()
             return
         if self.path=="/api/goals":
+            c=None
             try:
-                x=self.body();c=ddb();c.execute("UPDATE metas SET calorias_kcal=?,proteina_g=?,carboidratos_g=?,gorduras_g=?,fibras_g=?,sodio_mg=?,agua_ml=? WHERE id=1",(x.get('calorias_kcal',0),x.get('proteina_g',0),x.get('carboidratos_g',0),x.get('gorduras_g',0),x.get('fibras_g',0),x.get('sodio_mg',0),x.get('agua_ml',0)));c.commit();c.close();self.js({"ok":True})
-            except Exception as e:self.js({"error":str(e)},400)
+                x=self.body()
+                manual=bool(x.get('manual_override',False))
+                values=[float(x.get(k,0) or 0) for k in ['calorias_kcal','proteina_g','carboidratos_g','gorduras_g','fibras_g','sodio_mg','agua_ml']]
+                if any((not math.isfinite(v) or v<0) for v in values):raise ValueError("As metas devem ser números não negativos.")
+                c=ddb()
+                c.execute("UPDATE metas_usuario SET calorias_kcal=?,proteina_g=?,carboidratos_g=?,gorduras_g=?,fibras_g=?,sodio_mg=?,agua_ml=?,manual_override=?,atualizado_em=NOW() WHERE usuario_id=?",(*values,manual,self.user["id"]))
+                c.commit();self.js({"ok":True,"manual_override":manual})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
             return
         if self.path=="/api/food":
             c=None
             try:
-                data=self.body()
-                nome=str(data.get("nome","")).strip()
-                if not nome:
-                    raise ValueError("Nome do alimento é obrigatório.")
-                c=ndb()
-                cols=[r["name"] for r in c.execute("PRAGMA table_info(alimentos)").fetchall()]
-                if "nome" not in cols:
-                    raise ValueError("A tabela de alimentos não possui o campo nome.")
-                fields=[];vals=[]
+                data=self.body();nome=str(data.get("nome","")).strip()
+                if not nome: raise ValueError("Nome do alimento é obrigatório.")
+                allowed={"nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","zinco_mg","vitamina_c_mg","porcao_valor","porcao_unidade","base_calculo"}
+                fields=["usuario_id"];vals=[self.user["id"]]
                 for k,v in data.items():
-                    if k in cols and k not in ("id",) and v is not None:
-                        fields.append(k);vals.append(v)
-                if "nome" not in fields:
-                    fields.append("nome");vals.append(nome)
-                placeholders=",".join(["?"]*len(fields))
-                c.execute(f'INSERT INTO alimentos ({",".join(fields)}) VALUES ({placeholders})',vals)
-                new_id=c.execute("SELECT last_insert_rowid()").fetchone()[0]
-                c.commit()
-                self.js({"ok":True,"id":new_id})
+                    if k in allowed and v is not None:
+                        if k not in ("nome","porcao_unidade","base_calculo"):
+                            v=float(v)
+                            if v<0: raise ValueError(f"Valor inválido para {k}.")
+                        fields.append(k);vals.append(str(v).strip() if k in ("nome","porcao_unidade","base_calculo") else v)
+                if "nome" not in fields:fields.append("nome");vals.append(nome)
+                placeholders=",".join(["?"]*len(fields));c=ddb()
+                row=c.execute(f'INSERT INTO alimentos_usuario ({",".join(fields)}) VALUES ({placeholders}) RETURNING id',vals).fetchone()
+                c.commit();self.js({"ok":True,"id":-int(row["id"])})
             except Exception as e:
-                if c: c.rollback()
+                if c:c.rollback()
                 self.js({"error":str(e)},400)
             finally:
-                if c: c.close()
+                if c:c.close()
             return
 
         if self.path!="/api/consume":self.send_error(404);return
         try:
-            x=self.body();w=float(x["quantidade_g"]);c=ddb();c.execute("INSERT INTO consumo(data,refeicao,alimento_id,alimento_nome,quantidade_g) VALUES(?,?,?,?,?)",(x["data"],x["refeicao"],x["alimento_id"],x["alimento_nome"],w));c.commit();c.close();self.js({"ok":True})
+            x=self.body();w=float(x["quantidade_g"]);meal=str(x.get("refeicao","")).strip();aid=int(x["alimento_id"]);name=str(x.get("alimento_nome","")).strip()
+            if meal not in MEALS or not name or not math.isfinite(w) or not 0<w<=5000:raise ValueError("Refeição, alimento ou quantidade inválidos.")
+            c=ddb();c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g) VALUES(?,?,?,?,?,?)",(self.user["id"],x["data"],meal,aid,name,w));c.commit();c.close();self.js({"ok":True})
         except Exception as e:self.js({"error":str(e)},400)
     def do_PUT(self):
+        user=self.require_user()
+        if not user:return
         try:
             if self.path.startswith("/api/food/"):
-                i=int(self.path.rsplit("/",1)[1]);x=self.body();c=ndb();cols={r[1] for r in c.execute("PRAGMA table_info(alimentos)").fetchall()};sets=[];vals=[]
+                i=int(self.path.rsplit("/",1)[1])
+                if i>=0: raise ValueError("A base nutricional compartilhada não pode ser alterada por este cadastro.")
+                x=self.body();allowed={"nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","zinco_mg","vitamina_c_mg","porcao_valor","porcao_unidade","base_calculo"};sets=[];vals=[]
                 for k,v in x.items():
-                    if k in cols and k!="id": sets.append('"'+k+'"=?');vals.append(v)
+                    if k in allowed:
+                        if k not in ("nome","porcao_unidade","base_calculo") and v is not None:v=float(v)
+                        sets.append('"'+k+'"=?');vals.append(v)
                 if not sets: raise ValueError("Nenhum campo válido")
-                vals.append(i);c.execute("UPDATE alimentos SET "+",".join(sets)+" WHERE id=?",vals);c.commit();c.close();self.js({"ok":True});return
-            i=int(self.path.rsplit("/",1)[1]);x=self.body();w=float(x["quantidade_g"]);c=ddb();c.execute("UPDATE consumo SET quantidade_g=?,refeicao=? WHERE id=?",(w,x["refeicao"],i));c.commit();c.close();self.js({"ok":True})
+                vals.extend([-i,self.user["id"]]);c=ddb();c.execute("UPDATE alimentos_usuario SET "+",".join(sets)+",atualizado_em=NOW() WHERE id=? AND usuario_id=?",vals);c.commit();c.close();self.js({"ok":True});return
+            i=int(self.path.rsplit("/",1)[1]);x=self.body();w=float(x["quantidade_g"]);c=ddb();c.execute("UPDATE consumo SET quantidade_g=?,refeicao=? WHERE id=? AND usuario_id=?",(w,x["refeicao"],i,self.user["id"]));c.commit();c.close();self.js({"ok":True})
         except Exception as e:self.js({"error":str(e)},400)
     def do_DELETE(self):
+        user=self.require_user()
+        if not user:return
         try:
             if self.path.startswith("/api/water/"):
-                i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM hidratacao WHERE id=?",(i,));c.commit();c.close();self.js({"ok":True});return
-            i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM consumo WHERE id=?",(i,));c.commit();c.close();self.js({"ok":True})
+                i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM hidratacao WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True});return
+            if self.path.startswith("/api/favorite/"):
+                i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM favoritos WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True});return
+            if self.path.startswith("/api/portion/"):
+                i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM porcoes WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True});return
+            i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM consumo WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True})
         except Exception as e:self.js({"error":str(e)},400)
 
 if __name__=="__main__":
