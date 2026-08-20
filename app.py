@@ -39,7 +39,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V47 · Painel inteligente + Banco estável + Segurança P0"
+APP_VERSION = "V48 · Silhueta natural + Banco estável + Segurança P0"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -1536,9 +1536,13 @@ function renderBottomProgress(j){
 }
 
 function waterSilhouette(sex,p){
-  const body=sex==="F"?"M39 34 L61 34 L65 78 L78 132 L62 132 L60 174 L52 174 L50 121 L48 174 L40 174 L38 132 L22 132 L35 78 Z":"M39 34 L61 34 L67 80 L60 80 L64 174 L53 174 L50 107 L47 174 L36 174 L40 80 L33 80 Z";
-  const fillY=Math.max(0,190-(Math.min(100,p)*1.9));
-  return `<div class="waterFigure"><svg viewBox="0 0 100 190" role="img" aria-label="Silhueta de hidratação ${sex==="F"?"feminina":sex==="M"?"masculina":"neutra"}"><defs><clipPath id="waterBodyMask"><circle cx="50" cy="17" r="14"/><path d="${body}"/></clipPath></defs><circle cx="50" cy="17" r="14" fill="rgba(255,255,255,.17)"/><path d="${body}" fill="rgba(255,255,255,.17)"/><rect x="0" y="${fillY}" width="100" height="190" fill="url(#waterFill)" clip-path="url(#waterBodyMask)"/><defs><linearGradient id="waterFill" x1="0" x2="0" y1="1" y2="0"><stop stop-color="#0ea5e9"/><stop offset="1" stop-color="#7dd3fc"/></linearGradient></defs><circle cx="50" cy="17" r="14" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="2"/><path d="${body}" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="2" stroke-linejoin="round"/></svg><div class="waterFigureText"><b>${sex==="F"?"Silhueta feminina":sex==="M"?"Silhueta masculina":"Silhueta de hidratação"}</b>Preenchimento dos pés à cabeça</div></div>`;
+  const isFemale=sex==="F",kind=isFemale?"female":"male";
+  const maleBody="M42 35 C37 37 33 41 31 48 L26 67 L20 84 Q19 89 23 91 Q27 92 29 87 L36 70 L39 93 L35 116 Q34 122 38 128 L42 153 L39 177 Q39 183 44 184 Q48 184 49 178 L50 148 L51 178 Q52 184 56 184 Q61 183 61 177 L58 153 L62 128 Q66 122 65 116 L61 93 L64 70 L71 87 Q73 92 77 91 Q81 89 80 84 L74 67 L69 48 C67 41 63 37 58 35 Z";
+  const femaleBody="M43 35 C38 37 35 42 34 49 L29 68 L23 85 Q22 90 26 92 Q30 93 32 88 L39 71 L41 93 L36 113 Q34 120 39 127 L43 153 L40 178 Q40 184 45 184 Q49 184 50 178 L50 149 L51 178 Q52 184 56 184 Q61 184 61 178 L58 153 L62 127 Q67 120 65 113 L59 93 L61 71 L68 88 Q70 93 74 92 Q78 90 77 85 L71 68 L66 49 C65 42 62 37 57 35 Z";
+  const head=isFemale?"M50 5 C42 5 38 10 38 17 C38 24 43 30 50 31 C57 30 62 24 62 17 C62 10 58 5 50 5 Z":"M50 5 C42 5 38 10 38 17 C38 24 43 30 50 31 C57 30 62 24 62 17 C62 10 58 5 50 5 Z";
+  const hair=isFemale?"M61 10 C68 11 71 16 70 22 C69 27 66 30 61 31 L62 17 Z":"";
+  const body=isFemale?femaleBody:maleBody,fillY=Math.max(0,190-(Math.min(100,p)*1.9)),maskId=`waterMask_${kind}`,fillId=`waterFill_${kind}`;
+  return `<div class="waterFigure"><svg viewBox="0 0 100 190" role="img" aria-label="Silhueta de hidratação ${isFemale?"feminina":sex==="M"?"masculina":"neutra"}"><defs><clipPath id="${maskId}"><path d="${head}"/><path d="${hair}"/><path d="${body}"/></clipPath><linearGradient id="${fillId}" x1="0" x2="0" y1="1" y2="0"><stop stop-color="#0284c7"/><stop offset="1" stop-color="#7dd3fc"/></linearGradient></defs><path d="${head}" fill="rgba(226,232,240,.3)"/><path d="${hair}" fill="rgba(226,232,240,.3)"/><path d="${body}" fill="rgba(226,232,240,.3)"/><rect x="0" y="${fillY}" width="100" height="190" fill="url(#${fillId})" clip-path="url(#${maskId})"/><path d="${head}" fill="none" stroke="rgba(255,255,255,.58)" stroke-width="1.8"/><path d="${hair}" fill="none" stroke="rgba(255,255,255,.58)" stroke-width="1.8"/><path d="${body}" fill="none" stroke="rgba(255,255,255,.58)" stroke-width="1.8" stroke-linejoin="round"/></svg><div class="waterFigureText"><b>${isFemale?"Silhueta feminina":sex==="M"?"Silhueta masculina":"Silhueta de hidratação"}</b>Preenchimento dos pés à cabeça</div></div>`;
 }
 async function drawWater(w,goal){
   let p=pct(w,goal);
@@ -1676,7 +1680,7 @@ const searchEl=document.getElementById("search"),foods=document.getElementById("
 searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,70)};bootstrap();
 </script></body></html>
 """
-HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V47 · Diário Alimentar · Painel inteligente").replace("V45 · DIÁRIO ALIMENTAR", "V47 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V47 · Diário Alimentar · Painel inteligente</title>")
+HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V48 · Diário Alimentar · Silhueta natural").replace("V45 · DIÁRIO ALIMENTAR", "V48 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V48 · Diário Alimentar · Silhueta natural</title>")
 
 class H(BaseHTTPRequestHandler):
     def end_headers(self):
