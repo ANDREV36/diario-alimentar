@@ -1,5 +1,6 @@
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer1
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import sqlite3, json
@@ -8,6 +9,11 @@ from psycopg.rows import dict_row
 from datetime import date, datetime, timedelta
 import os
 import base64, hashlib, hmac, secrets, csv, io, re, math
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
 try:
     from openai import OpenAI
 except ImportError:
