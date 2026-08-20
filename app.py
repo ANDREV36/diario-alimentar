@@ -26,6 +26,13 @@ SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-only-change-this-secret")
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
 
 MEALS = ["Café da manhã", "Almoço", "Lanche", "Jantar", "Ceia"]
+DEFAULT_GOALS = {"calorias_kcal":2300.0,"proteina_g":180.0,"carboidratos_g":220.0,"gorduras_g":70.0,"fibras_g":30.0,"sodio_mg":2000.0,"agua_ml":4000.0,"manual_override":False}
+
+def goal_dict(row):
+    data = DEFAULT_GOALS.copy()
+    if row:
+        data.update(dict(row))
+    return data
 
 NUTS = [
     ("energia_kcal", "Calorias", "kcal"),
@@ -327,7 +334,12 @@ def _current_user(handler):
     try:
         row = c.execute('''SELECT u.id, u.email FROM sessoes s JOIN usuarios u ON u.id=s.usuario_id
                            WHERE s.token_hash=? AND s.expira_em>NOW()''', (_token_hash(token),)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        user = dict(row)
+        _ensure_user_records(c, user['id'])
+        c.commit()
+        return user
     finally:
         c.close()
 
@@ -1143,13 +1155,13 @@ function toggleAccumulated(){
 async function refresh(){
   try{
     const j=await api("/api/day?data="+day.value+"&refeicao="+encodeURIComponent(meal));
-    items.innerHTML=j.items.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" g · "+fmt(x.kcal)+" kcal</div></div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
-    if(j.items.length){const toggle=document.getElementById("consumedFoodsToggle");items.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
-    draw(partial,j.partial);
-    await drawWater(j.water,j.goals.agua_ml);
-    updateHeroFromDay(j);
-    renderBottomProgress(j);
-    setTimeout(()=>{updateHeroFromDay(j);renderBottomProgress(j)},150);
+    const consumed=Array.isArray(j.items)?j.items:[];
+    const goals=j.goals||{};
+    items.innerHTML=consumed.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" g · "+fmt(x.kcal)+" kcal</div></div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
+    if(consumed.length){const toggle=document.getElementById("consumedFoodsToggle");items.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
+    try{draw(partial,j.partial||{});}catch(e){console.error("nutrientes:",e)}
+    try{await drawWater(Number(j.water||0),Number(goals.agua_ml||0));}catch(e){console.error("hidratação:",e)}
+    try{updateHeroFromDay({...j,goals});renderBottomProgress({...j,goals});}catch(e){console.error("resumo:",e)}
   }catch(e){console.error("refresh:",e)}
 }function pct(v,m){if(!m||m<=0)return 0;return Math.min(100,(v/m)*100)}
 function renderBottomProgress(j){
@@ -1351,7 +1363,7 @@ class H(BaseHTTPRequestHandler):
             c=ddb()
             try:g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
-            self.js(dict(g) if g else {})
+            self.js(goal_dict(g))
             return
 
         if p.path=="/api/foods":
@@ -1377,7 +1389,7 @@ class H(BaseHTTPRequestHandler):
                     items.append({"id":x["id"],"refeicao":x["refeicao"],"alimento_nome":x["alimento_nome"],"quantidade_g":x["quantidade_g"],"kcal":(f["energia_kcal"] or 0)*z if f else 0})
             finally:
                 nc.close();pc.close()
-            c=ddb();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone();c.close();self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"goals":dict(g)});return
+            c=ddb();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone();c.close();self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"goals":goal_dict(g)});return
         if p.path.startswith("/api/food/"):
             try: food_id=int(p.path.rsplit("/",1)[1])
             except ValueError:
@@ -1453,7 +1465,7 @@ class H(BaseHTTPRequestHandler):
             self.js({
                 "start":start,"end":end,"days":days,
                 "start_br":d1.strftime("%d/%m/%Y"),"end_br":d2.strftime("%d/%m/%Y"),
-                "daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":dict(g)
+                "daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":goal_dict(g)
             })
             return
 
@@ -1462,7 +1474,7 @@ class H(BaseHTTPRequestHandler):
             try:
                 rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchall();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
-            self.js({"daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":dict(g)})
+            self.js({"daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":goal_dict(g)})
             return
         if p.path=="/api/water":
             q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];c=ddb()
@@ -1556,7 +1568,7 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path=="/api/read_nutrition_label":
             try:
-                if not os.environ.get("OPENAI_API_KEY"):raise ValueError("A leitura por foto requer OPENAI_API_KEY no Render.")
+                if not os.environ.get("OPENAI_API_KEY"):raise ValueError("A leitura por foto ainda não está configurada. No Render, adicione a variável OPENAI_API_KEY em Environment e faça um novo deploy.")
                 if OpenAI is None:raise ValueError("A dependência openai não está instalada.")
                 x=self.body();image=str(x.get("image_data","")
                 )
@@ -1596,9 +1608,11 @@ class H(BaseHTTPRequestHandler):
                 if peso_meta is not None and not 20<=peso_meta<=400:raise ValueError("Peso-meta fora do intervalo permitido.")
                 if ritmo is not None and not 0<=ritmo<=1:raise ValueError("Ritmo fora do intervalo permitido.")
                 c=ddb()
-                c.execute("""UPDATE perfis SET nome=?,idade=?,sexo=?,peso_kg=?,altura_cm=?,atividade=?,objetivo=?,peso_meta_kg=?,ritmo_kg_semana=? WHERE usuario_id=?""",
-                          (name,idade,sexo,peso,altura,atividade,objetivo,peso_meta,ritmo,self.user["id"]))
-                c.commit();self.js({"ok":True})
+                c.execute("""INSERT INTO perfis(usuario_id,nome,idade,sexo,peso_kg,altura_cm,atividade,objetivo,peso_meta_kg,ritmo_kg_semana)
+                             VALUES(?,?,?,?,?,?,?,?,?,?)
+                             ON CONFLICT(usuario_id) DO UPDATE SET nome=EXCLUDED.nome,idade=EXCLUDED.idade,sexo=EXCLUDED.sexo,peso_kg=EXCLUDED.peso_kg,altura_cm=EXCLUDED.altura_cm,atividade=EXCLUDED.atividade,objetivo=EXCLUDED.objetivo,peso_meta_kg=EXCLUDED.peso_meta_kg,ritmo_kg_semana=EXCLUDED.ritmo_kg_semana""",
+                          (self.user["id"],name,idade,sexo,peso,altura,atividade,objetivo,peso_meta,ritmo))
+                c.commit();self.js({"ok":True,"profile":{"nome":name}})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
@@ -1627,8 +1641,11 @@ class H(BaseHTTPRequestHandler):
                 values=[float(x.get(k,0) or 0) for k in ['calorias_kcal','proteina_g','carboidratos_g','gorduras_g','fibras_g','sodio_mg','agua_ml']]
                 if any((not math.isfinite(v) or v<0) for v in values):raise ValueError("As metas devem ser números não negativos.")
                 c=ddb()
-                c.execute("UPDATE metas_usuario SET calorias_kcal=?,proteina_g=?,carboidratos_g=?,gorduras_g=?,fibras_g=?,sodio_mg=?,agua_ml=?,manual_override=?,atualizado_em=NOW() WHERE usuario_id=?",(*values,manual,self.user["id"]))
-                c.commit();self.js({"ok":True,"manual_override":manual})
+                c.execute("""INSERT INTO metas_usuario(usuario_id,calorias_kcal,proteina_g,carboidratos_g,gorduras_g,fibras_g,sodio_mg,agua_ml,manual_override)
+                             VALUES(?,?,?,?,?,?,?,?,?)
+                             ON CONFLICT(usuario_id) DO UPDATE SET calorias_kcal=EXCLUDED.calorias_kcal,proteina_g=EXCLUDED.proteina_g,carboidratos_g=EXCLUDED.carboidratos_g,gorduras_g=EXCLUDED.gorduras_g,fibras_g=EXCLUDED.fibras_g,sodio_mg=EXCLUDED.sodio_mg,agua_ml=EXCLUDED.agua_ml,manual_override=EXCLUDED.manual_override,atualizado_em=NOW()""",
+                          (self.user["id"],*values,manual))
+                c.commit();self.js({"ok":True,"manual_override":manual,"goals":dict(zip(['calorias_kcal','proteina_g','carboidratos_g','gorduras_g','fibras_g','sodio_mg','agua_ml'],values))})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
@@ -1663,7 +1680,7 @@ class H(BaseHTTPRequestHandler):
         try:
             x=self.body();w=float(x["quantidade_g"]);meal=str(x.get("refeicao","")).strip();aid=int(x["alimento_id"]);name=str(x.get("alimento_nome","")).strip()
             if meal not in MEALS or not name or not math.isfinite(w) or not 0<w<=5000:raise ValueError("Refeição, alimento ou quantidade inválidos.")
-            c=ddb();c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g) VALUES(?,?,?,?,?,?)",(self.user["id"],x["data"],meal,aid,name,w));c.commit();c.close();self.js({"ok":True})
+            c=ddb();row=c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g) VALUES(?,?,?,?,?,?) RETURNING id",(self.user["id"],x["data"],meal,aid,name,w)).fetchone();c.commit();c.close();self.js({"ok":True,"id":row["id"]})
         except Exception as e:self.js({"error":str(e)},400)
     def do_PUT(self):
         user=self.require_user()
@@ -1698,4 +1715,3 @@ if __name__=="__main__":
     if not NUT.exists(): print("ERRO: banco_nutrientes.db não encontrado.");input("ENTER para sair...");raise SystemExit
     print("V27 MOBILE iniciado.");print("No PC: http://127.0.0.1:5000");print("Para encerrar: Ctrl+C")
     ThreadingHTTPServer((HOST,PORT),H).serve_forever()
-
