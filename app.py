@@ -39,7 +39,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V49 · Hidratação visual + Banco estável + Segurança P0"
+APP_VERSION = "V50 · Silhueta integrada + Banco estável + Segurança P0"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -1539,8 +1539,12 @@ function renderBottomProgress(j){
   }).join("");
 }
 
+const WATER_SILHOUETTES={
+  M:`data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 190"><path fill="black" d="M50 4C42 4 37 10 37 18c0 7 5 13 13 13s13-6 13-13C63 10 58 4 50 4ZM39 35c-7 2-11 7-13 14l-6 22c-1 5 1 8 5 9 3 0 5-2 6-6l6-16 2 28-6 29 6 38-3 29c0 5 3 8 7 8 4 0 6-3 7-8l1-28 2 28c1 5 3 8 7 8 4 0 7-3 7-8l-3-29 6-38-6-29 2-28 6 16c1 4 3 6 6 6 4-1 6-4 5-9l-6-22c-2-7-6-12-13-14-5 3-12 3-17 0Z"/></svg>')}`,
+  F:`data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 190"><path fill="black" d="M50 3C39 3 34 12 34 23c0 9 3 16 7 20l-3 12h24l-3-12c4-4 7-11 7-20C68 12 61 3 50 3ZM37 37c-6 2-10 7-12 14l-6 22c-1 5 1 8 5 9 3 0 5-2 6-6l6-17 3 28-6 24c-2 7 1 12 7 16l4 27-3 28c0 5 3 8 7 8 4 0 6-3 7-8l1-27 2 27c1 5 3 8 7 8 4 0 7-3 7-8l-3-28 4-27c6-4 9-9 7-16l-6-24 3-28 6 17c1 4 3 6 6 6 4-1 6-4 5-9l-6-22c-2-7-6-12-12-14-6 3-14 3-20 0Z"/></svg>')}`
+};
 function waterSilhouette(sex,p){
-  const isFemale=sex==="F",asset=isFemale?"/assets/silhueta_hidratacao_feminina_aprovada.png":"/assets/silhueta_hidratacao_masculina_aprovada.png";
+  const isFemale=sex==="F",asset=isFemale?WATER_SILHOUETTES.F:WATER_SILHOUETTES.M;
   const label=isFemale?"Silhueta feminina com cabelo":sex==="M"?"Silhueta masculina":"Silhueta de hidratação";
   return `<div class="waterFigure"><div class="waterArtwork" role="img" aria-label="${label}" style="--water-level:${Math.min(100,Math.max(0,p))}%;--silhouette:url('${asset}')"></div><div class="waterFigureText"><b>${label}</b>Preenchimento dos pés à cabeça</div></div>`;
 }
@@ -1681,7 +1685,7 @@ const searchEl=document.getElementById("search"),foods=document.getElementById("
 searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,70)};bootstrap();
 </script></body></html>
 """
-HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V49 · Diário Alimentar · Hidratação visual").replace("V45 · DIÁRIO ALIMENTAR", "V49 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V49 · Diário Alimentar · Hidratação visual</title>")
+HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V50 · Diário Alimentar · Silhueta integrada").replace("V45 · DIÁRIO ALIMENTAR", "V50 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V50 · Diário Alimentar · Silhueta integrada</title>")
 
 class H(BaseHTTPRequestHandler):
     def end_headers(self):
@@ -1760,14 +1764,6 @@ class H(BaseHTTPRequestHandler):
             b=HTML.encode();self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");self.send_header("Pragma","no-cache");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
         if p.path=="/health":
             self.send_response(200);self.send_header("Content-Type","text/plain; charset=utf-8");self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(APP_VERSION.encode("utf-8"));return
-        static_assets={
-            "/assets/silhueta_hidratacao_masculina_aprovada.png":BASE/"assets"/"silhueta_hidratacao_masculina_aprovada.png",
-            "/assets/silhueta_hidratacao_feminina_aprovada.png":BASE/"assets"/"silhueta_hidratacao_feminina_aprovada.png",
-        }
-        if p.path in static_assets:
-            img=static_assets[p.path]
-            if not img.exists():self.send_error(404);return
-            b=img.read_bytes();self.send_response(200);self.send_header("Content-Type","image/png");self.send_header("Cache-Control","public, max-age=86400");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
         if p.path=="/api/me":
             user=_current_user(self)
             if user:self.js({"authenticated":True,"user":user,"csrf":self.csrf_token()})
