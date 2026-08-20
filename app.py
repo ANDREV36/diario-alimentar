@@ -7,6 +7,7 @@ import sqlite3, json
 import psycopg
 from psycopg.rows import dict_row
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 import os
 import base64, hashlib, hmac, secrets, csv, io, re, math
 
@@ -40,6 +41,13 @@ def goal_dict(row):
     if row:
         data.update(dict(row))
     return data
+
+def json_default(value):
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"Tipo não serializável: {type(value).__name__}")
 
 def calculate_profile_goals(idade, sexo, peso_kg, altura_cm, atividade, objetivo, ritmo_kg_semana):
     if not all([idade, sexo, peso_kg, altura_cm, atividade, objetivo]):
@@ -1332,7 +1340,7 @@ searchEl.oninput=()=>{clearTimeout(timer);timer=setTimeout(search,120)};bootstra
 
 class H(BaseHTTPRequestHandler):
     def js(self,o,s=200,headers=None):
-        b=json.dumps(o,ensure_ascii=False).encode();self.send_response(s);self.send_header("Content-Type", "application/json; charset=utf-8");self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");self.send_header("Content-Length",str(len(b)));
+        b=json.dumps(o,ensure_ascii=False,default=json_default).encode();self.send_response(s);self.send_header("Content-Type", "application/json; charset=utf-8");self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");self.send_header("Content-Length",str(len(b)));
         for k,v in (headers or {}).items(): self.send_header(k,v)
         self.end_headers();self.wfile.write(b)
     def body(self):
