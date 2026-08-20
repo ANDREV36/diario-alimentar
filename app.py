@@ -1,5 +1,5 @@
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer1
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import sqlite3, json
