@@ -8,8 +8,9 @@ import psycopg
 from psycopg.rows import dict_row
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-import os
-import base64, hashlib, hmac, secrets, csv, io, re, math
+import os, time, logging
+import base64, binascii, hashlib, hmac, secrets, csv, io, re, math
+from threading import Lock
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -28,10 +29,24 @@ DIA = BASE / "diario_alimentar.db"
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 5000))
 SESSION_COOKIE = "diario_session"
+CSRF_COOKIE = "diario_csrf"
 SESSION_DAYS = 30
-SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-only-change-this-secret")
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "").strip().lower()
+IS_PRODUCTION = ENVIRONMENT == "production" or bool(os.environ.get("RENDER"))
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "")
+if IS_PRODUCTION and len(SESSION_SECRET) < 32:
+    raise RuntimeError("SESSION_SECRET forte é obrigatório em produção. Configure ao menos 32 caracteres aleatórios no Render.")
+if not SESSION_SECRET:
+    SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V44 · Confirmação de prato estável"
+APP_VERSION = "V47 · Painel inteligente + Banco estável + Segurança P0"
+MAX_JSON_BODY = 1 * 1024 * 1024
+MAX_IMAGE_BODY = 8 * 1024 * 1024
+MAX_IMAGE_DECODED = 5 * 1024 * 1024
+RATE_LOCK = Lock()
+RATE_BUCKETS = {}
+LOG = logging.getLogger("diario_alimentar")
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
 MEALS = ["Café da manhã", "Almoço", "Lanche", "Jantar", "Ceia"]
 DEFAULT_GOALS = {"calorias_kcal":2300.0,"proteina_g":180.0,"carboidratos_g":220.0,"gorduras_g":70.0,"fibras_g":30.0,"sodio_mg":2000.0,"agua_ml":4000.0,"manual_override":False}
@@ -48,6 +63,48 @@ def json_default(value):
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     raise TypeError(f"Tipo não serializável: {type(value).__name__}")
+
+def validate_image_data(image_data):
+    if not isinstance(image_data, str) or not image_data.startswith("data:image/"):
+        raise ValueError("Imagem inválida.")
+    try:
+        header, encoded = image_data.split(",", 1)
+        mime = header.split(";", 1)[0].lower()
+        if mime not in {"data:image/jpeg", "data:image/png", "data:image/webp"}:
+            raise ValueError("Use imagem JPEG, PNG ou WEBP.")
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, UnicodeError, binascii.Error):
+        raise ValueError("Imagem inválida.")
+    if not raw or len(raw) > MAX_IMAGE_DECODED:
+        raise ValueError("A imagem deve ter no máximo 5 MB.")
+    valid_magic = raw.startswith(b"\xff\xd8\xff") or raw.startswith(b"\x89PNG\r\n\x1a\n") or raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
+    if not valid_magic:
+        raise ValueError("O arquivo de imagem não é válido.")
+
+def allow_request(bucket, limit, window_seconds):
+    now = time.monotonic()
+    with RATE_LOCK:
+        entries = [stamp for stamp in RATE_BUCKETS.get(bucket, []) if now - stamp < window_seconds]
+        if len(entries) >= limit:
+            RATE_BUCKETS[bucket] = entries
+            return False
+        entries.append(now)
+        RATE_BUCKETS[bucket] = entries
+        return True
+
+def public_error_message(message):
+    text = str(message or "")
+    safe_prefixes = (
+        "Autenticação necessária", "E-mail ou senha inválidos", "Informe ", "Idade ", "Peso ",
+        "Altura ", "Ritmo ", "Nome ", "Quantidade ", "As metas ", "Selecione ", "Data ",
+        "Datas ", "Nutriente ", "Alimento ", "Refeição ", "Nenhum campo ", "Imagem ",
+        "Use imagem ", "O arquivo ", "JSON ", "Origem ", "Sessão ", "Muitas tentativas",
+        "Não foi possível", "A análise de prato requer", "A leitura por foto ainda não está configurada"
+    )
+    if text.startswith(safe_prefixes):
+        return text
+    LOG.warning("internal_error_redacted detail=%s", text)
+    return "Não foi possível concluir a solicitação. Tente novamente."
 
 def calculate_profile_goals(idade, sexo, peso_kg, altura_cm, atividade, objetivo, ritmo_kg_semana):
     if not all([idade, sexo, peso_kg, altura_cm, atividade, objetivo]):
@@ -102,7 +159,7 @@ NUTS = [
 
 def ndb():
     c=sqlite3.connect(NUT);c.row_factory=sqlite3.Row;return c
-def ddb():
+def _open_db_connection():
     database_url = os.environ.get("DATABASE_URL")
 
     if not database_url:
@@ -129,8 +186,16 @@ def ddb():
         def close(self):
             self.conn.close()
 
-    c = DB()
+    return DB()
 
+def ddb():
+    """Abre uma conexão PostgreSQL limpa para uso exclusivo da requisição atual."""
+    return _open_db_connection()
+
+def init_db():
+    """Aplica a estrutura legada uma vez por processo, antes de atender requisições."""
+    c = _open_db_connection()
+    c.execute("SELECT pg_advisory_xact_lock(?)", (46124046,))
     c.execute("""
         CREATE TABLE IF NOT EXISTS consumo(
             id BIGSERIAL PRIMARY KEY,
@@ -330,7 +395,7 @@ def ddb():
         """)
 
     c.commit()
-    return c
+    c.close()
 def _hash_password(password):
     salt = secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode('utf-8'), salt=salt, n=2**14, r=8, p=1)
@@ -347,6 +412,9 @@ def _verify_password(password, encoded):
 
 def _token_hash(token):
     return hmac.new(SESSION_SECRET.encode('utf-8'), token.encode('utf-8'), hashlib.sha256).hexdigest()
+
+def _csrf_for_token(token):
+    return hmac.new(SESSION_SECRET.encode("utf-8"), f"csrf:{token}".encode("utf-8"), hashlib.sha256).hexdigest()
 
 def _cookie_value(handler, name):
     raw = handler.headers.get('Cookie', '')
@@ -392,7 +460,7 @@ def _current_user(handler):
         c.close()
 
 def _session_cookie(token, max_age=SESSION_DAYS*86400):
-    secure = '; Secure' if os.environ.get('RENDER') else ''
+    secure = '; Secure' if IS_PRODUCTION else ''
     return f'{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'
 
 def calc(rows,user_id=None):
@@ -679,23 +747,50 @@ main{
 #nutrientTooltip .tipFood{color:#f8fafc}
 #nutrientTooltip .tipVal{color:#b9c9d8;white-space:nowrap}
 #nutrientTooltip .tipEmpty{color:#aab8c7}
+.quickStats{grid-template-columns:repeat(7,minmax(0,1fr))!important;gap:8px}
+.quickStat{display:block!important;min-width:0;padding:10px!important}
+.quickStatHead{display:flex;align-items:center;gap:5px;min-width:0}
+.quickStatHead span{font-size:18px!important;line-height:1}
+.quickStatHead small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px!important}
+.quickStat strong{font-size:11px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:7px 0 6px!important}
+.quickMeter{height:6px;border-radius:99px;overflow:hidden;background:rgba(255,255,255,.18)}
+.quickMeter i{display:block;height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,#38bdf8,#22c55e);transition:width .28s ease}
+.quickStat.water .quickMeter i{background:linear-gradient(90deg,#38bdf8,#0ea5e9)}
+.waterVisual{display:flex;align-items:center;justify-content:center;min-height:88px;margin:7px 0 3px}
+.waterFigure{display:flex;align-items:center;gap:11px;justify-content:center}
+.waterFigure svg{width:58px;height:82px;filter:drop-shadow(0 5px 9px rgba(14,165,233,.22))}
+.waterFigureText{font-size:12px;color:#cbd5e1;line-height:1.35}
+.waterFigureText b{display:block;color:#e0f2fe;font-size:16px;margin-bottom:2px}
+.goalCards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
+.goalMiniCard{min-width:0;text-align:left;padding:10px;border:1px solid rgba(255,255,255,.15);border-radius:12px;background:rgba(10,29,48,.58);color:#fff;cursor:pointer}
+.goalMiniCard:hover{border-color:rgba(125,211,252,.7);background:rgba(17,50,78,.78)}
+.goalMiniCard small{display:block;color:#b9c9d8;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.goalMiniCard b{display:block;font-size:12px;margin:5px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.goalMiniCard i{display:block;height:5px;border-radius:99px;background:linear-gradient(90deg,#38bdf8,#22c55e)}
+.goalMiniCard.limit i{background:linear-gradient(90deg,#fbbf24,#fb7185)}
+@media(max-width:700px){.goalCards{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
+@media(max-width:1000px){.quickStats{grid-template-columns:repeat(4,minmax(0,1fr))!important}}
+@media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.waterFigure svg{width:54px;height:76px}}
 </style></head><body>
-<div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V44 · Diário Alimentar · Confirmação de prato estável</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
+<div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V45 · Diário Alimentar · Segurança P0</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
 <main>
 <section class="hero">
   <div class="heroTop">
     <div>
-      <div class="eyebrow">V44 · DIÁRIO ALIMENTAR</div>
+      <div class="eyebrow">V45 · DIÁRIO ALIMENTAR</div>
       <h1 id="heroGreeting">Olá! 👋</h1>
       <div id="heroDate" class="heroDate"></div>
     </div>
     <button class="heroProfile" onclick="openProfile()">👤 Perfil</button>
   </div>
   <div class="quickStats">
-    <div class="quickStat"><span>🔥</span><div><small>Calorias</small><strong id="heroKcal">0 / —</strong></div></div>
-    <div class="quickStat"><span>💪</span><div><small>Proteína</small><strong id="heroProtein">0 / —</strong></div></div>
-    <div class="quickStat"><span>💧</span><div><small>Água</small><strong id="heroWater">0 / —</strong></div></div>
-    <div class="quickStat"><span>🌱</span><div><small>Fibras</small><strong id="heroFiber">0 / —</strong></div></div>
+    <div class="quickStat"><div class="quickStatHead"><span>🔥</span><small>Calorias</small></div><strong id="heroKcal">0 / —</strong><div class="quickMeter"><i id="heroKcalFill"></i></div></div>
+    <div class="quickStat"><div class="quickStatHead"><span>💪</span><small>Proteína</small></div><strong id="heroProtein">0 / —</strong><div class="quickMeter"><i id="heroProteinFill"></i></div></div>
+    <div class="quickStat"><div class="quickStatHead"><span>🍚</span><small>Carboidratos</small></div><strong id="heroCarbs">0 / —</strong><div class="quickMeter"><i id="heroCarbsFill"></i></div></div>
+    <div class="quickStat"><div class="quickStatHead"><span>🥑</span><small>Gorduras</small></div><strong id="heroFat">0 / —</strong><div class="quickMeter"><i id="heroFatFill"></i></div></div>
+    <div class="quickStat"><div class="quickStatHead"><span>🌱</span><small>Fibras</small></div><strong id="heroFiber">0 / —</strong><div class="quickMeter"><i id="heroFiberFill"></i></div></div>
+    <div class="quickStat"><div class="quickStatHead"><span>🧂</span><small>Sódio</small></div><strong id="heroSodium">0 / —</strong><div class="quickMeter"><i id="heroSodiumFill"></i></div></div>
+    <div class="quickStat water"><div class="quickStatHead"><span>💧</span><small>Água</small></div><strong id="heroWater">0 / —</strong><div class="quickMeter"><i id="heroWaterFill"></i></div></div>
   </div>
 </section>
 
@@ -732,12 +827,13 @@ main{
   <div id="items" style="display:block;margin-top:12px"></div>
 </div>
 
-<div class="bottomDashboard card">
+<div class="bottomDashboard card" id="goalsDashboard">
   <div class="sectionTitle">
-    <div><span class="eyebrow">ACOMPANHAMENTO</span><h2>📊 Resumo do dia</h2></div>
-    <button onclick="openSummary()" class="miniSummaryBtn">VER RESUMO</button>
+    <div><span class="eyebrow">SEU OBJETIVO</span><h2>🎯 Metas do dia</h2></div>
+    <button id="goalsToggle" onclick="toggleGoalsDashboard()" class="miniSummaryBtn" aria-expanded="false">VER METAS</button>
   </div>
-  <div id="bottomProgress" class="bottomProgress"></div>
+  <div id="goalCards" class="goalCards" style="display:none"></div>
+  <button onclick="openSummary()" style="width:100%;margin-top:10px;padding:10px;border:1px solid #ffffff25;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">⚙️ AJUSTAR METAS</button>
 </div>
 <div class="card" id="accumulatedCard">
   <h2 style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:0">
@@ -748,7 +844,10 @@ main{
   </h2>
   <div id="partial" class="metrics" style="display:none;margin-top:12px"></div>
 </div>
-<div class="card"><h2>📊 Resumo do dia</h2><button onclick="openSummary()" style="width:100%;padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:16px">📊 VER RESUMO DO DIA</button></div>
+<div class="card" id="periodCard"><h2>📅 Histórico por período</h2>
+<p style="margin:0 0 10px;color:#cbd5e1;font-size:13px">Escolha as datas para comparar meta e consumo no intervalo.</p>
+<button onclick="openPeriod()" style="width:100%;padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:16px">📅 VER HISTÓRICO POR PERÍODO</button>
+<button onclick="exportDay()" style="width:100%;padding:12px;margin-top:8px;border:1px solid #ffffff30;border-radius:12px;background:#16263a;color:#fff;font-weight:bold;font-size:14px">⬇️ EXPORTAR DIA ATUAL EM CSV</button></div>
 <div class="card"><h2>💧 Hidratação</h2><div id="waterBox"></div>
 <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:10px">
 <button onclick="addWater(200)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 200 ml</button>
@@ -757,9 +856,6 @@ main{
 <button onclick="addWater(750)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 750 ml</button>
 <button onclick="addWater(1000)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 1 L</button>
 <button onclick="customWater()" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">✏️ Outra</button></div></div>
-<div class="card"><h2>📅 Acumulado do período</h2>
-<button onclick="openPeriod()" style="width:100%;padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:16px">📅 VER ACUMULADO DO PERÍODO</button>
-<button onclick="exportDay()" style="width:100%;padding:12px;margin-top:8px;border:1px solid #ffffff30;border-radius:12px;background:#16263a;color:#fff;font-weight:bold;font-size:14px">⬇️ EXPORTAR DIÁRIO EM CSV</button></div>
 </main>
 <div id="nutrientTooltip"></div>
 
@@ -842,6 +938,32 @@ main{
   </div>
 </div>
 
+<div id="consumeEditModal" style="display:none;position:fixed;inset:0;background:#0008;z-index:75;overflow:auto;padding:18px">
+  <div style="max-width:460px;margin:48px auto;background:#111827;color:#f8fafc;border:1px solid #334155;border-radius:18px;padding:17px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+      <h2 id="consumeEditTitle" style="margin:0;font-size:20px">✏️ Alterar consumo</h2>
+      <button onclick="closeConsumeEdit()" style="border:1px solid #475569;background:#1e293b;color:#f8fafc;border-radius:10px;padding:7px 11px;font-size:17px">✕</button>
+    </div>
+    <p style="margin:8px 0 14px;color:#cbd5e1;font-size:13px">Ajuste a quantidade e escolha uma refeição válida para este alimento.</p>
+    <label style="display:block;font-size:12px;font-weight:bold;margin-top:10px">Quantidade em gramas
+      <input id="consumeEditWeight" type="number" min="0.1" step="0.1" style="width:100%;padding:11px;margin-top:5px;border:1px solid #475569;border-radius:10px;background:#172033;color:#fff;font-size:16px">
+    </label>
+    <label style="display:block;font-size:12px;font-weight:bold;margin-top:12px">Tipo de refeição
+      <select id="consumeEditMeal" style="width:100%;padding:11px;margin-top:5px;border:1px solid #475569;border-radius:10px;background:#172033;color:#fff;font-size:16px">
+        <option value="Café da manhã">☕ Café da manhã</option>
+        <option value="Almoço">🍽️ Almoço</option>
+        <option value="Lanche">🥪 Lanche</option>
+        <option value="Jantar">🍴 Jantar</option>
+        <option value="Ceia">🌙 Ceia</option>
+      </select>
+    </label>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button onclick="closeConsumeEdit()" style="flex:1;padding:12px;border:1px solid #475569;border-radius:10px;background:#1e293b;color:#fff;font-weight:bold">CANCELAR</button>
+      <button onclick="saveConsumeEdit()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22a447;color:#06210f;font-weight:bold">SALVAR ALTERAÇÃO</button>
+    </div>
+  </div>
+</div>
+
 
 <div id="periodModal" style="display:none;position:fixed;inset:0;background:#0008;z-index:65;overflow:auto;padding:18px">
   <div style="max-width:760px;margin:20px auto;background:#111827;color:#f8fafc;border:1px solid #334155;border-radius:18px;padding:16px">
@@ -870,7 +992,8 @@ main{
     <div id="periodContent"></div>
     <div id="historyChart" style="margin-top:14px"></div>
 
-    <div style="display:flex;gap:8px;margin-top:14px">
+    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+      <button onclick="exportPeriod()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">⬇️ EXPORTAR PERÍODO EM CSV</button>
       <button onclick="closePeriod()" style="flex:1;padding:12px;border:1px solid #475569;border-radius:10px;background:#1e293b;color:#f8fafc">FECHAR</button>
     </div>
   </div>
@@ -912,22 +1035,30 @@ function renderProfileGreeting(){
   if(hero) hero.textContent=profileName?`Olá, ${profileName}! 👋`:"Olá! 👋";
   if(header) header.textContent=profileName?`Bom dia, ${profileName}! 👋 · Seu controle diário, seu melhor resultado.` : "Alimentação, nutrientes e histórico";
 }
+function setQuickMetric(valueId,fillId,value,goal,unit){
+  const valueEl=document.getElementById(valueId),fillEl=document.getElementById(fillId),p=pct(value,goal);
+  if(valueEl)valueEl.textContent=`${fmt(value)} / ${fmt(goal)} ${unit}`;
+  if(fillEl){fillEl.style.width=p+"%";fillEl.parentElement.setAttribute("aria-label",`${fmt(p)}% da meta`)}
+}
 function updateHeroFromDay(j){
   const g=j.goals||{}, t=j.daily||{};
   renderProfileGreeting();
   const d=document.getElementById("day").value;
   document.getElementById("heroDate").textContent=new Date(d+"T12:00:00").toLocaleDateString("pt-BR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"});
-  document.getElementById("heroKcal").textContent=`${fmt(t.energia_kcal)} / ${fmt(g.calorias_kcal)} kcal`;
-  document.getElementById("heroProtein").textContent=`${fmt(t.proteina_g)} / ${fmt(g.proteina_g)} g`;
-  document.getElementById("heroWater").textContent=`${fmt((j.water||0)/1000)} / ${fmt((g.agua_ml||0)/1000)} L`;
-  document.getElementById("heroFiber").textContent=`${fmt(t.fibra_g)} / ${fmt(g.fibras_g)} g`;
+  setQuickMetric("heroKcal","heroKcalFill",Number(t.energia_kcal||0),Number(g.calorias_kcal||0),"kcal");
+  setQuickMetric("heroProtein","heroProteinFill",Number(t.proteina_g||0),Number(g.proteina_g||0),"g");
+  setQuickMetric("heroCarbs","heroCarbsFill",Number(t.carboidrato_g||0),Number(g.carboidratos_g||0),"g");
+  setQuickMetric("heroFat","heroFatFill",Number(t.lipidios_g||0),Number(g.gorduras_g||0),"g");
+  setQuickMetric("heroFiber","heroFiberFill",Number(t.fibra_g||0),Number(g.fibras_g||0),"g");
+  setQuickMetric("heroSodium","heroSodiumFill",Number(t.sodio_mg||0),Number(g.sodio_mg||0),"mg");
+  setQuickMetric("heroWater","heroWaterFill",Number(j.water||0)/1000,Number(g.agua_ml||0)/1000,"L");
 }
 
-const meals=["Café da manhã","Almoço","Lanche","Jantar","Ceia"];let meal=meals[0],chosen=null,timer;
+const meals=["Café da manhã","Almoço","Lanche","Jantar","Ceia"];let meal=meals[0],chosen=null,timer,profileSex="";
 async function loadProfile(){
   try{
     const j=await api('/api/profile');
-    profileName=(j.nome||'').trim();
+    profileName=(j.nome||'').trim();profileSex=j.sexo==="F"?"F":j.sexo==="M"?"M":"";
     document.getElementById('profileName').value=j.nome||'';
     document.getElementById('profileAge').value=j.idade||'';
     document.getElementById('profileWeight').value=j.peso_kg||'';
@@ -1049,7 +1180,7 @@ async function saveProfile(){
   };
   const saved=await api('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
   if(saved.goals_updated) document.getElementById('profileEstimate').style.display='block';
-  profileName=name;
+  profileName=name;profileSex=data.sexo==="F"?"F":data.sexo==="M"?"M":"";
   renderProfileGreeting();
   closeProfile();
   await refresh();
@@ -1069,31 +1200,54 @@ day.value=new Date().toISOString().slice(0,10);
 function fmt(x){return Number(x||0).toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2})}
 function escAttr(s){return String(s).replace(/&/g,'&amp;').replace(/\"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
-async function api(u,o={}){let r=await fetch(u,o),j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}
+let csrfToken="";
+async function api(u,o={}){const method=(o.method||"GET").toUpperCase();const headers={...(o.headers||{})};if(["POST","PUT","DELETE"].includes(method)&&csrfToken)headers["X-CSRF-Token"]=csrfToken;let r=await fetch(u,{...o,headers}),j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}
 function setAuthStatus(msg){const el=document.getElementById("authStatus");if(el)el.textContent=msg||""}
-function showApp(user){document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>refresh())}
-async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user)}catch(e){setAuthStatus(e.message)}}
-async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user)}catch(e){setAuthStatus(e.message)}}
-async function logout(){await fetch("/api/auth/logout");location.reload()}
-async function bootstrap(){const j=await fetch("/api/me").then(r=>r.json());if(j.authenticated)showApp(j.user);else document.getElementById("authScreen").style.display="flex"}
+function showApp(user,csrf=""){csrfToken=csrf||"";document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>refresh())}
+async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
+async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
+async function logout(){try{await api("/api/auth/logout",{method:"POST"})}finally{location.reload()}}
+async function bootstrap(){const j=await fetch("/api/me").then(r=>r.json());if(j.authenticated)showApp(j.user,j.csrf);else document.getElementById("authScreen").style.display="flex"}
 function mealsUI(){const icons={"Café da manhã":"☕","Almoço":"🍽️","Lanche":"🥪","Jantar":"🍴","Ceia":"🌙"};mealsEl.innerHTML=meals.map(m=>"<button class='"+(m==meal?"on":"")+"' onclick='meal="+JSON.stringify(m)+";mealsUI();refresh()'>"+icons[m]+" "+m+"</button>").join("");pm.textContent=icons[meal]+" "+meal}
-async function search(){
-  const q=searchEl.value.trim();
-  chosen=null;
-  sel.textContent="Nenhum alimento selecionado.";
-  document.getElementById("editBase").style.display="none";
-  document.getElementById("newBase").style.display="none";
-  if(!q){foods.innerHTML="";return;}
-  let j=await api("/api/foods?q="+encodeURIComponent(q));
-  if(j.foods.length){
-    foods.innerHTML=j.foods.map(f=>"<div class='food' onclick='selectFood("+JSON.stringify(f)+")'>"+esc(f.nome)+"</div>").join("");
+const searchCache=new Map();let searchController=null,searchSequence=0,searchTimer=null;
+function renderSearchResults(result){
+  if(result.length){
+    foods.innerHTML=result.map(f=>"<div class='food' onclick='selectFood("+JSON.stringify(f)+")'>"+esc(f.nome)+"</div>").join("");
   }else{
     foods.innerHTML="<div class='empty'>Nenhum alimento encontrado.</div>";
     document.getElementById("newBase").style.display="block";
   }
 }
+async function search(){
+  const q=searchEl.value.trim(),key=q.toLocaleLowerCase();
+  chosen=null;
+  sel.textContent="Nenhum alimento selecionado.";
+  document.getElementById("editBase").style.display="none";
+  document.getElementById("newBase").style.display="none";
+  if(!q){foods.innerHTML="";return;}
+  if(q.length<2){foods.innerHTML="<div class='empty'>Digite pelo menos 2 letras para buscar.</div>";return;}
+  const cached=searchCache.get(key);
+  if(cached&&Date.now()-cached.at<120000){renderSearchResults(cached.foods);return;}
+  if(searchController)searchController.abort();
+  searchController=new AbortController();
+  const sequence=++searchSequence;
+  foods.innerHTML="<div class='empty'>Buscando alimentos...</div>";
+  try{
+    const j=await api("/api/foods?q="+encodeURIComponent(q),{signal:searchController.signal});
+    if(sequence!==searchSequence||searchEl.value.trim().toLocaleLowerCase()!==key)return;
+    const result=(j.foods||[]).slice(0,30);
+    searchCache.set(key,{at:Date.now(),foods:result});
+    if(searchCache.size>30)searchCache.delete(searchCache.keys().next().value);
+    renderSearchResults(result);
+  }catch(e){
+    if(e.name!=="AbortError")foods.innerHTML="<div class='empty'>Não foi possível buscar agora. Tente novamente.</div>";
+  }
+}
 function selectFood(f){
   chosen=f;
+  searchSequence++;
+  if(searchController){searchController.abort();searchController=null;}
+  searchEl.value=f.nome;
   sel.textContent="Selecionado: "+f.nome;
   foods.innerHTML="";
   const edit=document.getElementById("editBase");edit.style.display="block";edit.disabled=Number(f.id)>=0;edit.textContent=Number(f.id)<0?"EDITAR MEU ALIMENTO":"BASE COMPARTILHADA · SOMENTE LEITURA";edit.style.opacity=Number(f.id)<0?"1":".65";
@@ -1325,6 +1479,28 @@ function toggleAccumulated(){
   btn.textContent=open?"▼":"▲";
   btn.setAttribute("aria-expanded",String(!open));
 }
+function toggleGoalsDashboard(){
+  const el=document.getElementById("goalCards"),btn=document.getElementById("goalsToggle");
+  if(!el||!btn)return;
+  const open=el.style.display!=="none";
+  el.style.display=open?"none":"grid";
+  btn.textContent=open?"VER METAS":"OCULTAR METAS";
+  btn.setAttribute("aria-expanded",String(!open));
+}
+function renderGoalCards(j){
+  const g=j.goals||{},t=j.daily||{},water=Number(j.water||0);
+  const data=[
+    ["🔥","Calorias",Number(t.energia_kcal||0),Number(g.calorias_kcal||0),"kcal",false],
+    ["💪","Proteína",Number(t.proteina_g||0),Number(g.proteina_g||0),"g",false],
+    ["🍚","Carboidratos",Number(t.carboidrato_g||0),Number(g.carboidratos_g||0),"g",false],
+    ["🥑","Gorduras",Number(t.lipidios_g||0),Number(g.gorduras_g||0),"g",false],
+    ["🌱","Fibras",Number(t.fibra_g||0),Number(g.fibras_g||0),"g",false],
+    ["🧂","Sódio",Number(t.sodio_mg||0),Number(g.sodio_mg||0),"mg",true],
+    ["💧","Água",water/1000,Number(g.agua_ml||0)/1000,"L",false]
+  ];
+  const el=document.getElementById("goalCards");if(!el)return;
+  el.innerHTML=data.map(([icon,label,value,target,unit,limit])=>{const p=pct(value,target);return `<button type="button" class="goalMiniCard ${limit?"limit":""}" onclick="openSummary()"><small>${icon} ${label}</small><b>${fmt(value)} / ${fmt(target)} ${unit}</b><i style="width:${p}%"></i><small>${fmt(p)}% da meta</small></button>`}).join("");
+}
 async function refresh(){
   try{
     const j=await api("/api/day?data="+day.value+"&refeicao="+encodeURIComponent(meal));
@@ -1334,7 +1510,7 @@ async function refresh(){
     if(consumed.length){const toggle=document.getElementById("consumedFoodsToggle");items.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
     try{draw(partial,j.partial||{});}catch(e){console.error("nutrientes:",e)}
     try{await drawWater(Number(j.water||0),Number(goals.agua_ml||0));}catch(e){console.error("hidratação:",e)}
-    try{updateHeroFromDay({...j,goals});renderBottomProgress({...j,goals});}catch(e){console.error("resumo:",e)}
+    try{updateHeroFromDay({...j,goals});renderGoalCards({...j,goals});renderBottomProgress({...j,goals});}catch(e){console.error("resumo:",e)}
   }catch(e){console.error("refresh:",e)}
 }function pct(v,m){if(!m||m<=0)return 0;return Math.min(100,(v/m)*100)}
 function renderBottomProgress(j){
@@ -1359,11 +1535,16 @@ function renderBottomProgress(j){
   }).join("");
 }
 
+function waterSilhouette(sex,p){
+  const body=sex==="F"?"M39 34 L61 34 L65 78 L78 132 L62 132 L60 174 L52 174 L50 121 L48 174 L40 174 L38 132 L22 132 L35 78 Z":"M39 34 L61 34 L67 80 L60 80 L64 174 L53 174 L50 107 L47 174 L36 174 L40 80 L33 80 Z";
+  const fillY=Math.max(0,190-(Math.min(100,p)*1.9));
+  return `<div class="waterFigure"><svg viewBox="0 0 100 190" role="img" aria-label="Silhueta de hidratação ${sex==="F"?"feminina":sex==="M"?"masculina":"neutra"}"><defs><clipPath id="waterBodyMask"><circle cx="50" cy="17" r="14"/><path d="${body}"/></clipPath></defs><circle cx="50" cy="17" r="14" fill="rgba(255,255,255,.17)"/><path d="${body}" fill="rgba(255,255,255,.17)"/><rect x="0" y="${fillY}" width="100" height="190" fill="url(#waterFill)" clip-path="url(#waterBodyMask)"/><defs><linearGradient id="waterFill" x1="0" x2="0" y1="1" y2="0"><stop stop-color="#0ea5e9"/><stop offset="1" stop-color="#7dd3fc"/></linearGradient></defs><circle cx="50" cy="17" r="14" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="2"/><path d="${body}" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="2" stroke-linejoin="round"/></svg><div class="waterFigureText"><b>${sex==="F"?"Silhueta feminina":sex==="M"?"Silhueta masculina":"Silhueta de hidratação"}</b>Preenchimento dos pés à cabeça</div></div>`;
+}
 async function drawWater(w,goal){
   let p=pct(w,goal);
   let entries=[];
   try{entries=await api("/api/water?data="+encodeURIComponent(day.value));}catch(e){}
-  document.getElementById("waterBox").innerHTML=`<div style="display:flex;justify-content:space-between"><b>💧 ${fmt(w/1000)} L</b><span>${fmt(goal/1000)} L meta</span></div><div style="height:12px;background:#e5e7eb;border-radius:20px;margin:8px 0;overflow:hidden"><div style="height:100%;width:${p}%;background:#1683ff"></div></div><div style="font-size:12px;color:#cbd5e1">${fmt(p)}% · ${fmt(Math.max(0,goal-w)/1000)} L restantes</div>
+  document.getElementById("waterBox").innerHTML=`<div style="display:flex;justify-content:space-between"><b>💧 ${fmt(w/1000)} L</b><span>${fmt(goal/1000)} L meta</span></div><div class="waterVisual">${waterSilhouette(profileSex,p)}</div><div style="font-size:12px;color:#cbd5e1;text-align:center">${fmt(p)}% · ${fmt(Math.max(0,goal-w)/1000)} L restantes</div>
   <div style="margin-top:12px"><b>Registros de hoje</b>${entries.length?entries.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.10)"><span>💧 ${fmt(Number(x.quantidade_ml)/1000)} L <small style="color:#94a3b8">${esc(x.hora||'')}</small></span><button onclick="deleteWater(${x.id})" style="padding:5px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.15);background:#26364a;color:#fff">Excluir</button></div>`).join(''):`<div style="font-size:12px;color:#94a3b8;margin-top:7px">Nenhum registro de água.</div>`}</div>`;
 }
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
@@ -1400,6 +1581,11 @@ function openPeriod(){
   loadPeriod();
 }
 function closePeriod(){document.getElementById("periodModal").style.display="none";}
+function exportPeriod(){
+  const start=document.getElementById("periodStart").value,end=document.getElementById("periodEnd").value;
+  if(!start||!end||start>end){alert("Informe um período válido antes de exportar.");return}
+  location.href="/api/export?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end);
+}
 async function loadHistory(start,end){
   const box=document.getElementById("historyChart");if(!box)return;
   try{const j=await api("/api/history?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end));const max=Math.max(1,...j.days.map(x=>Number(x.energia_kcal||0)));box.innerHTML="<h3 style='margin:8px 0'>📈 Evolução diária</h3>"+`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div><small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"}catch(e){box.innerHTML=""}
@@ -1466,19 +1652,90 @@ function draw(el,t){
   }
 }
 async function del(id){if(confirm("Excluir este alimento?")){await api("/api/consume/"+id,{method:"DELETE"});refresh()}}
-async function edit(id){let j=await api("/api/consume/"+id),x=j.item;let w=prompt("Peso em gramas:",x.quantidade_g);if(w===null)return;let r=prompt("Refeição:",x.refeicao);if(r===null)return;if(!meals.includes(r)||Number(w)<=0){alert("Dados inválidos.");return}await api("/api/consume/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({quantidade_g:Number(w),refeicao:r})});refresh()}
+let editingConsumeId=null;
+async function edit(id){
+  try{
+    const j=await api("/api/consume/"+id),x=j.item;
+    editingConsumeId=Number(id);
+    document.getElementById("consumeEditTitle").textContent="✏️ Alterar · "+(x.alimento_nome||"Alimento");
+    document.getElementById("consumeEditWeight").value=Number(x.quantidade_g)||"";
+    document.getElementById("consumeEditMeal").value=meals.includes(x.refeicao)?x.refeicao:meals[0];
+    document.getElementById("consumeEditModal").style.display="block";
+  }catch(e){alert("Não foi possível abrir este consumo: "+e.message)}
+}
+function closeConsumeEdit(){editingConsumeId=null;document.getElementById("consumeEditModal").style.display="none"}
+async function saveConsumeEdit(){
+  const w=Number(document.getElementById("consumeEditWeight").value),r=document.getElementById("consumeEditMeal").value;
+  if(!editingConsumeId||!(w>0)||!meals.includes(r)){alert("Informe uma quantidade válida e selecione uma refeição.");return}
+  try{
+    await api("/api/consume/"+editingConsumeId,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({quantidade_g:w,refeicao:r})});
+    closeConsumeEdit();await refresh();
+  }catch(e){alert("Não foi possível salvar a alteração: "+e.message)}
+}
 const searchEl=document.getElementById("search"),foods=document.getElementById("foods"),items=document.getElementById("items"),partial=document.getElementById("partial"),daily=document.getElementById("daily"),sel=document.getElementById("sel"),mealsEl=document.getElementById("meals"),pm=document.getElementById("pm");
-searchEl.oninput=()=>{clearTimeout(timer);timer=setTimeout(search,120)};bootstrap();
+searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,70)};bootstrap();
 </script></body></html>
 """
+HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V47 · Diário Alimentar · Painel inteligente").replace("V45 · DIÁRIO ALIMENTAR", "V47 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V47 · Diário Alimentar · Painel inteligente</title>")
 
 class H(BaseHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header("Permissions-Policy", "camera=(self), microphone=(), geolocation=()")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; form-action 'self'")
+        if IS_PRODUCTION:
+            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        super().end_headers()
     def js(self,o,s=200,headers=None):
+        if isinstance(o, dict) and isinstance(o.get("error"), str):
+            o = {**o, "error": public_error_message(o["error"])}
         b=json.dumps(o,ensure_ascii=False,default=json_default).encode();self.send_response(s);self.send_header("Content-Type", "application/json; charset=utf-8");self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");self.send_header("Content-Length",str(len(b)));
         for k,v in (headers or {}).items(): self.send_header(k,v)
         self.end_headers();self.wfile.write(b)
-    def body(self):
-        return json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))).decode() or "{}")
+    def client_ip(self):
+        forwarded = self.headers.get("X-Forwarded-For", "")
+        return forwarded.split(",", 1)[0].strip() if forwarded else self.client_address[0]
+    def enforce_rate_limit(self, action, limit, window_seconds, user_id=None):
+        identity = f"user:{user_id}" if user_id else f"ip:{self.client_ip()}"
+        if allow_request(f"{action}:{identity}", limit, window_seconds):
+            return True
+        self.js({"error":"Muitas tentativas. Aguarde alguns minutos antes de tentar novamente."}, 429)
+        return False
+    def body(self, image=False):
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise ValueError("Tamanho da requisição inválido.")
+        limit = MAX_IMAGE_BODY if image else MAX_JSON_BODY
+        if size < 0 or size > limit:
+            raise ValueError("A requisição excede o tamanho permitido.")
+        try:
+            payload = json.loads(self.rfile.read(size).decode() or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("JSON inválido.")
+        if not isinstance(payload, dict):
+            raise ValueError("O corpo da requisição deve ser um objeto JSON.")
+        return payload
+    def csrf_token(self):
+        token = _cookie_value(self, SESSION_COOKIE)
+        return _csrf_for_token(token) if token else ""
+    def verify_csrf(self):
+        origin = self.headers.get("Origin", "")
+        host = self.headers.get("Host", "")
+        if origin and urlparse(origin).netloc != host:
+            self.js({"error":"Origem da requisição não permitida."}, 403)
+            return False
+        supplied = self.headers.get("X-CSRF-Token", "")
+        expected = self.csrf_token()
+        if not expected or not supplied or not hmac.compare_digest(supplied, expected):
+            self.js({"error":"Sessão expirada. Atualize a página e tente novamente."}, 403)
+            return False
+        return True
+    def safe_error(self, error, status=400, message="Não foi possível concluir a solicitação."):
+        LOG.warning("request_failed path=%s method=%s type=%s", self.path, self.command, type(error).__name__, exc_info=True)
+        self.js({"error":message}, status)
     def require_user(self):
         user=_current_user(self)
         if not user:
@@ -1500,7 +1757,7 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200);self.send_header("Content-Type","text/plain; charset=utf-8");self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(APP_VERSION.encode("utf-8"));return
         if p.path=="/api/me":
             user=_current_user(self)
-            if user:self.js({"authenticated":True,"user":user})
+            if user:self.js({"authenticated":True,"user":user,"csrf":self.csrf_token()})
             else:self.js({"authenticated":False})
             return
         if p.path=="/api/auth/logout":
@@ -1540,15 +1797,20 @@ class H(BaseHTTPRequestHandler):
             return
 
         if p.path=="/api/foods":
-            q=parse_qs(p.query).get("q",[""])[0].lower()
-            if not q:self.js({"foods":[]});return
+            q=parse_qs(p.query).get("q",[""])[0].strip().lower()[:60]
+            if len(q)<2:self.js({"foods":[]});return
             nc=ndb();pc=ddb()
             try:
-                base=nc.execute("SELECT id,nome FROM alimentos WHERE lower(nome) LIKE ? ORDER BY nome LIMIT 50",(f"%{q}%",)).fetchall()
-                own=pc.execute("SELECT -id AS id,nome FROM alimentos_usuario WHERE usuario_id=? AND lower(nome) LIKE ? ORDER BY nome LIMIT 50",(self.user["id"],f"%{q}%")).fetchall()
+                prefix=f"{q}%";contains=f"%{q}%"
+                base=list(nc.execute("SELECT id,nome FROM alimentos WHERE nome LIKE ? COLLATE NOCASE ORDER BY nome LIMIT 30",(prefix,)).fetchall())
+                own=list(pc.execute("SELECT -id AS id,nome FROM alimentos_usuario WHERE usuario_id=? AND nome ILIKE ? ORDER BY nome LIMIT 30",(self.user["id"],prefix)).fetchall())
+                if len(base)<20:
+                    extra=nc.execute("SELECT id,nome FROM alimentos WHERE nome LIKE ? COLLATE NOCASE AND nome NOT LIKE ? COLLATE NOCASE ORDER BY nome LIMIT ?",(contains,prefix,30-len(base))).fetchall();base.extend(extra)
+                if len(own)<20:
+                    extra=pc.execute("SELECT -id AS id,nome FROM alimentos_usuario WHERE usuario_id=? AND nome ILIKE ? AND nome NOT ILIKE ? ORDER BY nome LIMIT ?",(self.user["id"],contains,prefix,30-len(own))).fetchall();own.extend(extra)
             finally:
                 nc.close();pc.close()
-            self.js({"foods":[dict(x) for x in list(own)+list(base)]});return
+            self.js({"foods":[dict(x) for x in own+base][:40]});return
         if p.path=="/api/day":
             q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];m=q.get("refeicao",[MEALS[0]])[0];c=ddb()
             try:rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=? ORDER BY id",(self.user["id"],d,)).fetchall()
@@ -1685,6 +1947,7 @@ class H(BaseHTTPRequestHandler):
         if self.path=="/api/auth/register":
             c=None
             try:
+                if not self.enforce_rate_limit("register",3,3600): return
                 x=self.body();email=str(x.get("email","")).strip().lower();password=str(x.get("password",""))
                 if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("Informe um e-mail válido.")
                 if len(password)<8: raise ValueError("A senha deve ter pelo menos 8 caracteres.")
@@ -1692,7 +1955,7 @@ class H(BaseHTTPRequestHandler):
                 row=c.execute("INSERT INTO usuarios(email,senha_hash) VALUES(?,?) RETURNING id,email",(email,_hash_password(password))).fetchone()
                 _ensure_user_records(c,row["id"],migrate_legacy=(existing==0));token=secrets.token_urlsafe(32)
                 c.execute("INSERT INTO sessoes(usuario_id,token_hash,expira_em) VALUES(?,?,NOW()+INTERVAL '30 days')",(row["id"],_token_hash(token)));c.commit()
-                self.js({"ok":True,"user":{"id":row["id"],"email":row["email"]}},headers={"Set-Cookie":_session_cookie(token)})
+                self.js({"ok":True,"user":{"id":row["id"],"email":row["email"]},"csrf":_csrf_for_token(token)},headers={"Set-Cookie":_session_cookie(token)})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":"Não foi possível criar a conta: "+str(e)},400)
@@ -1702,19 +1965,28 @@ class H(BaseHTTPRequestHandler):
         if self.path=="/api/auth/login":
             c=None
             try:
+                if not self.enforce_rate_limit("login",5,900): return
                 x=self.body();email=str(x.get("email","")).strip().lower();password=str(x.get("password",""));c=ddb()
                 row=c.execute("SELECT id,email,senha_hash FROM usuarios WHERE email=?",(email,)).fetchone()
                 if not row or not _verify_password(password,row["senha_hash"]): raise ValueError("E-mail ou senha inválidos.")
                 token=secrets.token_urlsafe(32);c.execute("INSERT INTO sessoes(usuario_id,token_hash,expira_em) VALUES(?,?,NOW()+INTERVAL '30 days')",(row["id"],_token_hash(token)));c.commit()
-                self.js({"ok":True,"user":{"id":row["id"],"email":row["email"]}},headers={"Set-Cookie":_session_cookie(token)})
+                self.js({"ok":True,"user":{"id":row["id"],"email":row["email"]},"csrf":_csrf_for_token(token)},headers={"Set-Cookie":_session_cookie(token)})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},401)
             finally:
                 if c:c.close()
             return
+        if self.path=="/api/auth/logout":
+            if not self.verify_csrf(): return
+            token=_cookie_value(self,SESSION_COOKIE);c=ddb()
+            try:
+                if token:c.execute("DELETE FROM sessoes WHERE token_hash=?",(_token_hash(token),));c.commit()
+            finally:c.close()
+            self.js({"ok":True},headers={"Set-Cookie":_session_cookie("",0)});return
         user=self.require_user()
         if not user:return
+        if not self.verify_csrf(): return
         if self.path=="/api/favorite":
             c=None
             try:
@@ -1741,10 +2013,12 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path=="/api/analyze_plate":
             try:
+                if not self.enforce_rate_limit("vision-user",10,3600,self.user["id"]): return
+                if not self.enforce_rate_limit("vision-ip",20,3600): return
                 if not os.environ.get("OPENAI_API_KEY"): raise ValueError("A análise de prato requer OPENAI_API_KEY configurada no Render.")
                 if OpenAI is None: raise ValueError("A dependência openai não está instalada.")
-                x=self.body();image=str(x.get("image_data", ""))
-                if not image.startswith("data:image/"): raise ValueError("Imagem inválida.")
+                x=self.body(image=True);image=str(x.get("image_data", ""))
+                validate_image_data(image)
                 client_args={"api_key":os.environ.get("OPENAI_API_KEY")}
                 if os.environ.get("OPENAI_API_BASE"): client_args["base_url"]=os.environ.get("OPENAI_API_BASE")
                 nutrient_schema={field:"número estimado por 100 g ou null" for field in ESTIMATED_NUTRIENT_FIELDS}
@@ -1771,15 +2045,17 @@ class H(BaseHTTPRequestHandler):
                     confidence = min(max(confidence, 0.0), 1.0)
                     out.append({"nome":name,"alimento_id":match["id"] if match else None,"alimento_nome":match["nome"] if match else name,"quantidade_g":grams,"colheres_sopa":spoons,"gramas_por_colher":round(grams/spoons,3),"encontrado":bool(match),"confianca":confidence,"nutrientes_estimados":estimated})
                 self.js({"ok":True,"items":out})
-            except Exception as e:self.js({"error":"Não foi possível analisar o prato: "+str(e)},400)
+            except Exception as e:self.safe_error(e,400,"Não foi possível analisar o prato. Confira a imagem e tente novamente.")
             return
         if self.path=="/api/read_nutrition_label":
             try:
+                if not self.enforce_rate_limit("vision-user",10,3600,self.user["id"]): return
+                if not self.enforce_rate_limit("vision-ip",20,3600): return
                 if not os.environ.get("OPENAI_API_KEY"):raise ValueError("A leitura por foto ainda não está configurada. No Render, adicione a variável OPENAI_API_KEY em Environment e faça um novo deploy.")
                 if OpenAI is None:raise ValueError("A dependência openai não está instalada.")
-                x=self.body();image=str(x.get("image_data","")
+                x=self.body(image=True);image=str(x.get("image_data","")
                 )
-                if not image.startswith("data:image/"):raise ValueError("Imagem inválida.")
+                validate_image_data(image)
                 client_args={"api_key":os.environ.get("OPENAI_API_KEY")}
                 if os.environ.get("OPENAI_API_BASE"):client_args["base_url"]=os.environ.get("OPENAI_API_BASE")
                 client=OpenAI(**client_args)
@@ -1794,7 +2070,7 @@ class H(BaseHTTPRequestHandler):
                         if isinstance(data.get(key),(int,float)):data[key]=round(float(data[key])*factor,4)
                     data["base_calculo"]="100ml" if "ml" in unit else "100g";normalizado=True
                 allowed=set(schema);clean={k:data.get(k) for k in allowed};clean["base_calculo_original"]=original_base;clean["normalizado"]=normalizado;clean["confianca"]=float(data.get("confianca",0) or 0);self.js({"ok":True,"data":clean})
-            except Exception as e:self.js({"error":"Não foi possível ler a tabela: "+str(e)},400)
+            except Exception as e:self.safe_error(e,400,"Não foi possível ler a tabela nutricional. Confira a imagem e tente novamente.")
             return
         if self.path=="/api/profile":
             c=None
@@ -1957,6 +2233,7 @@ class H(BaseHTTPRequestHandler):
     def do_PUT(self):
         user=self.require_user()
         if not user:return
+        if not self.verify_csrf(): return
         try:
             if self.path.startswith("/api/food/"):
                 i=int(self.path.rsplit("/",1)[1])
@@ -1973,6 +2250,7 @@ class H(BaseHTTPRequestHandler):
     def do_DELETE(self):
         user=self.require_user()
         if not user:return
+        if not self.verify_csrf(): return
         try:
             if self.path.startswith("/api/water/"):
                 i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM hidratacao WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True});return
@@ -1985,5 +2263,7 @@ class H(BaseHTTPRequestHandler):
 
 if __name__=="__main__":
     if not NUT.exists(): print("ERRO: banco_nutrientes.db não encontrado.");input("ENTER para sair...");raise SystemExit
-    print("V27 MOBILE iniciado.");print("No PC: http://127.0.0.1:5000");print("Para encerrar: Ctrl+C")
+    print(f"{APP_VERSION}: preparando estrutura do banco...")
+    init_db()
+    print(f"{APP_VERSION} iniciado.");print("No PC: http://127.0.0.1:5000");print("Para encerrar: Ctrl+C")
     ThreadingHTTPServer((HOST,PORT),H).serve_forever()
