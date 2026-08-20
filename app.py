@@ -614,7 +614,7 @@ main{
 <section class="hero">
   <div class="heroTop">
     <div>
-      <div class="eyebrow">V38 · DIÁRIO ALIMENTAR</div>
+      <div class="eyebrow">V39 · DIÁRIO ALIMENTAR</div>
       <h1 id="heroGreeting">Olá! 👋</h1>
       <div id="heroDate" class="heroDate"></div>
     </div>
