@@ -39,7 +39,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V48 · Silhueta natural + Banco estável + Segurança P0"
+APP_VERSION = "V49 · Hidratação visual + Banco estável + Segurança P0"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -751,16 +751,20 @@ main{
 .quickStat{display:block!important;min-width:0;padding:10px!important}
 .quickStatHead{display:flex;align-items:center;gap:5px;min-width:0}
 .quickStatHead span{font-size:18px!important;line-height:1}
-.quickStatHead small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px!important}
+.quickStatHead small{overflow:visible;text-overflow:clip;white-space:normal;font-size:13px!important;font-weight:800;line-height:1.14}
 .quickStat strong{font-size:11px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:7px 0 6px!important}
 .quickMeter{height:6px;border-radius:99px;overflow:hidden;background:rgba(255,255,255,.18)}
 .quickMeter i{display:block;height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,#38bdf8,#22c55e);transition:width .28s ease}
 .quickStat.water .quickMeter i{background:linear-gradient(90deg,#38bdf8,#0ea5e9)}
-.waterVisual{display:flex;align-items:center;justify-content:center;min-height:88px;margin:7px 0 3px}
-.waterFigure{display:flex;align-items:center;gap:11px;justify-content:center}
-.waterFigure svg{width:58px;height:82px;filter:drop-shadow(0 5px 9px rgba(14,165,233,.22))}
-.waterFigureText{font-size:12px;color:#cbd5e1;line-height:1.35}
-.waterFigureText b{display:block;color:#e0f2fe;font-size:16px;margin-bottom:2px}
+.waterVisual{display:flex;align-items:center;justify-content:center;min-height:178px;margin:8px 0 5px}
+.waterFigure{display:flex;align-items:center;gap:17px;justify-content:center}
+.waterArtwork{position:relative;width:116px;height:164px;flex:0 0 116px;filter:drop-shadow(0 7px 12px rgba(14,165,233,.25))}
+.waterArtwork::before,.waterArtwork::after{content:"";position:absolute;inset:0;background:#718096;mask:var(--silhouette) center/contain no-repeat;-webkit-mask:var(--silhouette) center/contain no-repeat}
+.waterArtwork::after{background:linear-gradient(0deg,#0284c7,#38bdf8 78%,#7dd3fc);clip-path:inset(calc(100% - var(--water-level)) 0 0 0);transition:clip-path .35s ease}
+.waterFigureText{font-size:13px;color:#cbd5e1;line-height:1.42;max-width:164px}
+.waterFigureText b{display:block;color:#e0f2fe;font-size:17px;margin-bottom:3px}
+.waterRecordsHeader{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:14px}
+.waterRecordsToggle{padding:6px 9px;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:#16263a;color:#e0f2fe;font-size:11px;font-weight:bold}
 .goalCards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
 .goalMiniCard{min-width:0;text-align:left;padding:10px;border:1px solid rgba(255,255,255,.15);border-radius:12px;background:rgba(10,29,48,.58);color:#fff;cursor:pointer}
 .goalMiniCard:hover{border-color:rgba(125,211,252,.7);background:rgba(17,50,78,.78)}
@@ -770,7 +774,7 @@ main{
 .goalMiniCard.limit i{background:linear-gradient(90deg,#fbbf24,#fb7185)}
 @media(max-width:700px){.goalCards{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
 @media(max-width:1000px){.quickStats{grid-template-columns:repeat(4,minmax(0,1fr))!important}}
-@media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.waterFigure svg{width:54px;height:76px}}
+@media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.quickStatHead small{font-size:13px!important}.waterVisual{min-height:170px}.waterArtwork{width:108px;height:154px;flex-basis:108px}.waterFigure{gap:12px}.waterFigureText{font-size:12px;max-width:142px}.waterFigureText b{font-size:15px}}
 </style></head><body>
 <div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V45 · Diário Alimentar · Segurança P0</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
 <main>
@@ -785,7 +789,7 @@ main{
   </div>
   <div class="quickStats">
     <div class="quickStat"><div class="quickStatHead"><span>🔥</span><small>Calorias</small></div><strong id="heroKcal">0 / —</strong><div class="quickMeter"><i id="heroKcalFill"></i></div></div>
-    <div class="quickStat"><div class="quickStatHead"><span>💪</span><small>Proteína</small></div><strong id="heroProtein">0 / —</strong><div class="quickMeter"><i id="heroProteinFill"></i></div></div>
+    <div class="quickStat"><div class="quickStatHead"><span>💪</span><small>Proteínas</small></div><strong id="heroProtein">0 / —</strong><div class="quickMeter"><i id="heroProteinFill"></i></div></div>
     <div class="quickStat"><div class="quickStatHead"><span>🍚</span><small>Carboidratos</small></div><strong id="heroCarbs">0 / —</strong><div class="quickMeter"><i id="heroCarbsFill"></i></div></div>
     <div class="quickStat"><div class="quickStatHead"><span>🥑</span><small>Gorduras</small></div><strong id="heroFat">0 / —</strong><div class="quickMeter"><i id="heroFatFill"></i></div></div>
     <div class="quickStat"><div class="quickStatHead"><span>🌱</span><small>Fibras</small></div><strong id="heroFiber">0 / —</strong><div class="quickMeter"><i id="heroFiberFill"></i></div></div>
@@ -1536,21 +1540,18 @@ function renderBottomProgress(j){
 }
 
 function waterSilhouette(sex,p){
-  const isFemale=sex==="F",kind=isFemale?"female":"male";
-  const maleBody="M42 35 C37 37 33 41 31 48 L26 67 L20 84 Q19 89 23 91 Q27 92 29 87 L36 70 L39 93 L35 116 Q34 122 38 128 L42 153 L39 177 Q39 183 44 184 Q48 184 49 178 L50 148 L51 178 Q52 184 56 184 Q61 183 61 177 L58 153 L62 128 Q66 122 65 116 L61 93 L64 70 L71 87 Q73 92 77 91 Q81 89 80 84 L74 67 L69 48 C67 41 63 37 58 35 Z";
-  const femaleBody="M43 35 C38 37 35 42 34 49 L29 68 L23 85 Q22 90 26 92 Q30 93 32 88 L39 71 L41 93 L36 113 Q34 120 39 127 L43 153 L40 178 Q40 184 45 184 Q49 184 50 178 L50 149 L51 178 Q52 184 56 184 Q61 184 61 178 L58 153 L62 127 Q67 120 65 113 L59 93 L61 71 L68 88 Q70 93 74 92 Q78 90 77 85 L71 68 L66 49 C65 42 62 37 57 35 Z";
-  const head=isFemale?"M50 5 C42 5 38 10 38 17 C38 24 43 30 50 31 C57 30 62 24 62 17 C62 10 58 5 50 5 Z":"M50 5 C42 5 38 10 38 17 C38 24 43 30 50 31 C57 30 62 24 62 17 C62 10 58 5 50 5 Z";
-  const hair=isFemale?"M61 10 C68 11 71 16 70 22 C69 27 66 30 61 31 L62 17 Z":"";
-  const body=isFemale?femaleBody:maleBody,fillY=Math.max(0,190-(Math.min(100,p)*1.9)),maskId=`waterMask_${kind}`,fillId=`waterFill_${kind}`;
-  return `<div class="waterFigure"><svg viewBox="0 0 100 190" role="img" aria-label="Silhueta de hidratação ${isFemale?"feminina":sex==="M"?"masculina":"neutra"}"><defs><clipPath id="${maskId}"><path d="${head}"/><path d="${hair}"/><path d="${body}"/></clipPath><linearGradient id="${fillId}" x1="0" x2="0" y1="1" y2="0"><stop stop-color="#0284c7"/><stop offset="1" stop-color="#7dd3fc"/></linearGradient></defs><path d="${head}" fill="rgba(226,232,240,.3)"/><path d="${hair}" fill="rgba(226,232,240,.3)"/><path d="${body}" fill="rgba(226,232,240,.3)"/><rect x="0" y="${fillY}" width="100" height="190" fill="url(#${fillId})" clip-path="url(#${maskId})"/><path d="${head}" fill="none" stroke="rgba(255,255,255,.58)" stroke-width="1.8"/><path d="${hair}" fill="none" stroke="rgba(255,255,255,.58)" stroke-width="1.8"/><path d="${body}" fill="none" stroke="rgba(255,255,255,.58)" stroke-width="1.8" stroke-linejoin="round"/></svg><div class="waterFigureText"><b>${isFemale?"Silhueta feminina":sex==="M"?"Silhueta masculina":"Silhueta de hidratação"}</b>Preenchimento dos pés à cabeça</div></div>`;
+  const isFemale=sex==="F",asset=isFemale?"/assets/silhueta_hidratacao_feminina_aprovada.png":"/assets/silhueta_hidratacao_masculina_aprovada.png";
+  const label=isFemale?"Silhueta feminina com cabelo":sex==="M"?"Silhueta masculina":"Silhueta de hidratação";
+  return `<div class="waterFigure"><div class="waterArtwork" role="img" aria-label="${label}" style="--water-level:${Math.min(100,Math.max(0,p))}%;--silhouette:url('${asset}')"></div><div class="waterFigureText"><b>${label}</b>Preenchimento dos pés à cabeça</div></div>`;
 }
 async function drawWater(w,goal){
   let p=pct(w,goal);
   let entries=[];
   try{entries=await api("/api/water?data="+encodeURIComponent(day.value));}catch(e){}
-  document.getElementById("waterBox").innerHTML=`<div style="display:flex;justify-content:space-between"><b>💧 ${fmt(w/1000)} L</b><span>${fmt(goal/1000)} L meta</span></div><div class="waterVisual">${waterSilhouette(profileSex,p)}</div><div style="font-size:12px;color:#cbd5e1;text-align:center">${fmt(p)}% · ${fmt(Math.max(0,goal-w)/1000)} L restantes</div>
-  <div style="margin-top:12px"><b>Registros de hoje</b>${entries.length?entries.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.10)"><span>💧 ${fmt(Number(x.quantidade_ml)/1000)} L <small style="color:#94a3b8">${esc(x.hora||'')}</small></span><button onclick="deleteWater(${x.id})" style="padding:5px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.15);background:#26364a;color:#fff">Excluir</button></div>`).join(''):`<div style="font-size:12px;color:#94a3b8;margin-top:7px">Nenhum registro de água.</div>`}</div>`;
+  const recordRows=entries.length?entries.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.10)"><span>💧 ${fmt(Number(x.quantidade_ml)/1000)} L <small style="color:#94a3b8">${esc(x.hora||'')}</small></span><button onclick="deleteWater(${x.id})" style="padding:5px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.15);background:#26364a;color:#fff">Excluir</button></div>`).join(''):`<div style="font-size:12px;color:#94a3b8;margin-top:7px">Nenhum registro de água.</div>`;
+  document.getElementById("waterBox").innerHTML=`<div style="display:flex;justify-content:space-between"><b>💧 ${fmt(w/1000)} L</b><span>${fmt(goal/1000)} L meta</span></div><div class="waterVisual">${waterSilhouette(profileSex,p)}</div><div style="font-size:12px;color:#cbd5e1;text-align:center">${fmt(p)}% · ${fmt(Math.max(0,goal-w)/1000)} L restantes</div><div class="waterRecordsHeader"><b>Registros de hoje (${entries.length})</b><button id="waterRecordsToggle" class="waterRecordsToggle" onclick="toggleWaterRecords()" aria-expanded="false">VER REGISTROS ▼</button></div><div id="waterRecords" style="display:none">${recordRows}</div>`;
 }
+function toggleWaterRecords(){const box=document.getElementById("waterRecords"),btn=document.getElementById("waterRecordsToggle");if(!box||!btn)return;const open=box.style.display!=="none";box.style.display=open?"none":"block";btn.textContent=open?"VER REGISTROS ▼":"OCULTAR REGISTROS ▲";btn.setAttribute("aria-expanded",String(!open));}
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
 async function addWater(ml){try{await api("/api/water",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,quantidade_ml:ml})});await refresh();}catch(e){alert("Não foi possível registrar a água: "+e.message)}}
 async function customWater(){let v=prompt("Quantidade de água em ml:","500");if(v===null)return;let ml=Number(v);if(!(ml>0)){alert("Quantidade inválida.");return}await addWater(ml)}
@@ -1680,7 +1681,7 @@ const searchEl=document.getElementById("search"),foods=document.getElementById("
 searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,70)};bootstrap();
 </script></body></html>
 """
-HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V48 · Diário Alimentar · Silhueta natural").replace("V45 · DIÁRIO ALIMENTAR", "V48 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V48 · Diário Alimentar · Silhueta natural</title>")
+HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V49 · Diário Alimentar · Hidratação visual").replace("V45 · DIÁRIO ALIMENTAR", "V49 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V49 · Diário Alimentar · Hidratação visual</title>")
 
 class H(BaseHTTPRequestHandler):
     def end_headers(self):
@@ -1759,6 +1760,14 @@ class H(BaseHTTPRequestHandler):
             b=HTML.encode();self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");self.send_header("Pragma","no-cache");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
         if p.path=="/health":
             self.send_response(200);self.send_header("Content-Type","text/plain; charset=utf-8");self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(APP_VERSION.encode("utf-8"));return
+        static_assets={
+            "/assets/silhueta_hidratacao_masculina_aprovada.png":BASE/"assets"/"silhueta_hidratacao_masculina_aprovada.png",
+            "/assets/silhueta_hidratacao_feminina_aprovada.png":BASE/"assets"/"silhueta_hidratacao_feminina_aprovada.png",
+        }
+        if p.path in static_assets:
+            img=static_assets[p.path]
+            if not img.exists():self.send_error(404);return
+            b=img.read_bytes();self.send_response(200);self.send_header("Content-Type","image/png");self.send_header("Cache-Control","public, max-age=86400");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
         if p.path=="/api/me":
             user=_current_user(self)
             if user:self.js({"authenticated":True,"user":user,"csrf":self.csrf_token()})
