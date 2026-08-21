@@ -50,7 +50,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V53 · Silhuetas aprovadas + Relatório PDF + Segurança P0"
+APP_VERSION = "V55 · Bebidas em ml + Segurança P0"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -214,7 +214,8 @@ def init_db():
             refeicao TEXT NOT NULL,
             alimento_id INTEGER,
             alimento_nome TEXT NOT NULL,
-            quantidade_g REAL NOT NULL
+            quantidade_g REAL NOT NULL,
+            unidade TEXT NOT NULL DEFAULT 'g'
         )
     """)
 
@@ -310,6 +311,7 @@ def init_db():
             usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
             alimento_id INTEGER NOT NULL, alimento_nome TEXT NOT NULL,
             nome TEXT NOT NULL, quantidade_g REAL NOT NULL,
+            unidade TEXT NOT NULL DEFAULT 'g',
             criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(usuario_id, alimento_id, nome)
         )
@@ -323,6 +325,8 @@ def init_db():
             c.execute(f"ALTER TABLE {table} ADD COLUMN usuario_id BIGINT")
     c.execute("CREATE INDEX IF NOT EXISTS idx_consumo_usuario_data ON consumo(usuario_id, data)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_hidratacao_usuario_data ON hidratacao(usuario_id, data)")
+    c.execute("ALTER TABLE consumo ADD COLUMN IF NOT EXISTS unidade TEXT NOT NULL DEFAULT 'g'")
+    c.execute("ALTER TABLE porcoes ADD COLUMN IF NOT EXISTS unidade TEXT NOT NULL DEFAULT 'g'")
     c.execute("""
         CREATE TABLE IF NOT EXISTS alimentos_usuario(
             id BIGSERIAL PRIMARY KEY,
@@ -1129,7 +1133,7 @@ main{
 </div>
 <div class="card"><h2>➕ Adicionar alimento</h2>
 <input id="search" class="search" placeholder="Digite o nome do alimento..."><div id="foods" class="foods"></div>
-<div class="add"><input id="weight" type="number" value="100" min="0.1" step="0.1"><button onclick="add()">ADICIONAR</button></div>
+<div class="add"><input id="weight" type="number" value="100" min="0.1" step="0.1"><select id="quantityUnit" aria-label="Unidade da quantidade" style="width:72px;border:1px solid #ffffff25;border-radius:10px;background:#16263a;color:#fff;font-weight:bold"><option value="g">g</option><option value="ml">ml</option></select><button onclick="add()">ADICIONAR</button></div>
 <div id="sel" class="sel">Nenhum alimento selecionado.</div>
 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:9px"><button onclick="favoriteChosen()" style="flex:1;padding:10px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">☆ FAVORITO</button><button onclick="savePortion()" style="flex:1;padding:10px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">💾 SALVAR PORÇÃO</button></div>
 <div id="personalLists" style="margin-top:10px"></div>
@@ -1264,8 +1268,8 @@ main{
       <button onclick="closeConsumeEdit()" style="border:1px solid #475569;background:#1e293b;color:#f8fafc;border-radius:10px;padding:7px 11px;font-size:17px">✕</button>
     </div>
     <p style="margin:8px 0 14px;color:#cbd5e1;font-size:13px">Ajuste a quantidade e escolha uma refeição válida para este alimento.</p>
-    <label style="display:block;font-size:12px;font-weight:bold;margin-top:10px">Quantidade em gramas
-      <input id="consumeEditWeight" type="number" min="0.1" step="0.1" style="width:100%;padding:11px;margin-top:5px;border:1px solid #475569;border-radius:10px;background:#172033;color:#fff;font-size:16px">
+    <label id="consumeEditQuantityLabel" style="display:block;font-size:12px;font-weight:bold;margin-top:10px">Quantidade
+      <div style="display:flex;gap:7px;margin-top:5px"><input id="consumeEditWeight" type="number" min="0.1" step="0.1" style="flex:1;min-width:0;padding:11px;border:1px solid #475569;border-radius:10px;background:#172033;color:#fff;font-size:16px"><select id="consumeEditUnit" style="width:76px;padding:11px;border:1px solid #475569;border-radius:10px;background:#172033;color:#fff;font-size:16px"><option value="g">g</option><option value="ml">ml</option></select></div>
     </label>
     <label style="display:block;font-size:12px;font-weight:bold;margin-top:12px">Tipo de refeição
       <select id="consumeEditMeal" style="width:100%;padding:11px;margin-top:5px;border:1px solid #475569;border-radius:10px;background:#172033;color:#fff;font-size:16px">
@@ -1388,6 +1392,7 @@ async function loadProfile(){
     document.getElementById('profileActivity').value=j.atividade||'';
     document.getElementById('profileGoal').value=j.objetivo||'';
     renderProfileGreeting();
+    if(window.lastDaySnapshot){drawWater(Number(window.lastDaySnapshot.water||0),Number((window.lastDaySnapshot.goals||{}).agua_ml||0),window.lastDaySnapshot.water_entries||[]);}
     if(!profileName) openProfile(true);
   }catch(e){console.error(e)}
 }
@@ -1522,7 +1527,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",
 let csrfToken="";
 async function api(u,o={}){const method=(o.method||"GET").toUpperCase();const headers={...(o.headers||{})};if(["POST","PUT","DELETE"].includes(method)&&csrfToken)headers["X-CSRF-Token"]=csrfToken;let r=await fetch(u,{...o,headers}),j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}
 function setAuthStatus(msg){const el=document.getElementById("authStatus");if(el)el.textContent=msg||""}
-function showApp(user,csrf=""){csrfToken=csrf||"";document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>refresh())}
+function showApp(user,csrf=""){csrfToken=csrf||"";document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).catch(e=>console.error("carregamento inicial:",e))}
 async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function logout(){try{await api("/api/auth/logout",{method:"POST"})}finally{location.reload()}}
@@ -1531,7 +1536,7 @@ function mealsUI(){const icons={"Café da manhã":"☕","Almoço":"🍽️","Lan
 const searchCache=new Map();let searchController=null,searchSequence=0,searchTimer=null;
 function renderSearchResults(result){
   if(result.length){
-    foods.innerHTML=result.map(f=>"<div class='food' onclick='selectFood("+JSON.stringify(f)+")'>"+esc(f.nome)+"</div>").join("");
+    foods.innerHTML=result.map(f=>"<div class='food' onclick='selectFood("+JSON.stringify(f)+")'>"+esc(f.nome)+" <small style='opacity:.7'>· 100 "+esc(foodUnit(f))+"</small></div>").join("");
   }else{
     foods.innerHTML="<div class='empty'>Nenhum alimento encontrado.</div>";
     document.getElementById("newBase").style.display="block";
@@ -1547,10 +1552,15 @@ async function search(){
   if(q.length<2){foods.innerHTML="<div class='empty'>Digite pelo menos 2 letras para buscar.</div>";return;}
   const cached=searchCache.get(key);
   if(cached&&Date.now()-cached.at<120000){renderSearchResults(cached.foods);return;}
+  const warm=[...searchCache.entries()].find(([cachedKey,entry])=>key.startsWith(cachedKey)&&Date.now()-entry.at<120000);
+  if(warm){
+    const warmResults=warm[1].foods.filter(f=>String(f.nome||"").toLocaleLowerCase().includes(key));
+    if(warmResults.length)renderSearchResults(warmResults);
+  }
   if(searchController)searchController.abort();
   searchController=new AbortController();
   const sequence=++searchSequence;
-  foods.innerHTML="<div class='empty'>Buscando alimentos...</div>";
+  if(!warm)foods.innerHTML="<div class='empty'>Buscando alimentos...</div>";
   try{
     const j=await api("/api/foods?q="+encodeURIComponent(q),{signal:searchController.signal});
     if(sequence!==searchSequence||searchEl.value.trim().toLocaleLowerCase()!==key)return;
@@ -1562,8 +1572,12 @@ async function search(){
     if(e.name!=="AbortError")foods.innerHTML="<div class='empty'>Não foi possível buscar agora. Tente novamente.</div>";
   }
 }
+function foodUnit(f){return String(f?.unidade||"").toLowerCase()==="ml"||String(f?.base_calculo||"").toLowerCase()==="100ml"||String(f?.porcao_unidade||"").toLowerCase()==="ml"?"ml":"g"}
+function setQuantityUnit(unit){const u=unit==="ml"?"ml":"g",el=document.getElementById("quantityUnit");if(el)el.value=u;return u}
 function selectFood(f){
   chosen=f;
+  chosen.unidade=foodUnit(f);
+  setQuantityUnit(chosen.unidade);
   searchSequence++;
   if(searchController){searchController.abort();searchController=null;}
   searchEl.value=f.nome;
@@ -1571,6 +1585,7 @@ function selectFood(f){
   foods.innerHTML="";
   const edit=document.getElementById("editBase");edit.style.display="block";edit.disabled=Number(f.id)>=0;edit.textContent=Number(f.id)<0?"EDITAR MEU ALIMENTO":"BASE COMPARTILHADA · SOMENTE LEITURA";edit.style.opacity=Number(f.id)<0?"1":".65";
   document.getElementById("newBase").style.display="none";
+  if(f.unidade===undefined&&Number(f.id)<0){api("/api/food/"+f.id).then(j=>{if(chosen&&chosen.id===f.id){chosen.unidade=foodUnit(j.food||{});setQuantityUnit(chosen.unidade)}}).catch(()=>{})}
 }
 async function favoriteChosen(){
   if(!chosen){alert("Selecione um alimento primeiro.");return}
@@ -1580,24 +1595,26 @@ async function savePortion(){
   if(!chosen){alert("Selecione um alimento primeiro.");return}
   const nome=prompt("Nome da porção (ex.: 1 colher, 1 fatia):","Porção habitual");if(nome===null)return;
   const q=Number(document.getElementById("weight").value);if(!(q>0)){alert("Informe uma quantidade válida.");return}
-  try{await api("/api/portion",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({alimento_id:chosen.id,alimento_nome:chosen.nome,nome,quantidade_g:q})});await loadPersonalLists();alert("Porção salva.")}catch(e){alert(e.message)}
+  const unidade=document.getElementById("quantityUnit").value;
+  try{await api("/api/portion",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({alimento_id:chosen.id,alimento_nome:chosen.nome,nome,quantidade_g:q,unidade})});await loadPersonalLists();alert("Porção salva.")}catch(e){alert(e.message)}
 }
 async function loadPersonalLists(){
   const box=document.getElementById("personalLists");if(!box)return;
   try{const [fav,port]=await Promise.all([api("/api/favorites"),api("/api/portions")]);
     const fhtml=fav.length?`<div style="font-size:12px;font-weight:bold;margin:8px 0 4px">⭐ Favoritos</div>`+fav.map(f=>`<button onclick='selectFood(${JSON.stringify({id:f.alimento_id,nome:f.alimento_nome})})' style="margin:3px;padding:7px 9px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff">${esc(f.alimento_nome)}</button>`).join(""):"";
-    const phtml=port.length?`<div style="font-size:12px;font-weight:bold;margin:8px 0 4px">💾 Porções salvas</div>`+port.map(p=>`<button onclick='selectFood(${JSON.stringify({id:p.alimento_id,nome:p.alimento_nome})});document.getElementById("weight").value=${Number(p.quantidade_g)||0}' style="margin:3px;padding:7px 9px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff">${esc(p.alimento_nome)} · ${esc(p.nome)} (${fmt(p.quantidade_g)} g)</button>`).join(""):"";
+    const phtml=port.length?`<div style="font-size:12px;font-weight:bold;margin:8px 0 4px">💾 Porções salvas</div>`+port.map(p=>`<button onclick='selectFood(${JSON.stringify({id:p.alimento_id,nome:p.alimento_nome,unidade:p.unidade||"g"})});document.getElementById("weight").value=${Number(p.quantidade_g)||0};setQuantityUnit(${JSON.stringify(p.unidade||"g")})' style="margin:3px;padding:7px 9px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff">${esc(p.alimento_nome)} · ${esc(p.nome)} (${fmt(p.quantidade_g)} ${esc(p.unidade||"g")})</button>`).join(""):"";
     box.innerHTML=fhtml+phtml;
   }catch(e){box.innerHTML=""}
 }
 const editFields=[["nome","Nome","text"],["energia_kcal","Calorias (kcal)","number"],["proteina_g","Proteína (g)","number"],["carboidrato_g","Carboidratos (g)","number"],["lipidios_g","Gorduras (g)","number"],["fibra_g","Fibras (g)","number"],["colesterol_mg","Colesterol (mg)","number"],["calcio_mg","Cálcio (mg)","number"],["magnesio_mg","Magnésio (mg)","number"],["fosforo_mg","Fósforo (mg)","number"],["ferro_mg","Ferro (mg)","number"],["sodio_mg","Sódio (mg)","number"],["potassio_mg","Potássio (mg)","number"],["zinco_mg","Zinco (mg)","number"],["vitamina_c_mg","Vitamina C (mg)","number"]];
+function syncFoodBase(prefix){const unit=document.getElementById(prefix+"_base_unit")?.value==="ml"?"ml":"g",hint=document.getElementById(prefix+"_base_hint");if(hint)hint.textContent="Valores por 100 "+unit}
 
 async function resizePhoto(file){
   return await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>{const img=new Image();img.onload=()=>{const max=1600,scale=Math.min(1,max/Math.max(img.width,img.height)),cv=document.createElement("canvas");cv.width=Math.round(img.width*scale);cv.height=Math.round(img.height*scale);cv.getContext("2d").drawImage(img,0,0,cv.width,cv.height);resolve(cv.toDataURL("image/jpeg",.82))};img.onerror=reject;img.src=r.result};r.onerror=reject;r.readAsDataURL(file)})
 }
 async function readNutritionPhoto(){
   const status=document.getElementById("photoStatus"),file=window.nutritionPhotoFile;if(!file){alert("Escolha uma imagem da galeria ou fotografe a tabela nutricional.");return}
-  try{status.textContent="Lendo a fotografia...";const image_data=await resizePhoto(file);const j=await api("/api/read_nutrition_label",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image_data})});const d=j.data||{};for(const x of editFields){const el=document.getElementById("nf_"+x[0]);if(el&&d[x[0]]!==null&&d[x[0]]!==undefined)el.value=d[x[0]]}if(d.nome)document.getElementById("nf_nome").value=d.nome;status.textContent=(d.base_calculo&&d.base_calculo!=="100g"?"Confira a base de cálculo: "+d.base_calculo+". ":"")+"Campos preenchidos. Confira antes de salvar."}catch(e){status.textContent="";alert(e.message)}
+  try{status.textContent="Lendo a fotografia...";const image_data=await resizePhoto(file);const j=await api("/api/read_nutrition_label",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image_data})});const d=j.data||{};for(const x of editFields){const el=document.getElementById("nf_"+x[0]);if(el&&d[x[0]]!==null&&d[x[0]]!==undefined)el.value=d[x[0]]}if(d.nome)document.getElementById("nf_nome").value=d.nome;const unit=(d.base_calculo==="100ml"||d.porcao_unidade==="ml")?"ml":"g",unitEl=document.getElementById("nf_base_unit");if(unitEl){unitEl.value=unit;syncFoodBase("nf")}status.textContent="Campos preenchidos. Confira se a referência é por 100 "+unit+" antes de salvar."}catch(e){status.textContent="";alert(e.message)}
 }
 let plateState={items:[],meal:""};
 const plateMeals=["Café da manhã","Almoço","Lanche","Jantar","Ceia"];
@@ -1669,8 +1686,10 @@ function openNewFood(){
       (x[2]=="number"?"step='0.01'":"")+
       " value='' style='width:100%;padding:10px;border:1px solid #ddd;border-radius:9px;font-size:16px'></label>";
   }).join("");
+  form.insertAdjacentHTML("afterbegin",`<div style="display:flex;gap:8px;align-items:end;padding:11px;margin-bottom:12px;background:#ffffff0d;border:1px solid #ffffff20;border-radius:11px"><label style="flex:1;font-size:12px;font-weight:bold">Referência nutricional<select id="nf_base_unit" onchange="syncFoodBase('nf')" style="display:block;width:100%;margin-top:5px;padding:10px;border:1px solid #ffffff35;border-radius:9px;background:#16263a;color:#fff"><option value="g">Por 100 g · alimento sólido</option><option value="ml">Por 100 ml · bebida</option></select></label><b id="nf_base_hint" style="font-size:13px;color:#7dd3fc;white-space:nowrap">Valores por 100 g</b></div>`);
   const q=searchEl.value.trim();
   document.getElementById("nf_nome").value=q;
+  syncFoodBase("nf");
   document.getElementById("newFoodModal").style.display="block";
 }
 function closeNewFood(){document.getElementById("newFoodModal").style.display="none";}
@@ -1683,6 +1702,7 @@ async function saveNewFood(){
       d[x[0]]=x[0]=="nome" ? v.trim() : (v==="" ? null : Number(v));
     }
     if(!d.nome){alert("Informe o nome do alimento.");return;}
+    const unit=document.getElementById("nf_base_unit").value;d.base_calculo=unit==="ml"?"100ml":"100g";d.porcao_unidade=unit;
     await api("/api/food",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(d)});
     closeNewFood();
     searchEl.value=d.nome;
@@ -1704,6 +1724,7 @@ async function openFoodEditor(){
         (x[2]=="number"?"step='0.01'":"")+
         " value='"+escAttr(v)+"' style='width:100%;padding:10px;border:1px solid #ddd;border-radius:9px;font-size:16px'></label>";
     }).join("");
+    const unit=foodUnit(f);document.getElementById("foodForm").insertAdjacentHTML("afterbegin",`<div style="display:flex;gap:8px;align-items:end;padding:11px;margin-bottom:12px;background:#ffffff0d;border:1px solid #ffffff20;border-radius:11px"><label style="flex:1;font-size:12px;font-weight:bold">Referência nutricional<select id="ef_base_unit" onchange="syncFoodBase('ef')" style="display:block;width:100%;margin-top:5px;padding:10px;border:1px solid #ffffff35;border-radius:9px;background:#16263a;color:#fff"><option value="g" ${unit==="g"?"selected":""}>Por 100 g · alimento sólido</option><option value="ml" ${unit==="ml"?"selected":""}>Por 100 ml · bebida</option></select></label><b id="ef_base_hint" style="font-size:13px;color:#7dd3fc;white-space:nowrap">Valores por 100 ${unit}</b></div>`);syncFoodBase("ef");
     document.getElementById("foodModal").style.display="block";
   }catch(e){alert("Não foi possível abrir o cadastro: "+e.message)}
 }
@@ -1720,12 +1741,13 @@ async function saveFood(){
       d[x[0]]=x[0]=="nome" ? v.trim() : (v==="" ? null : Number(v));
     }
     if(!d.nome){alert("Nome obrigatório.");return}
+    const unit=document.getElementById("ef_base_unit").value;d.base_calculo=unit==="ml"?"100ml":"100g";d.porcao_unidade=unit;
     await api("/api/food/"+chosen.id,{
       method:"PUT",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify(d)
     });
-    chosen.nome=d.nome;
+    chosen.nome=d.nome;chosen.unidade=unit;setQuantityUnit(unit);
     document.getElementById("sel").textContent="Selecionado: "+d.nome;
     closeFoodModal();
     refresh();
@@ -1735,9 +1757,10 @@ async function saveFood(){
 async function add(){
   if(!chosen){alert("Selecione um alimento.");return}
   const w=Number(weight.value);
-  if(w<=0){alert("Peso inválido.");return}
+  const unidade=document.getElementById("quantityUnit").value;
+  if(w<=0){alert("Quantidade inválida.");return}
   try{
-    await api("/api/consume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,refeicao:meal,alimento_id:chosen.id,alimento_nome:chosen.nome,quantidade_g:w})});
+    await api("/api/consume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,refeicao:meal,alimento_id:chosen.id,alimento_nome:chosen.nome,quantidade_g:w,unidade})});
     searchEl.value="";foods.innerHTML="";sel.textContent="Nenhum alimento selecionado.";chosen=null;
     const list=document.getElementById("items"), toggle=document.getElementById("consumedFoodsToggle");
     if(list){list.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
@@ -1770,7 +1793,7 @@ async function showNutrientTip(el,ev){
     if(!j){j=await api("/api/nutrient_sources?nutrient="+encodeURIComponent(nutrient)+"&start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end));tipCache[key]=j}
     if(!el.matches(":hover"))return;
     const unit=nutrientUnit(nutrient);
-    const rows=(j.sources||[]).map(s=>`<div class="tipRow"><span class="tipFood">${esc(s.nome)}<br><small>${esc(s.refeicao)} · ${fmt(s.quantidade_g)} g${start!==end?" · "+esc(s.data):""}</small></span><span class="tipVal">${fmt(s.valor)} ${unit}</span></div>`).join("");
+    const rows=(j.sources||[]).map(s=>`<div class="tipRow"><span class="tipFood">${esc(s.nome)}<br><small>${esc(s.refeicao)} · ${fmt(s.quantidade_g)} ${esc(s.unidade||"g")}${start!==end?" · "+esc(s.data):""}</small></span><span class="tipVal">${fmt(s.valor)} ${unit}</span></div>`).join("");
     nutrientTip.innerHTML=`<div class="tipTitle">🔎 ${esc(nutrientLabel(nutrient))}</div><div class="tipTotal">Total: ${fmt(j.total)} ${unit}</div>${rows||'<div class="tipEmpty">Nenhum alimento contribuiu para este nutriente.</div>'}`;
     tipPos(ev);
   }catch(e){nutrientTip.innerHTML=`<div class="tipTitle">🔎 ${esc(nutrientLabel(nutrient))}</div><div class="tipEmpty">Não foi possível calcular as fontes.</div>`}
@@ -1822,12 +1845,13 @@ function renderGoalCards(j){
 async function refresh(){
   try{
     const j=await api("/api/day?data="+day.value+"&refeicao="+encodeURIComponent(meal));
+    window.lastDaySnapshot=j;
     const consumed=Array.isArray(j.items)?j.items:[];
     const goals=j.goals||{};
-    items.innerHTML=consumed.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" g · "+fmt(x.kcal)+" kcal</div></div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
+    items.innerHTML=consumed.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" "+esc(x.unidade||"g")+" · "+fmt(x.kcal)+" kcal</div></div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
     if(consumed.length){const toggle=document.getElementById("consumedFoodsToggle");items.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
     try{draw(partial,j.partial||{});}catch(e){console.error("nutrientes:",e)}
-    try{await drawWater(Number(j.water||0),Number(goals.agua_ml||0));}catch(e){console.error("hidratação:",e)}
+    try{drawWater(Number(j.water||0),Number(goals.agua_ml||0),j.water_entries||[]);}catch(e){console.error("hidratação:",e)}
     try{updateHeroFromDay({...j,goals});renderGoalCards({...j,goals});renderBottomProgress({...j,goals});}catch(e){console.error("resumo:",e)}
   }catch(e){console.error("refresh:",e)}
 }function pct(v,m){if(!m||m<=0)return 0;return Math.min(100,(v/m)*100)}
@@ -1880,17 +1904,29 @@ function celebrateWaterGoal(percent){
   };
   launch();
 }
-async function drawWater(w,goal){
+function drawWater(w,goal,entries=[]){
   let p=pct(w,goal);
-  let entries=[];
-  try{entries=await api("/api/water?data="+encodeURIComponent(day.value));}catch(e){}
   const recordRows=entries.length?entries.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.10)"><span>💧 ${fmt(Number(x.quantidade_ml)/1000)} L <small style="color:#94a3b8">${esc(x.hora||'')}</small></span><button onclick="deleteWater(${x.id})" style="padding:5px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.15);background:#26364a;color:#fff">Excluir</button></div>`).join(''):`<div style="font-size:12px;color:#94a3b8;margin-top:7px">Nenhum registro de água.</div>`;
   document.getElementById("waterBox").innerHTML=`<div style="display:flex;justify-content:space-between"><b>💧 ${fmt(w/1000)} L</b><span>${fmt(goal/1000)} L meta</span></div><div class="waterVisual">${waterSilhouette(profileSex,p)}</div><div style="font-size:12px;color:#cbd5e1;text-align:center">${fmt(p)}% · ${fmt(Math.max(0,goal-w)/1000)} L restantes</div><div class="waterRecordsHeader"><b>Registros de hoje (${entries.length})</b><button id="waterRecordsToggle" class="waterRecordsToggle" onclick="toggleWaterRecords()" aria-expanded="false">VER REGISTROS ▼</button></div><div id="waterRecords" style="display:none">${recordRows}</div>`;
   setTimeout(()=>celebrateWaterGoal(p),40);
 }
 function toggleWaterRecords(){const box=document.getElementById("waterRecords"),btn=document.getElementById("waterRecordsToggle");if(!box||!btn)return;const open=box.style.display!=="none";box.style.display=open?"none":"block";btn.textContent=open?"VER REGISTROS ▼":"OCULTAR REGISTROS ▲";btn.setAttribute("aria-expanded",String(!open));}
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
-async function addWater(ml){try{await api("/api/water",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,quantidade_ml:ml})});await refresh();}catch(e){alert("Não foi possível registrar a água: "+e.message)}}
+function setWaterButtonsBusy(busy){document.querySelectorAll(".waterQuickButtons button").forEach(b=>{b.disabled=busy;b.style.opacity=busy?".65":"1";});}
+async function addWater(ml){
+  if(window.waterSubmitting)return;
+  const previous=window.lastDaySnapshot?JSON.parse(JSON.stringify(window.lastDaySnapshot)):null;
+  window.waterSubmitting=true;setWaterButtonsBusy(true);
+  if(window.lastDaySnapshot){
+    const now=new Date(),hora=String(now.getHours()).padStart(2,"0")+":"+String(now.getMinutes()).padStart(2,"0");
+    window.lastDaySnapshot={...window.lastDaySnapshot,water:Number(window.lastDaySnapshot.water||0)+Number(ml),water_entries:[{id:"pending-"+Date.now(),hora,quantidade_ml:Number(ml),pending:true},...(window.lastDaySnapshot.water_entries||[])]};
+    const snapshot=window.lastDaySnapshot,goals=snapshot.goals||{};
+    drawWater(Number(snapshot.water||0),Number(goals.agua_ml||0),snapshot.water_entries||[]);renderGoalCards(snapshot);renderBottomProgress(snapshot);
+  }
+  try{await api("/api/water",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,quantidade_ml:ml})});await refresh();}
+  catch(e){if(previous){window.lastDaySnapshot=previous;const goals=previous.goals||{};drawWater(Number(previous.water||0),Number(goals.agua_ml||0),previous.water_entries||[]);renderGoalCards(previous);renderBottomProgress(previous);}alert("Não foi possível registrar a água: "+e.message)}
+  finally{window.waterSubmitting=false;setWaterButtonsBusy(false);}
+}
 async function customWater(){let v=prompt("Quantidade de água em ml:","500");if(v===null)return;let ml=Number(v);if(!(ml>0)){alert("Quantidade inválida.");return}await addWater(ml)}
 async function openSummary(){let j=await api("/api/summary?data="+day.value);document.getElementById("goalModeNotice").textContent=j.goals.manual_override?"As metas atuais foram ajustadas manualmente e não serão substituídas ao salvar o perfil ou recalcular os dados.":"As metas atuais estão no modo automático e podem ser atualizadas pelo cálculo do perfil.";let a=[['energia_kcal','calorias_kcal','🔥 Calorias','kcal'],['proteina_g','proteina_g','💪 Proteína','g'],['carboidrato_g','carboidratos_g','🍚 Carboidratos','g'],['lipidios_g','gorduras_g','🥑 Gorduras','g'],['fibra_g','fibras_g','🌱 Fibras','g'],['sodio_mg','sodio_mg','🧂 Sódio','mg']];document.getElementById("summaryContent").innerHTML=a.map(x=>{let v=Number(j.daily[x[0]]||0),m=Number(j.goals[x[1]]||0),p=pct(v,m),left=Math.max(0,m-v);return `<div class="metric nutrient-source" data-nutrient="${x[0]}" data-start="${day.value}" data-end="${day.value}" style="margin-bottom:8px"><small>${x[2]} ⓘ</small><b>${fmt(v)} / ${fmt(m)} ${x[3]}</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${p}%;background:#22a447"></div></div><small>${m>0?(x[1]==='sodio_mg'?'Restam ':'Faltam ')+fmt(left)+' '+x[3]:''}</small></div>`}).join('')+`<div class="metric"><small>💧 Água</small><b>${fmt(j.water/1000)} / ${fmt(Number(j.goals.agua_ml||0)/1000)} L</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${pct(j.water,Number(j.goals.agua_ml||0))}%;background:#1683ff"></div></div><small>${Number(j.goals.agua_ml||0)>0?fmt(Math.max(0,Number(j.goals.agua_ml)-Number(j.water))/1000)+' L restantes':''}</small></div>`;document.getElementById("goalForm").innerHTML=[['calorias_kcal','🔥 Calorias','kcal'],['proteina_g','💪 Proteína','g'],['carboidratos_g','🍚 Carboidratos','g'],['gorduras_g','🥑 Gorduras','g'],['fibras_g','🌱 Fibras','g'],['sodio_mg','🧂 Sódio','mg'],['agua_ml','💧 Água','ml']].map(x=>`<div class="metric"><small>${x[1]}</small><input id="g_${x[0]}" type="number" step="0.01" value="${j.goals[x[0]]??''}" style="width:100%;padding:9px;border:1px solid #ddd;border-radius:8px"><small>${x[2]}</small></div>`).join('');document.getElementById("summaryModal").style.display="block"}
 function closeSummary(){document.getElementById("summaryModal").style.display="none"}
@@ -2011,24 +2047,25 @@ async function edit(id){
     editingConsumeId=Number(id);
     document.getElementById("consumeEditTitle").textContent="✏️ Alterar · "+(x.alimento_nome||"Alimento");
     document.getElementById("consumeEditWeight").value=Number(x.quantidade_g)||"";
+    document.getElementById("consumeEditUnit").value=x.unidade==="ml"?"ml":"g";
     document.getElementById("consumeEditMeal").value=meals.includes(x.refeicao)?x.refeicao:meals[0];
     document.getElementById("consumeEditModal").style.display="block";
   }catch(e){alert("Não foi possível abrir este consumo: "+e.message)}
 }
 function closeConsumeEdit(){editingConsumeId=null;document.getElementById("consumeEditModal").style.display="none"}
 async function saveConsumeEdit(){
-  const w=Number(document.getElementById("consumeEditWeight").value),r=document.getElementById("consumeEditMeal").value;
+  const w=Number(document.getElementById("consumeEditWeight").value),r=document.getElementById("consumeEditMeal").value,u=document.getElementById("consumeEditUnit").value;
   if(!editingConsumeId||!(w>0)||!meals.includes(r)){alert("Informe uma quantidade válida e selecione uma refeição.");return}
   try{
-    await api("/api/consume/"+editingConsumeId,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({quantidade_g:w,refeicao:r})});
+    await api("/api/consume/"+editingConsumeId,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({quantidade_g:w,unidade:u,refeicao:r})});
     closeConsumeEdit();await refresh();
   }catch(e){alert("Não foi possível salvar a alteração: "+e.message)}
 }
 const searchEl=document.getElementById("search"),foods=document.getElementById("foods"),items=document.getElementById("items"),partial=document.getElementById("partial"),daily=document.getElementById("daily"),sel=document.getElementById("sel"),mealsEl=document.getElementById("meals"),pm=document.getElementById("pm");
-searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,70)};bootstrap();
+searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,40)};bootstrap();
 </script></body></html>
 """
-HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V53 · Diário Alimentar · Silhuetas aprovadas").replace("V45 · DIÁRIO ALIMENTAR", "V53 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V53 · Diário Alimentar · Silhuetas aprovadas</title>")
+HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V55 · Diário Alimentar · Bebidas em ml").replace("V45 · DIÁRIO ALIMENTAR", "V55 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V55 · Diário Alimentar · Bebidas em ml</title>")
 
 class H(BaseHTTPRequestHandler):
     def end_headers(self):
@@ -2154,12 +2191,12 @@ class H(BaseHTTPRequestHandler):
             nc=ndb();pc=ddb()
             try:
                 prefix=f"{q}%";contains=f"%{q}%"
-                base=list(nc.execute("SELECT id,nome FROM alimentos WHERE nome LIKE ? COLLATE NOCASE ORDER BY nome LIMIT 30",(prefix,)).fetchall())
-                own=list(pc.execute("SELECT -id AS id,nome FROM alimentos_usuario WHERE usuario_id=? AND nome ILIKE ? ORDER BY nome LIMIT 30",(self.user["id"],prefix)).fetchall())
+                base=list(nc.execute("SELECT id,nome,'g' AS unidade FROM alimentos WHERE nome LIKE ? COLLATE NOCASE ORDER BY nome LIMIT 30",(prefix,)).fetchall())
+                own=list(pc.execute("SELECT -id AS id,nome,CASE WHEN base_calculo='100ml' OR LOWER(COALESCE(porcao_unidade,''))='ml' THEN 'ml' ELSE 'g' END AS unidade FROM alimentos_usuario WHERE usuario_id=? AND nome ILIKE ? ORDER BY nome LIMIT 30",(self.user["id"],prefix)).fetchall())
                 if len(base)<20:
-                    extra=nc.execute("SELECT id,nome FROM alimentos WHERE nome LIKE ? COLLATE NOCASE AND nome NOT LIKE ? COLLATE NOCASE ORDER BY nome LIMIT ?",(contains,prefix,30-len(base))).fetchall();base.extend(extra)
+                    extra=nc.execute("SELECT id,nome,'g' AS unidade FROM alimentos WHERE nome LIKE ? COLLATE NOCASE AND nome NOT LIKE ? COLLATE NOCASE ORDER BY nome LIMIT ?",(contains,prefix,30-len(base))).fetchall();base.extend(extra)
                 if len(own)<20:
-                    extra=pc.execute("SELECT -id AS id,nome FROM alimentos_usuario WHERE usuario_id=? AND nome ILIKE ? AND nome NOT ILIKE ? ORDER BY nome LIMIT ?",(self.user["id"],contains,prefix,30-len(own))).fetchall();own.extend(extra)
+                    extra=pc.execute("SELECT -id AS id,nome,CASE WHEN base_calculo='100ml' OR LOWER(COALESCE(porcao_unidade,''))='ml' THEN 'ml' ELSE 'g' END AS unidade FROM alimentos_usuario WHERE usuario_id=? AND nome ILIKE ? AND nome NOT ILIKE ? ORDER BY nome LIMIT ?",(self.user["id"],contains,prefix,30-len(own))).fetchall();own.extend(extra)
             finally:
                 nc.close();pc.close()
             self.js({"foods":[dict(x) for x in own+base][:40]});return
@@ -2173,10 +2210,17 @@ class H(BaseHTTPRequestHandler):
                     aid=int(x["alimento_id"])
                     f=pc.execute("SELECT energia_kcal FROM alimentos_usuario WHERE id=? AND usuario_id=?",(-aid,self.user["id"])).fetchone() if aid<0 else nc.execute("SELECT energia_kcal FROM alimentos WHERE id=?",(aid,)).fetchone()
                     z=x["quantidade_g"]/100
-                    items.append({"id":x["id"],"refeicao":x["refeicao"],"alimento_nome":x["alimento_nome"],"quantidade_g":x["quantidade_g"],"kcal":(f["energia_kcal"] or 0)*z if f else 0})
+                    items.append({"id":x["id"],"refeicao":x["refeicao"],"alimento_nome":x["alimento_nome"],"quantidade_g":x["quantidade_g"],"unidade":x.get("unidade","g"),"kcal":(f["energia_kcal"] or 0)*z if f else 0})
             finally:
                 nc.close();pc.close()
-            c=ddb();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone();c.close();self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"goals":goal_dict(g)});return
+            c=ddb()
+            try:
+                water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"]
+                water_entries=c.execute("SELECT id,hora,quantidade_ml FROM hidratacao WHERE usuario_id=? AND data=? ORDER BY id DESC",(self.user["id"],d,)).fetchall()
+                g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
+            finally:
+                c.close()
+            self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"water_entries":[dict(x) for x in water_entries],"goals":goal_dict(g)});return
         if p.path.startswith("/api/food/"):
             try: food_id=int(p.path.rsplit("/",1)[1])
             except ValueError:
@@ -2213,7 +2257,7 @@ class H(BaseHTTPRequestHandler):
                     if not f or nutrient not in f.keys() or f[nutrient] is None: continue
                     amount=float(f[nutrient])*float(r["quantidade_g"])/100.0
                     if abs(amount)<0.000001: continue
-                    sources.append({"nome":r["alimento_nome"],"quantidade_g":float(r["quantidade_g"]),"refeicao":r["refeicao"],"data":r["data"],"valor":amount})
+                    sources.append({"nome":r["alimento_nome"],"quantidade_g":float(r["quantidade_g"]),"unidade":r.get("unidade","g"),"refeicao":r["refeicao"],"data":r["data"],"valor":amount})
             finally:
                 nc.close();pc.close()
             sources.sort(key=lambda x:x["valor"],reverse=True)
@@ -2303,7 +2347,7 @@ class H(BaseHTTPRequestHandler):
             self.js([dict(x) for x in r]);return
         if p.path=="/api/portions":
             c=ddb()
-            try:r=c.execute("SELECT id,alimento_id,alimento_nome,nome,quantidade_g FROM porcoes WHERE usuario_id=? ORDER BY alimento_nome,nome",(self.user["id"],)).fetchall()
+            try:r=c.execute("SELECT id,alimento_id,alimento_nome,nome,quantidade_g,unidade FROM porcoes WHERE usuario_id=? ORDER BY alimento_nome,nome",(self.user["id"],)).fetchall()
             finally:c.close()
             self.js([dict(x) for x in r]);return
         if p.path.startswith("/api/consume/"):
@@ -2371,9 +2415,10 @@ class H(BaseHTTPRequestHandler):
         if self.path=="/api/portion":
             c=None
             try:
-                x=self.body();aid=int(x.get("alimento_id"));nome=str(x.get("alimento_nome","")).strip();label=str(x.get("nome","")).strip();q=float(x.get("quantidade_g",0))
+                x=self.body();aid=int(x.get("alimento_id"));nome=str(x.get("alimento_nome","")).strip();label=str(x.get("nome","")).strip();q=float(x.get("quantidade_g",0));unidade=str(x.get("unidade","g")).lower()
+                if unidade not in ("g","ml"): raise ValueError("Unidade inválida.")
                 if not nome or not label or q<=0:raise ValueError("Informe nome, porção e quantidade válida.")
-                c=ddb();c.execute("INSERT INTO porcoes(usuario_id,alimento_id,alimento_nome,nome,quantidade_g) VALUES(?,?,?,?,?) ON CONFLICT(usuario_id,alimento_id,nome) DO UPDATE SET quantidade_g=EXCLUDED.quantidade_g,alimento_nome=EXCLUDED.alimento_nome",(self.user["id"],aid,nome,label,q));c.commit();self.js({"ok":True})
+                c=ddb();c.execute("INSERT INTO porcoes(usuario_id,alimento_id,alimento_nome,nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?) ON CONFLICT(usuario_id,alimento_id,nome) DO UPDATE SET quantidade_g=EXCLUDED.quantidade_g,unidade=EXCLUDED.unidade,alimento_nome=EXCLUDED.alimento_nome",(self.user["id"],aid,nome,label,q,unidade));c.commit();self.js({"ok":True})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
@@ -2518,6 +2563,8 @@ class H(BaseHTTPRequestHandler):
             try:
                 data=self.body();nome=str(data.get("nome","")).strip()
                 if not nome: raise ValueError("Nome do alimento é obrigatório.")
+                base_calculo="100ml" if str(data.get("base_calculo","")).lower()=="100ml" or str(data.get("porcao_unidade","")).lower()=="ml" else "100g"
+                data["base_calculo"]=base_calculo;data["porcao_unidade"]="ml" if base_calculo=="100ml" else "g"
                 allowed={"nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","zinco_mg","vitamina_c_mg","porcao_valor","porcao_unidade","base_calculo"}
                 fields=["usuario_id"];vals=[self.user["id"]]
                 for k,v in data.items():
@@ -2595,9 +2642,10 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path!="/api/consume":self.send_error(404);return
         try:
-            x=self.body();w=float(x["quantidade_g"]);meal=str(x.get("refeicao","")).strip();aid=int(x["alimento_id"]);name=str(x.get("alimento_nome","")).strip()
+            x=self.body();w=float(x["quantidade_g"]);meal=str(x.get("refeicao","")).strip();aid=int(x["alimento_id"]);name=str(x.get("alimento_nome","")).strip();unidade=str(x.get("unidade","g")).lower()
+            if unidade not in ("g","ml"):raise ValueError("Unidade inválida.")
             if meal not in MEALS or not name or not math.isfinite(w) or not 0<w<=5000:raise ValueError("Refeição, alimento ou quantidade inválidos.")
-            c=ddb();row=c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g) VALUES(?,?,?,?,?,?) RETURNING id",(self.user["id"],x["data"],meal,aid,name,w)).fetchone();c.commit();c.close();self.js({"ok":True,"id":row["id"]})
+            c=ddb();row=c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?,?) RETURNING id",(self.user["id"],x["data"],meal,aid,name,w,unidade)).fetchone();c.commit();c.close();self.js({"ok":True,"id":row["id"]})
         except Exception as e:self.js({"error":str(e)},400)
     def do_PUT(self):
         user=self.require_user()
@@ -2607,14 +2655,16 @@ class H(BaseHTTPRequestHandler):
             if self.path.startswith("/api/food/"):
                 i=int(self.path.rsplit("/",1)[1])
                 if i>=0: raise ValueError("A base nutricional compartilhada não pode ser alterada por este cadastro.")
-                x=self.body();allowed={"nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","zinco_mg","vitamina_c_mg","porcao_valor","porcao_unidade","base_calculo"};sets=[];vals=[]
+                x=self.body();base_calculo="100ml" if str(x.get("base_calculo","")).lower()=="100ml" or str(x.get("porcao_unidade","")).lower()=="ml" else "100g";x["base_calculo"]=base_calculo;x["porcao_unidade"]="ml" if base_calculo=="100ml" else "g";allowed={"nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","zinco_mg","vitamina_c_mg","porcao_valor","porcao_unidade","base_calculo"};sets=[];vals=[]
                 for k,v in x.items():
                     if k in allowed:
                         if k not in ("nome","porcao_unidade","base_calculo") and v is not None:v=float(v)
                         sets.append('"'+k+'"=?');vals.append(v)
                 if not sets: raise ValueError("Nenhum campo válido")
                 vals.extend([-i,self.user["id"]]);c=ddb();c.execute("UPDATE alimentos_usuario SET "+",".join(sets)+",atualizado_em=NOW() WHERE id=? AND usuario_id=?",vals);c.commit();c.close();self.js({"ok":True});return
-            i=int(self.path.rsplit("/",1)[1]);x=self.body();w=float(x["quantidade_g"]);c=ddb();c.execute("UPDATE consumo SET quantidade_g=?,refeicao=? WHERE id=? AND usuario_id=?",(w,x["refeicao"],i,self.user["id"]));c.commit();c.close();self.js({"ok":True})
+            i=int(self.path.rsplit("/",1)[1]);x=self.body();w=float(x["quantidade_g"]);unidade=str(x.get("unidade","g")).lower()
+            if unidade not in ("g","ml"):raise ValueError("Unidade inválida.")
+            c=ddb();c.execute("UPDATE consumo SET quantidade_g=?,unidade=?,refeicao=? WHERE id=? AND usuario_id=?",(w,unidade,x["refeicao"],i,self.user["id"]));c.commit();c.close();self.js({"ok":True})
         except Exception as e:self.js({"error":str(e)},400)
     def do_DELETE(self):
         user=self.require_user()
