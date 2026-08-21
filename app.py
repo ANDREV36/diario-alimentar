@@ -39,7 +39,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V50 · Silhueta integrada + Banco estável + Segurança P0"
+APP_VERSION = "V51 · Painel dividido + Banco estável + Segurança P0"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -765,6 +765,18 @@ main{
 .waterFigureText b{display:block;color:#e0f2fe;font-size:17px;margin-bottom:3px}
 .waterRecordsHeader{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:14px}
 .waterRecordsToggle{padding:6px 9px;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:#16263a;color:#e0f2fe;font-size:11px;font-weight:bold}
+.finalDashboard{padding:0!important;overflow:hidden}
+.finalDashboardGrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.finalDashboardPane{min-width:0;padding:18px}
+.historyPane{border-right:1px solid rgba(255,255,255,.16)}
+.finalDashboardPane h2{margin-top:0}
+.hydrationPane .waterVisual{min-height:150px;margin:4px 0}
+.hydrationPane .waterArtwork{width:120px;height:170px;flex-basis:120px}
+.hydrationPane .waterFigure{gap:12px}
+.hydrationPane .waterFigureText{max-width:138px;font-size:12px}
+.hydrationPane .waterFigureText b{font-size:15px}
+.waterQuickButtons{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-top:8px}
+.waterQuickButtons button{padding:6px 3px!important;min-height:31px;border:0;border-radius:8px;background:#e5f3ff;font-size:11px;line-height:1.15}
 .goalCards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
 .goalMiniCard{min-width:0;text-align:left;padding:10px;border:1px solid rgba(255,255,255,.15);border-radius:12px;background:rgba(10,29,48,.58);color:#fff;cursor:pointer}
 .goalMiniCard:hover{border-color:rgba(125,211,252,.7);background:rgba(17,50,78,.78)}
@@ -774,7 +786,8 @@ main{
 .goalMiniCard.limit i{background:linear-gradient(90deg,#fbbf24,#fb7185)}
 @media(max-width:700px){.goalCards{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
 @media(max-width:1000px){.quickStats{grid-template-columns:repeat(4,minmax(0,1fr))!important}}
-@media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.quickStatHead small{font-size:13px!important}.waterVisual{min-height:170px}.waterArtwork{width:108px;height:154px;flex-basis:108px}.waterFigure{gap:12px}.waterFigureText{font-size:12px;max-width:142px}.waterFigureText b{font-size:15px}}
+@media(max-width:760px){.finalDashboardGrid{grid-template-columns:1fr}.historyPane{border-right:0;border-bottom:1px solid rgba(255,255,255,.16)}.hydrationPane .waterVisual{min-height:168px}.hydrationPane .waterArtwork{width:116px;height:164px;flex-basis:116px}.hydrationPane .waterFigureText{max-width:150px}}
+@media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.quickStatHead small{font-size:13px!important}.waterVisual{min-height:170px}.waterArtwork{width:108px;height:154px;flex-basis:108px}.waterFigure{gap:12px}.waterFigureText{font-size:12px;max-width:142px}.waterFigureText b{font-size:15px}.finalDashboardPane{padding:14px}.waterQuickButtons button{font-size:10px;min-height:29px}}
 </style></head><body>
 <div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V45 · Diário Alimentar · Segurança P0</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
 <main>
@@ -848,18 +861,19 @@ main{
   </h2>
   <div id="partial" class="metrics" style="display:none;margin-top:12px"></div>
 </div>
-<div class="card" id="periodCard"><h2>📅 Histórico por período</h2>
-<p style="margin:0 0 10px;color:#cbd5e1;font-size:13px">Escolha as datas para comparar meta e consumo no intervalo.</p>
-<button onclick="openPeriod()" style="width:100%;padding:14px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:16px">📅 VER HISTÓRICO POR PERÍODO</button>
-<button onclick="exportDay()" style="width:100%;padding:12px;margin-top:8px;border:1px solid #ffffff30;border-radius:12px;background:#16263a;color:#fff;font-weight:bold;font-size:14px">⬇️ EXPORTAR DIA ATUAL EM CSV</button></div>
-<div class="card"><h2>💧 Hidratação</h2><div id="waterBox"></div>
-<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:10px">
-<button onclick="addWater(200)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 200 ml</button>
-<button onclick="addWater(300)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 300 ml</button>
-<button onclick="addWater(500)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 500 ml</button>
-<button onclick="addWater(750)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 750 ml</button>
-<button onclick="addWater(1000)" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">💧 1 L</button>
-<button onclick="customWater()" style="padding:11px;border:0;border-radius:10px;background:#e5f3ff">✏️ Outra</button></div></div>
+<section class="card finalDashboard" id="finalDashboard"><div class="finalDashboardGrid">
+  <div class="finalDashboardPane historyPane" id="periodCard"><h2>📅 Histórico por período</h2>
+    <p style="margin:0 0 10px;color:#cbd5e1;font-size:13px">Escolha as datas para comparar meta e consumo no intervalo.</p>
+    <button onclick="openPeriod()" style="width:100%;padding:12px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:14px">📅 VER HISTÓRICO POR PERÍODO</button>
+    <button onclick="exportDay()" style="width:100%;padding:10px;margin-top:7px;border:1px solid #ffffff30;border-radius:12px;background:#16263a;color:#fff;font-weight:bold;font-size:12px">⬇️ EXPORTAR DIA ATUAL EM CSV</button>
+  </div>
+  <div class="finalDashboardPane hydrationPane"><h2>💧 Hidratação</h2><div id="waterBox"></div>
+    <div class="waterQuickButtons">
+      <button onclick="addWater(200)">💧 200 ml</button><button onclick="addWater(300)">💧 300 ml</button><button onclick="addWater(500)">💧 500 ml</button>
+      <button onclick="addWater(750)">💧 750 ml</button><button onclick="addWater(1000)">💧 1 L</button><button onclick="customWater()">✏️ Outra</button>
+    </div>
+  </div>
+</div></section>
 </main>
 <div id="nutrientTooltip"></div>
 
@@ -1540,8 +1554,8 @@ function renderBottomProgress(j){
 }
 
 const WATER_SILHOUETTES={
-  M:`data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 190"><path fill="black" d="M50 4C42 4 37 10 37 18c0 7 5 13 13 13s13-6 13-13C63 10 58 4 50 4ZM39 35c-7 2-11 7-13 14l-6 22c-1 5 1 8 5 9 3 0 5-2 6-6l6-16 2 28-6 29 6 38-3 29c0 5 3 8 7 8 4 0 6-3 7-8l1-28 2 28c1 5 3 8 7 8 4 0 7-3 7-8l-3-29 6-38-6-29 2-28 6 16c1 4 3 6 6 6 4-1 6-4 5-9l-6-22c-2-7-6-12-13-14-5 3-12 3-17 0Z"/></svg>')}`,
-  F:`data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 190"><path fill="black" d="M50 3C39 3 34 12 34 23c0 9 3 16 7 20l-3 12h24l-3-12c4-4 7-11 7-20C68 12 61 3 50 3ZM37 37c-6 2-10 7-12 14l-6 22c-1 5 1 8 5 9 3 0 5-2 6-6l6-17 3 28-6 24c-2 7 1 12 7 16l4 27-3 28c0 5 3 8 7 8 4 0 6-3 7-8l1-27 2 27c1 5 3 8 7 8 4 0 7-3 7-8l-3-28 4-27c6-4 9-9 7-16l-6-24 3-28 6 17c1 4 3 6 6 6 4-1 6-4 5-9l-6-22c-2-7-6-12-12-14-6 3-14 3-20 0Z"/></svg>')}`
+  M:"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFgAAACECAYAAAAUaexgAAAB3UlEQVR42u3dQXLEIAxE0Wnf/85km0VWSTCSeL2eMfDzLYspyvl8REREhiZN5rm6zj0NwbaCnMZwW6zjUSUBBlgABhjguh3Ebz7PYAbX6s/1wQzua3EAZrAADLAADPCvdmerMuA0BttiPRkCtuy6MghqyTVmMNgSa30ugXts3OcSuMfG1wcD3NviZ/LtyWCABWCAAb5lWz4esC5CAAbYbu4M4MXgc0mz6yoRDN5vWwB+B0RuAFz1AbduMHj8Fv25deFTAFfvf9dkg7VpAjDAAN/RQYTBDN5q03+3S2Xe8bMTcJffgNckg0/v3jLJ4NMGlbiDPOQGAa7y404YzOAxHcT2+TJ4M+SHvb1KRLW3RR2fjxLRyOAppWFVNjjFe+DX5/m8MOnPzWPcerpy3PHVLiWiJeCqB0zSFXC+Tb766Z38MOc2Bnc5GpXuJWKHbddulQVggAEu8CAKwAIwwAC/0uRnw3cZzGABGGCAy20wyj3EqgNeza+vRAD899vf/zJicM36u16+DoMZLAADDLAADLCNhgAM8BvloXyZuOHFdGGwEiGTAKdjKWAwwAALwAADLAADLAADDPDfs4aNw+CbAK/h4x0FvHOxqQY5heCm4ThqsDZtj1XxpxUREdmcL7pNOP1QpakUAAAAAElFTkSuQmCC",
+  F:"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFgAAACECAYAAAAUaexgAAAB30lEQVR42u3cOXbDMAxFUYEn+98yUqdLoQHDfbVNU4+fIGXTui4AAIYSTfqZXfsfTcW2uYYzYBYmwc+LS4KXcgZN+yRYgrFBcBJsy6ZEEEywKS7BDQbpECPBBCsTEkwwwc8TRduS4MpUGemceo1nuNzPdxRnuFw1ePpAHumVYIJBMMEEg2CCCcZ0wUFwfaLSnePUErH+C/fcUB6qJjgIxlrBUW0mbEtwbhD85ALnAHZHSUpE4QE80rkrwXlzG0Hw0Du4ignOom21FhwffUZOFJwvJy4leEGdPxsveluCs2nbpQXHlhlzBqS0dJ/OliR99dkbTriP/wtB5S94cnqCbdMGp/eVPp7lch/va7cSEd3uAM/LiYgig/Rais8HF1J1ZrRKcFz9fn+LbgnuhEXOPrhXTX6tLz+LF7mYluCvLnL9AznU4IJTOggGwVsER9O2JViCCcZmwUHwfbJCgiVcDSaY4FY44f5PGdF58VMiCCYYxQX7jwYIJphgEEwwCCb4L3HTawiW4G9TSnDjEkNw51lwSJNggkEwwQRb0EYlOG54j6NTSgTGCs4b3uPoVDUZSgTBpXYRBD9cgwneUNsPCbMF3/n4r6g4gFt2EblR8BMPryu3k9jykPy4AADAvfwCmA9D8pZ0TisAAAAASUVORK5CYII="
 };
 function waterSilhouette(sex,p){
   const isFemale=sex==="F",asset=isFemale?WATER_SILHOUETTES.F:WATER_SILHOUETTES.M;
@@ -1685,7 +1699,7 @@ const searchEl=document.getElementById("search"),foods=document.getElementById("
 searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,70)};bootstrap();
 </script></body></html>
 """
-HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V50 · Diário Alimentar · Silhueta integrada").replace("V45 · DIÁRIO ALIMENTAR", "V50 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V50 · Diário Alimentar · Silhueta integrada</title>")
+HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V51 · Diário Alimentar · Painel dividido").replace("V45 · DIÁRIO ALIMENTAR", "V51 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V51 · Diário Alimentar · Painel dividido</title>")
 
 class H(BaseHTTPRequestHandler):
     def end_headers(self):
