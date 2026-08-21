@@ -12,6 +12,17 @@ import os, time, logging
 import base64, binascii, hashlib, hmac, secrets, csv, io, re, math
 from threading import Lock
 
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A3, A4, landscape
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from reportlab.pdfgen import canvas as pdf_canvas
+    from reportlab.platypus import Table, TableStyle
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -39,7 +50,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V51 · Painel dividido + Banco estável + Segurança P0"
+APP_VERSION = "V52 · Relatório PDF + Hidratação + Segurança P0"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -482,6 +493,293 @@ def calc(rows,user_id=None):
         if pc:pc.close()
     return t
 
+REPORT_METRICS = (
+    ("energia_kcal", "calorias_kcal", "Calorias", "kcal", "#ef4444"),
+    ("proteina_g", "proteina_g", "Proteína", "g", "#8b5cf6"),
+    ("carboidrato_g", "carboidratos_g", "Carboidratos", "g", "#f59e0b"),
+    ("lipidios_g", "gorduras_g", "Gorduras", "g", "#ec4899"),
+    ("fibra_g", "fibras_g", "Fibras", "g", "#22c55e"),
+    ("sodio_mg", "sodio_mg", "Sódio", "mg", "#14b8a6"),
+    ("agua_ml", "agua_ml", "Água", "L", "#0284c7"),
+)
+
+def _report_value(value, unit):
+    value = float(value or 0)
+    if unit == "L":
+        return f"{value / 1000:.2f} L"
+    if unit == "mg":
+        return f"{value:,.0f} mg".replace(",", ".")
+    if unit == "kcal":
+        return f"{value:,.0f} kcal".replace(",", ".")
+    return f"{value:.1f} g"
+
+def report_period_data(user_id, start, end):
+    try:
+        d1, d2 = date.fromisoformat(start), date.fromisoformat(end)
+    except Exception:
+        raise ValueError("Datas inválidas para o relatório.")
+    if d1 > d2:
+        raise ValueError("A data inicial deve ser anterior à data final.")
+    if (d2 - d1).days > 89:
+        raise ValueError("O relatório permite no máximo 90 dias por vez.")
+    c = ddb()
+    try:
+        consumed = c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id", (user_id, start, end)).fetchall()
+        water_rows = c.execute("SELECT data,COALESCE(SUM(quantidade_ml),0) AS water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? GROUP BY data", (user_id, start, end)).fetchall()
+        goals_row = c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?", (user_id,)).fetchone()
+        profile = c.execute("SELECT nome FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
+    finally:
+        c.close()
+    by_day = {}
+    for row in consumed:
+        by_day.setdefault(str(row["data"]), []).append(row)
+    water_by_day = {str(row["data"]): float(row["water"] or 0) for row in water_rows}
+    goals = goal_dict(goals_row)
+    rows, cursor = [], d1
+    while cursor <= d2:
+        day_key = cursor.isoformat()
+        nutrients = calc(by_day.get(day_key, []), user_id)
+        nutrients["agua_ml"] = water_by_day.get(day_key, 0.0)
+        rows.append({"data": day_key, "label": cursor.strftime("%d/%m"), "values": nutrients})
+        cursor += timedelta(days=1)
+    return {
+        "start": d1, "end": d2, "days": rows, "goals": goals,
+        "name": (profile["nome"] if profile and profile["nome"] else "Pessoa usuária"),
+    }
+
+def _pdf_header(pdf, title, subtitle):
+    width, height = landscape(A4)
+    pdf.setFillColor(colors.HexColor("#0b1728"))
+    pdf.rect(0, height - 38 * mm, width, 38 * mm, stroke=0, fill=1)
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica-Bold", 20)
+    pdf.drawString(18 * mm, height - 18 * mm, title)
+    pdf.setFillColor(colors.HexColor("#b9c9d8"))
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(18 * mm, height - 26 * mm, subtitle)
+    return width, height
+
+def _pdf_footer(pdf, page_no):
+    width, _ = landscape(A4)
+    pdf.setStrokeColor(colors.HexColor("#d7e1ea"))
+    pdf.line(14 * mm, 11 * mm, width - 14 * mm, 11 * mm)
+    pdf.setFillColor(colors.HexColor("#64748b"))
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(14 * mm, 6 * mm, "Diário Alimentar · Relatório gerado a partir dos registros do período selecionado")
+    pdf.drawRightString(width - 14 * mm, 6 * mm, f"Página {page_no}")
+
+def _pdf_table(pdf, dataset, page_no):
+    width, height = landscape(A4)
+    header = ["Dia"] + [m[2] for m in REPORT_METRICS] + ["Atingimento"]
+    daily_rows = []
+    for item in dataset["days"]:
+        cells = [item["label"]]
+        percent_values = []
+        for key, goal_key, _, unit, _ in REPORT_METRICS:
+            actual, goal = item["values"].get(key, 0), dataset["goals"].get(goal_key, 0)
+            cells.append(f"{_report_value(actual, unit)}\n{_report_value(goal, unit)}")
+            if float(goal or 0) > 0:
+                percent_values.append(float(actual or 0) / float(goal) * 100)
+        cells.append(f"{sum(percent_values)/len(percent_values):.0f}%" if percent_values else "—")
+        daily_rows.append(cells)
+    total_cells = ["TOTAL"]
+    period_days = max(1, len(dataset["days"]))
+    for key, goal_key, _, unit, _ in REPORT_METRICS:
+        actual = sum(float(item["values"].get(key, 0) or 0) for item in dataset["days"])
+        goal = float(dataset["goals"].get(goal_key, 0) or 0) * period_days
+        pct = actual / goal * 100 if goal > 0 else 0
+        total_cells.append(f"{_report_value(actual, unit)}\n{_report_value(goal, unit)} · {pct:.0f}%")
+    all_pct = []
+    for key, goal_key, _, _, _ in REPORT_METRICS:
+        goal = float(dataset["goals"].get(goal_key, 0) or 0) * period_days
+        actual = sum(float(item["values"].get(key, 0) or 0) for item in dataset["days"])
+        if goal > 0: all_pct.append(actual / goal * 100)
+    total_cells.append(f"{sum(all_pct)/len(all_pct):.0f}%" if all_pct else "—")
+    data = [header] + daily_rows + [total_cells]
+    usable = width - 28 * mm
+    col_widths = [15 * mm] + [((usable - 15 * mm - 19 * mm) / 7)] * 7 + [19 * mm]
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10243a")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 7),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTSIZE", (0, 1), (-1, -2), 6), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#cbd5e1")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f6f9fc")]),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#dbeafe")), ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, -1), (-1, -1), 6), ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    fragments = table.split(usable, height - 66 * mm) or [table]
+    for fragment_index, fragment in enumerate(fragments):
+        _pdf_header(pdf, "RESUMO DE ALIMENTAÇÃO", f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')}")
+        pdf.setFillColor(colors.HexColor("#10243a")); pdf.setFont("Helvetica-Bold", 11)
+        suffix = f" · continuação {fragment_index + 1}" if fragment_index else ""
+        pdf.drawString(14 * mm, height - 46 * mm, "Consumo diário / meta diária" + suffix)
+        _, table_h = fragment.wrap(usable, height - 66 * mm)
+        fragment.drawOn(pdf, 14 * mm, height - 52 * mm - table_h)
+        _pdf_footer(pdf, page_no)
+        if fragment_index < len(fragments) - 1:
+            pdf.showPage(); page_no += 1
+    return page_no
+
+def _pdf_line_chart(pdf, dataset, metric, page_no, chart_days):
+    key, goal_key, label, unit, color = metric
+    chart_start, chart_end = chart_days[0]["label"], chart_days[-1]["label"]
+    width, height = _pdf_header(pdf, "RESUMO DE ALIMENTAÇÃO", f"Evolução diária · {label} · realizado e meta · {chart_start} a {chart_end}")
+    left, right, bottom, top = 20 * mm, width - 18 * mm, 34 * mm, height - 58 * mm
+    values = [float(row["values"].get(key, 0) or 0) for row in chart_days]
+    goal = float(dataset["goals"].get(goal_key, 0) or 0)
+    maximum = max([goal] + values + [1]) * 1.14
+    pdf.setFillColor(colors.HexColor("#10243a")); pdf.setFont("Helvetica-Bold", 13); pdf.drawString(left, height - 48 * mm, label)
+    pdf.setFont("Helvetica", 8); pdf.setFillColor(colors.HexColor("#64748b")); pdf.drawString(left, height - 53 * mm, "Linha contínua: realizado · Linha tracejada: meta diária")
+    pdf.setStrokeColor(colors.HexColor("#cbd5e1")); pdf.setLineWidth(.5)
+    for step in range(5):
+        y = bottom + (top - bottom) * step / 4
+        pdf.line(left, y, right, y)
+        pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 6); pdf.drawRightString(left - 3 * mm, y - 2, _report_value(maximum * step / 4, unit))
+    count = max(1, len(values)); span = (right - left) / max(1, count - 1)
+    coords = []
+    for index, value in enumerate(values):
+        x = left + (index * span if count > 1 else (right - left) / 2)
+        y = bottom + (value / maximum) * (top - bottom)
+        coords.append((x, y))
+    goal_y = bottom + (goal / maximum) * (top - bottom)
+    pdf.setStrokeColor(colors.HexColor(color)); pdf.setLineWidth(2.2); pdf.setDash(5, 3); pdf.line(left, goal_y, right, goal_y); pdf.setDash()
+    pdf.setStrokeColor(colors.HexColor(color)); pdf.setLineWidth(3.2)
+    for first, second in zip(coords, coords[1:]): pdf.line(first[0], first[1], second[0], second[1])
+    for index, (x, y) in enumerate(coords):
+        pdf.setFillColor(colors.HexColor(color)); pdf.circle(x, y, 2.7, stroke=0, fill=1)
+        pdf.setFont("Helvetica-Bold", 6.3); pdf.drawCentredString(x, min(top + 8, y + 7), _report_value(values[index], unit))
+        pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 6.0); pdf.drawCentredString(x, max(bottom - 11, goal_y - 9), f"M {_report_value(goal, unit)}")
+        pdf.setFont("Helvetica", 6); pdf.drawCentredString(x, bottom - 20, chart_days[index]["label"])
+    _pdf_footer(pdf, page_no)
+
+def _pdf_accumulated_bars(pdf, dataset, page_no):
+    width, height = _pdf_header(pdf, "RESUMO DE ALIMENTAÇÃO", "Acumulado do período · realizado em azul e meta em verde")
+    left, right, bottom, top = 18 * mm, width - 18 * mm, 39 * mm, height - 58 * mm
+    days = max(1, len(dataset["days"])); groups = len(REPORT_METRICS); group_w = (right - left) / groups
+    pdf.setFillColor(colors.HexColor("#10243a")); pdf.setFont("Helvetica-Bold", 12); pdf.drawString(left, height - 48 * mm, "Acumulados do período")
+    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 8); pdf.drawString(left, height - 53 * mm, "Azul: consumo acumulado · Verde: meta acumulada · escala proporcional por objetivo")
+    pdf.setStrokeColor(colors.HexColor("#cbd5e1")); pdf.line(left, bottom, right, bottom)
+    for index, (key, goal_key, label, unit, _) in enumerate(REPORT_METRICS):
+        actual = sum(float(row["values"].get(key, 0) or 0) for row in dataset["days"])
+        goal = float(dataset["goals"].get(goal_key, 0) or 0) * days
+        ratio = actual / goal * 100 if goal > 0 else 0
+        scale = max(200.0, ratio, 100.0)
+        x = left + index * group_w + group_w * .20; bar_w = group_w * .22
+        actual_h = (top - bottom) * min(ratio, scale) / scale
+        goal_h = (top - bottom) * 100 / scale
+        pdf.setFillColor(colors.HexColor("#0284c7")); pdf.rect(x, bottom, bar_w, actual_h, stroke=0, fill=1)
+        pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(x + bar_w + 3, bottom, bar_w, goal_h, stroke=0, fill=1)
+        pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 6); pdf.drawCentredString(x + bar_w, bottom - 10, label)
+        pdf.setFont("Helvetica", 5.6); pdf.drawCentredString(x + bar_w, bottom - 18, f"{_report_value(actual, unit)} / {_report_value(goal, unit)}")
+        pdf.drawCentredString(x + bar_w, bottom - 26, f"{ratio:.0f}%")
+    _pdf_footer(pdf, page_no)
+
+def _compact_number(value, unit):
+    value = float(value or 0)
+    if unit == "L":
+        return f"{value / 1000:.1f}"
+    if value >= 1000:
+        return f"{value:,.0f}".replace(",", ".")
+    return f"{value:.0f}"
+
+def _pdf_compact_chart(pdf, metric, chart_days, goals, x, y, width, height):
+    key, goal_key, label, unit, color = metric
+    values = [float(day["values"].get(key, 0) or 0) for day in chart_days]
+    goal = float(goals.get(goal_key, 0) or 0)
+    maximum = max([goal] + values + [1]) * 1.08
+    pdf.setFillColor(colors.HexColor("#f8fafc")); pdf.roundRect(x, y, width, height, 3, stroke=0, fill=1)
+    pdf.setStrokeColor(colors.HexColor("#dbeafe")); pdf.roundRect(x, y, width, height, 3, stroke=1, fill=0)
+    pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 5.8); pdf.drawString(x + 4, y + height - 8, label)
+    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 4.4); pdf.drawRightString(x + width - 4, y + height - 8, f"Meta {_compact_number(goal, unit)} {unit}")
+    left, right, bottom, top = x + 8, x + width - 5, y + 13, y + height - 15
+    pdf.setStrokeColor(colors.HexColor("#cbd5e1")); pdf.setLineWidth(.35)
+    pdf.line(left, bottom, right, bottom); pdf.line(left, (top + bottom) / 2, right, (top + bottom) / 2); pdf.line(left, top, right, top)
+    goal_y = bottom + (goal / maximum) * (top - bottom)
+    pdf.setStrokeColor(colors.HexColor("#16a34a")); pdf.setLineWidth(1.0); pdf.setDash(2, 1); pdf.line(left, goal_y, right, goal_y); pdf.setDash()
+    count = len(values); step = (right - left) / max(1, count - 1); points = []
+    for index, value in enumerate(values):
+        px = left + (index * step if count > 1 else (right - left) / 2); py = bottom + (value / maximum) * (top - bottom); points.append((px, py))
+    pdf.setStrokeColor(colors.HexColor(color)); pdf.setLineWidth(1.65)
+    for first, second in zip(points, points[1:]): pdf.line(first[0], first[1], second[0], second[1])
+    show_every = 1 if count <= 10 else 2 if count <= 15 else 3
+    for index, (px, py) in enumerate(points):
+        pdf.setFillColor(colors.HexColor(color)); pdf.circle(px, py, 1.25, stroke=0, fill=1)
+        if index % show_every == 0 or index == count - 1:
+            pdf.setFont("Helvetica-Bold", 3.6); pdf.drawCentredString(px, min(top + 3, py + 3), _compact_number(values[index], unit))
+            pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 3.5); pdf.drawCentredString(px, bottom - 6, chart_days[index]["label"])
+
+def _pdf_one_page_report(pdf, dataset):
+    width, height = landscape(A3)
+    pdf.setFillColor(colors.HexColor("#0b1728")); pdf.rect(0, height - 25 * mm, width, 25 * mm, stroke=0, fill=1)
+    pdf.setFillColor(colors.white); pdf.setFont("Helvetica-Bold", 15); pdf.drawString(12 * mm, height - 12 * mm, "RESUMO DE ALIMENTAÇÃO")
+    pdf.setFillColor(colors.HexColor("#bfdbfe")); pdf.setFont("Helvetica", 6.4)
+    pdf.drawString(12 * mm, height - 18 * mm, f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')} · consumo diário, metas e acumulados")
+    header = ["Dia"] + [f"{metric[2]}\n{metric[3]}" for metric in REPORT_METRICS] + ["Média\nmeta"]
+    table_rows = []
+    for day in dataset["days"]:
+        cells, percents = [day["label"]], []
+        for key, goal_key, _, unit, _ in REPORT_METRICS:
+            actual, goal = float(day["values"].get(key, 0) or 0), float(dataset["goals"].get(goal_key, 0) or 0)
+            cells.append(f"{_compact_number(actual, unit)}/{_compact_number(goal, unit)}")
+            if goal > 0: percents.append(actual / goal * 100)
+        cells.append(f"{sum(percents)/len(percents):.0f}%" if percents else "—")
+        table_rows.append(cells)
+    total = ["TOTAL"]
+    all_pcts, count_days = [], max(1, len(dataset["days"]))
+    for key, goal_key, _, unit, _ in REPORT_METRICS:
+        actual = sum(float(day["values"].get(key, 0) or 0) for day in dataset["days"])
+        goal = float(dataset["goals"].get(goal_key, 0) or 0) * count_days
+        pct = actual / goal * 100 if goal else 0
+        total.append(f"{_compact_number(actual, unit)}/{_compact_number(goal, unit)} · {pct:.0f}%")
+        if goal: all_pcts.append(pct)
+    total.append(f"{sum(all_pcts)/len(all_pcts):.0f}%" if all_pcts else "—")
+    usable = width - 24 * mm; column_widths = [12 * mm] + [((usable - 12 * mm - 16 * mm) / 7)] * 7 + [16 * mm]
+    table = Table([header] + table_rows + [total], colWidths=column_widths)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10243a")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 4.2), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("FONTSIZE", (0, 1), (-1, -2), 3.7), ("GRID", (0, 0), (-1, -1), .16, colors.HexColor("#cbd5e1")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f8fafc")]), ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#dbeafe")),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"), ("FONTSIZE", (0, -1), (-1, -1), 3.8),
+        ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+    ]))
+    _, table_height = table.wrap(usable, 230)
+    table_y = height - 29 * mm - table_height
+    table.drawOn(pdf, 12 * mm, table_y)
+    chart_top = table_y - 10; chart_height = 100; chart_width = (usable - 3 * 7) / 4
+    for index, metric in enumerate(REPORT_METRICS):
+        row, col = divmod(index, 4)
+        x = 12 * mm + col * (chart_width + 7); y = chart_top - (row + 1) * chart_height - row * 7
+        _pdf_compact_chart(pdf, metric, dataset["days"], dataset["goals"], x, y, chart_width, chart_height)
+    bars_top = chart_top - 2 * chart_height - 18
+    bar_height = 72; pdf.setFillColor(colors.HexColor("#f8fafc")); pdf.roundRect(12 * mm, bars_top - bar_height, usable, bar_height, 3, stroke=0, fill=1)
+    pdf.setStrokeColor(colors.HexColor("#dbeafe")); pdf.roundRect(12 * mm, bars_top - bar_height, usable, bar_height, 3, stroke=1, fill=0)
+    pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 5.8); pdf.drawString(12 * mm + 5, bars_top - 8, "ACUMULADOS DO PERÍODO")
+    pdf.setFillColor(colors.HexColor("#0284c7")); pdf.rect(12 * mm + 88, bars_top - 10, 8, 3, stroke=0, fill=1); pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 4.6); pdf.drawString(12 * mm + 99, bars_top - 9, "Realizado")
+    pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(12 * mm + 133, bars_top - 10, 8, 3, stroke=0, fill=1); pdf.setFillColor(colors.HexColor("#475569")); pdf.drawString(12 * mm + 144, bars_top - 9, "Meta")
+    group_width = usable / 7
+    for index, (key, goal_key, label, unit, _) in enumerate(REPORT_METRICS):
+        actual = sum(float(day["values"].get(key, 0) or 0) for day in dataset["days"]); goal = float(dataset["goals"].get(goal_key, 0) or 0) * count_days
+        ratio = actual / goal * 100 if goal else 0; scale = max(130, ratio, 100); base = bars_top - bar_height + 16; max_h = 38
+        x = 12 * mm + index * group_width + group_width * .30; bar_w = group_width * .15
+        pdf.setFillColor(colors.HexColor("#0284c7")); pdf.rect(x, base, bar_w, max_h * min(ratio, scale) / scale, stroke=0, fill=1)
+        pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(x + bar_w + 2, base, bar_w, max_h * 100 / scale, stroke=0, fill=1)
+        pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 5.4); pdf.drawCentredString(x + bar_w, base - 7, label)
+        pdf.setFont("Helvetica", 4.7); pdf.drawCentredString(x + bar_w, base - 14, f"{_compact_number(actual, unit)}/{_compact_number(goal, unit)} · {ratio:.0f}%")
+    pdf.setStrokeColor(colors.HexColor("#d7e1ea")); pdf.line(12 * mm, 8 * mm, width - 12 * mm, 8 * mm)
+    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 4.3); pdf.drawString(12 * mm, 4.3 * mm, "Linhas: realizado na cor do nutriente · meta tracejada verde · dados detalhados na tabela diária")
+
+
+def build_food_report_pdf(user_id, start, end):
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("A geração de PDF não está disponível. Atualize as dependências do serviço.")
+    dataset = report_period_data(user_id, start, end)
+    output = io.BytesIO(); pdf = pdf_canvas.Canvas(output, pagesize=landscape(A3), pageCompression=1)
+    _pdf_one_page_report(pdf, dataset)
+    pdf.save()
+    return output.getvalue()
+
 def has_usable_energy(record):
     try:
         calories = float(record.get("energia_kcal") if isinstance(record, dict) else record["energia_kcal"])
@@ -756,13 +1054,17 @@ main{
 .quickMeter{height:6px;border-radius:99px;overflow:hidden;background:rgba(255,255,255,.18)}
 .quickMeter i{display:block;height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,#38bdf8,#22c55e);transition:width .28s ease}
 .quickStat.water .quickMeter i{background:linear-gradient(90deg,#38bdf8,#0ea5e9)}
-.waterVisual{display:flex;align-items:center;justify-content:center;min-height:178px;margin:8px 0 5px}
+.waterVisual{display:flex;align-items:center;justify-content:center;min-height:178px;margin:8px 0 5px;position:relative;overflow:hidden}
 .waterFigure{display:flex;align-items:center;gap:17px;justify-content:center}
 .waterArtwork{position:relative;width:116px;height:164px;flex:0 0 116px;filter:drop-shadow(0 7px 12px rgba(14,165,233,.25))}
-.waterArtwork::before,.waterArtwork::after{content:"";position:absolute;inset:0;background:#718096;mask:var(--silhouette) center/contain no-repeat;-webkit-mask:var(--silhouette) center/contain no-repeat}
+.waterArtwork::before,.waterArtwork::after{content:"";position:absolute;inset:0;background:#718096;mask:var(--silhouette) center/contain no-repeat;-webkit-mask:var(--silhouette) center/contain no-repeat;transform:scale(1.01);filter:blur(.18px)}
 .waterArtwork::after{background:linear-gradient(0deg,#0284c7,#38bdf8 78%,#7dd3fc);clip-path:inset(calc(100% - var(--water-level)) 0 0 0);transition:clip-path .35s ease}
 .waterFigureText{font-size:13px;color:#cbd5e1;line-height:1.42;max-width:164px}
 .waterFigureText b{display:block;color:#e0f2fe;font-size:17px;margin-bottom:3px}
+.waterPercent{min-width:118px;color:#7dd3fc;font-size:32px;font-weight:900;line-height:1;text-align:center;text-shadow:0 2px 12px rgba(14,165,233,.35)}
+.waterPercent small{display:block;margin-top:6px;color:#cbd5e1;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.waterFirework{position:absolute;width:4px;height:4px;border-radius:50%;pointer-events:none;z-index:4;animation:waterSpark .76s ease-out forwards}
+@keyframes waterSpark{from{transform:translate(0,0) scale(1);opacity:1}to{transform:translate(var(--dx),var(--dy)) scale(.25);opacity:0}}
 .waterRecordsHeader{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:14px}
 .waterRecordsToggle{padding:6px 9px;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:#16263a;color:#e0f2fe;font-size:11px;font-weight:bold}
 .finalDashboard{padding:0!important;overflow:hidden}
@@ -773,8 +1075,7 @@ main{
 .hydrationPane .waterVisual{min-height:150px;margin:4px 0}
 .hydrationPane .waterArtwork{width:120px;height:170px;flex-basis:120px}
 .hydrationPane .waterFigure{gap:12px}
-.hydrationPane .waterFigureText{max-width:138px;font-size:12px}
-.hydrationPane .waterFigureText b{font-size:15px}
+.hydrationPane .waterPercent{min-width:108px;font-size:30px}
 .waterQuickButtons{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-top:8px}
 .waterQuickButtons button{padding:6px 3px!important;min-height:31px;border:0;border-radius:8px;background:#e5f3ff;font-size:11px;line-height:1.15}
 .goalCards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
@@ -786,8 +1087,8 @@ main{
 .goalMiniCard.limit i{background:linear-gradient(90deg,#fbbf24,#fb7185)}
 @media(max-width:700px){.goalCards{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
 @media(max-width:1000px){.quickStats{grid-template-columns:repeat(4,minmax(0,1fr))!important}}
-@media(max-width:760px){.finalDashboardGrid{grid-template-columns:1fr}.historyPane{border-right:0;border-bottom:1px solid rgba(255,255,255,.16)}.hydrationPane .waterVisual{min-height:168px}.hydrationPane .waterArtwork{width:116px;height:164px;flex-basis:116px}.hydrationPane .waterFigureText{max-width:150px}}
-@media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.quickStatHead small{font-size:13px!important}.waterVisual{min-height:170px}.waterArtwork{width:108px;height:154px;flex-basis:108px}.waterFigure{gap:12px}.waterFigureText{font-size:12px;max-width:142px}.waterFigureText b{font-size:15px}.finalDashboardPane{padding:14px}.waterQuickButtons button{font-size:10px;min-height:29px}}
+@media(max-width:760px){.finalDashboardGrid{grid-template-columns:1fr}.historyPane{border-right:0;border-bottom:1px solid rgba(255,255,255,.16)}.hydrationPane .waterVisual{min-height:168px}.hydrationPane .waterArtwork{width:116px;height:164px;flex-basis:116px}.hydrationPane .waterPercent{min-width:116px;font-size:31px}}
+@media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.quickStatHead small{font-size:13px!important}.waterVisual{min-height:170px}.waterArtwork{width:108px;height:154px;flex-basis:108px}.waterFigure{gap:12px}.waterPercent{min-width:95px;font-size:28px}.finalDashboardPane{padding:14px}.waterQuickButtons button{font-size:10px;min-height:29px}}
 </style></head><body>
 <div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V45 · Diário Alimentar · Segurança P0</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
 <main>
@@ -864,8 +1165,8 @@ main{
 <section class="card finalDashboard" id="finalDashboard"><div class="finalDashboardGrid">
   <div class="finalDashboardPane historyPane" id="periodCard"><h2>📅 Histórico por período</h2>
     <p style="margin:0 0 10px;color:#cbd5e1;font-size:13px">Escolha as datas para comparar meta e consumo no intervalo.</p>
-    <button onclick="openPeriod()" style="width:100%;padding:12px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:14px">📅 VER HISTÓRICO POR PERÍODO</button>
-    <button onclick="exportDay()" style="width:100%;padding:10px;margin-top:7px;border:1px solid #ffffff30;border-radius:12px;background:#16263a;color:#fff;font-weight:bold;font-size:12px">⬇️ EXPORTAR DIA ATUAL EM CSV</button>
+    <button onclick="openPeriod()" style="width:100%;padding:12px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:bold;font-size:14px">📄 RELATÓRIO POR PERÍODO</button>
+    <p style="margin:8px 0 0;color:#b9c9d8;font-size:11px">Escolha 7, 15, 30 dias ou um período personalizado e baixe o PDF sem sair do aplicativo.</p>
   </div>
   <div class="finalDashboardPane hydrationPane"><h2>💧 Hidratação</h2><div id="waterBox"></div>
     <div class="waterQuickButtons">
@@ -986,11 +1287,11 @@ main{
 <div id="periodModal" style="display:none;position:fixed;inset:0;background:#0008;z-index:65;overflow:auto;padding:18px">
   <div style="max-width:760px;margin:20px auto;background:#111827;color:#f8fafc;border:1px solid #334155;border-radius:18px;padding:16px">
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <h2 style="margin:0">📅 Acumulado do período</h2>
+      <h2 style="margin:0">📄 Relatório de alimentação</h2>
       <button onclick="closePeriod()" style="border:1px solid #475569;background:#1e293b;color:#f8fafc;border-radius:10px;padding:8px 12px;font-size:18px">✕</button>
     </div>
     <div style="font-size:12px;color:#cbd5e1;margin:6px 0 12px">
-      Total consumido no intervalo + média diária + comparação com a meta.
+      Escolha o período para gerar um PDF com tabela diária, metas, gráficos de evolução e acumulados.
     </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
@@ -999,10 +1300,10 @@ main{
     </div>
 
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin:10px 0">
-      <button onclick="setPeriod(1)" style="padding:10px;border:0;border-radius:9px;background:#eef2f7">Hoje</button>
       <button onclick="setPeriod(7)" style="padding:10px;border:0;border-radius:9px;background:#eef2f7">7 dias</button>
       <button onclick="setPeriod(15)" style="padding:10px;border:0;border-radius:9px;background:#eef2f7">15 dias</button>
       <button onclick="setPeriod(30)" style="padding:10px;border:0;border-radius:9px;background:#eef2f7">30 dias</button>
+      <button onclick="loadPeriod()" style="padding:10px;border:0;border-radius:9px;background:#dbeafe;color:#10243a;font-weight:bold">Atualizar</button>
     </div>
     <button onclick="loadPeriod()" style="width:100%;padding:12px;border:0;border-radius:10px;background:#111827;color:#fff;font-weight:bold">ATUALIZAR PERÍODO</button>
 
@@ -1011,8 +1312,8 @@ main{
     <div id="historyChart" style="margin-top:14px"></div>
 
     <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
-      <button onclick="exportPeriod()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">⬇️ EXPORTAR PERÍODO EM CSV</button>
-      <button onclick="closePeriod()" style="flex:1;padding:12px;border:1px solid #475569;border-radius:10px;background:#1e293b;color:#f8fafc">FECHAR</button>
+      <button id="downloadReportBtn" onclick="downloadReport()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#0ea5e9;color:#06223a;font-weight:bold">⬇️ BAIXAR RELATÓRIO PDF</button>
+      <button onclick="closePeriod()" style="flex:1;padding:12px;border:1px solid #475569;border-radius:10px;background:#1e293b;color:#f8fafc">← VOLTAR AO APLICATIVO</button>
     </div>
   </div>
 </div>
@@ -1289,7 +1590,6 @@ async function loadPersonalLists(){
     box.innerHTML=fhtml+phtml;
   }catch(e){box.innerHTML=""}
 }
-function exportDay(){const d=day.value||isoDate(new Date());location.href="/api/export?start="+encodeURIComponent(d)+"&end="+encodeURIComponent(d)}
 const editFields=[["nome","Nome","text"],["energia_kcal","Calorias (kcal)","number"],["proteina_g","Proteína (g)","number"],["carboidrato_g","Carboidratos (g)","number"],["lipidios_g","Gorduras (g)","number"],["fibra_g","Fibras (g)","number"],["colesterol_mg","Colesterol (mg)","number"],["calcio_mg","Cálcio (mg)","number"],["magnesio_mg","Magnésio (mg)","number"],["fosforo_mg","Fósforo (mg)","number"],["ferro_mg","Ferro (mg)","number"],["sodio_mg","Sódio (mg)","number"],["potassio_mg","Potássio (mg)","number"],["zinco_mg","Zinco (mg)","number"],["vitamina_c_mg","Vitamina C (mg)","number"]];
 
 async function resizePhoto(file){
@@ -1560,7 +1860,25 @@ const WATER_SILHOUETTES={
 function waterSilhouette(sex,p){
   const isFemale=sex==="F",asset=isFemale?WATER_SILHOUETTES.F:WATER_SILHOUETTES.M;
   const label=isFemale?"Silhueta feminina com cabelo":sex==="M"?"Silhueta masculina":"Silhueta de hidratação";
-  return `<div class="waterFigure"><div class="waterArtwork" role="img" aria-label="${label}" style="--water-level:${Math.min(100,Math.max(0,p))}%;--silhouette:url('${asset}')"></div><div class="waterFigureText"><b>${label}</b>Preenchimento dos pés à cabeça</div></div>`;
+  return `<div class="waterFigure"><div class="waterArtwork" role="img" aria-label="${label}" style="--water-level:${Math.min(100,Math.max(0,p))}%;--silhouette:url('${asset}')"></div><div class="waterPercent">${fmt(p)}%<small>consumido</small></div></div>`;
+}
+let activeWaterCelebration="";
+function celebrateWaterGoal(percent){
+  if(percent<100)return;
+  const key="water-fireworks-v52:"+(day.value||isoDate(new Date()));
+  if(activeWaterCelebration===key)return;
+  let completed=Number(sessionStorage.getItem(key)||0);
+  if(completed>=4)return;
+  activeWaterCelebration=key;
+  const launch=()=>{
+    const host=document.querySelector(".waterVisual");
+    if(!host){activeWaterCelebration="";return}
+    const colors=["#fbbf24","#f472b6","#38bdf8","#86efac","#fff"];
+    for(let i=0;i<24;i++){const spark=document.createElement("i"),angle=(Math.PI*2*i/24)+(Math.random()*.22),distance=28+Math.random()*72;spark.className="waterFirework";spark.style.left=(48+Math.random()*8)+"%";spark.style.top=(30+Math.random()*22)+"%";spark.style.background=colors[i%colors.length];spark.style.setProperty("--dx",Math.cos(angle)*distance+"px");spark.style.setProperty("--dy",Math.sin(angle)*distance+"px");host.appendChild(spark);setTimeout(()=>spark.remove(),850)}
+    completed+=1;sessionStorage.setItem(key,String(completed));
+    if(completed<4)setTimeout(launch,780);else activeWaterCelebration="";
+  };
+  launch();
 }
 async function drawWater(w,goal){
   let p=pct(w,goal);
@@ -1568,6 +1886,7 @@ async function drawWater(w,goal){
   try{entries=await api("/api/water?data="+encodeURIComponent(day.value));}catch(e){}
   const recordRows=entries.length?entries.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.10)"><span>💧 ${fmt(Number(x.quantidade_ml)/1000)} L <small style="color:#94a3b8">${esc(x.hora||'')}</small></span><button onclick="deleteWater(${x.id})" style="padding:5px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.15);background:#26364a;color:#fff">Excluir</button></div>`).join(''):`<div style="font-size:12px;color:#94a3b8;margin-top:7px">Nenhum registro de água.</div>`;
   document.getElementById("waterBox").innerHTML=`<div style="display:flex;justify-content:space-between"><b>💧 ${fmt(w/1000)} L</b><span>${fmt(goal/1000)} L meta</span></div><div class="waterVisual">${waterSilhouette(profileSex,p)}</div><div style="font-size:12px;color:#cbd5e1;text-align:center">${fmt(p)}% · ${fmt(Math.max(0,goal-w)/1000)} L restantes</div><div class="waterRecordsHeader"><b>Registros de hoje (${entries.length})</b><button id="waterRecordsToggle" class="waterRecordsToggle" onclick="toggleWaterRecords()" aria-expanded="false">VER REGISTROS ▼</button></div><div id="waterRecords" style="display:none">${recordRows}</div>`;
+  setTimeout(()=>celebrateWaterGoal(p),40);
 }
 function toggleWaterRecords(){const box=document.getElementById("waterRecords"),btn=document.getElementById("waterRecordsToggle");if(!box||!btn)return;const open=box.style.display!=="none";box.style.display=open?"none":"block";btn.textContent=open?"VER REGISTROS ▼":"OCULTAR REGISTROS ▲";btn.setAttribute("aria-expanded",String(!open));}
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
@@ -1595,6 +1914,7 @@ function setPeriod(days){
   const end=day.value || isoDate(new Date());
   document.getElementById("periodEnd").value=end;
   document.getElementById("periodStart").value=shiftDays(end,-(days-1));
+  loadPeriod();
 }
 function openPeriod(){
   const end=day.value || isoDate(new Date());
@@ -1604,10 +1924,19 @@ function openPeriod(){
   loadPeriod();
 }
 function closePeriod(){document.getElementById("periodModal").style.display="none";}
-function exportPeriod(){
-  const start=document.getElementById("periodStart").value,end=document.getElementById("periodEnd").value;
-  if(!start||!end||start>end){alert("Informe um período válido antes de exportar.");return}
-  location.href="/api/export?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end);
+async function downloadReport(){
+  const start=document.getElementById("periodStart").value,end=document.getElementById("periodEnd").value,button=document.getElementById("downloadReportBtn");
+  if(!start||!end||start>end){alert("Informe um período válido antes de gerar o relatório.");return}
+  const days=Math.round((new Date(end+"T12:00:00")-new Date(start+"T12:00:00"))/86400000)+1;
+  if(days<1||days>90){alert("Escolha um período entre 1 e 90 dias.");return}
+  try{
+    if(button){button.disabled=true;button.textContent="GERANDO PDF..."}
+    const response=await fetch("/api/report.pdf?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end),{credentials:"same-origin"});
+    if(!response.ok){let message="Não foi possível gerar o relatório.";try{message=(await response.json()).error||message}catch(e){}throw new Error(message)}
+    const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
+    link.href=url;link.download="resumo_alimentacao_"+start+"_"+end+".pdf";document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);
+  }catch(error){alert(error.message||"Não foi possível gerar o relatório PDF.")}
+  finally{if(button){button.disabled=false;button.textContent="⬇️ BAIXAR RELATÓRIO PDF"}}
 }
 async function loadHistory(start,end){
   const box=document.getElementById("historyChart");if(!box)return;
@@ -1699,7 +2028,7 @@ const searchEl=document.getElementById("search"),foods=document.getElementById("
 searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,70)};bootstrap();
 </script></body></html>
 """
-HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V51 · Diário Alimentar · Painel dividido").replace("V45 · DIÁRIO ALIMENTAR", "V51 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V51 · Diário Alimentar · Painel dividido</title>")
+HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V52 · Diário Alimentar · Relatório PDF").replace("V45 · DIÁRIO ALIMENTAR", "V52 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V52 · Diário Alimentar · Relatório PDF</title>")
 
 class H(BaseHTTPRequestHandler):
     def end_headers(self):
@@ -1927,6 +2256,33 @@ class H(BaseHTTPRequestHandler):
             })
             return
 
+        if p.path=="/api/report.pdf":
+            q = parse_qs(p.query)
+            start = q.get("start", [date.today().isoformat()])[0]
+            end = q.get("end", [start])[0]
+            if not allow_request(f"report:{self.user['id']}", 6, 600):
+                self.js({"error":"Muitas solicitações de relatório. Aguarde alguns minutos."}, 429)
+                return
+            try:
+                pdf_data = build_food_report_pdf(self.user["id"], start, end)
+            except ValueError as error:
+                self.js({"error": public_error_message(error)}, 400)
+                return
+            except Exception as error:
+                LOG.warning("report_pdf_failed user_id=%s", self.user["id"], exc_info=True)
+                self.js({"error":"Não foi possível gerar o relatório PDF. Tente novamente."}, 500)
+                return
+            filename = f"resumo_alimentacao_{start}_{end}.pdf"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(pdf_data)))
+            self.end_headers()
+            self.wfile.write(pdf_data)
+            return
+
         if p.path=="/api/summary":
             q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];c=ddb()
             try:
@@ -1950,16 +2306,6 @@ class H(BaseHTTPRequestHandler):
             try:r=c.execute("SELECT id,alimento_id,alimento_nome,nome,quantidade_g FROM porcoes WHERE usuario_id=? ORDER BY alimento_nome,nome",(self.user["id"],)).fetchall()
             finally:c.close()
             self.js([dict(x) for x in r]);return
-        if p.path=="/api/export":
-            q=parse_qs(p.query);start=q.get("start",[date.today().isoformat()])[0];end=q.get("end",[start])[0];c=ddb()
-            try:
-                rows=c.execute("SELECT data,refeicao,alimento_nome,quantidade_g FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
-                water=c.execute("SELECT data,hora,quantidade_ml FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
-            finally:c.close()
-            out=io.StringIO();w=csv.writer(out);w.writerow(["tipo","data","hora","refeicao","alimento","quantidade_g","quantidade_ml"])
-            for x in rows:w.writerow(["alimento",x["data"],"",x["refeicao"],x["alimento_nome"],x["quantidade_g"],""])
-            for x in water:w.writerow(["agua",x["data"],x["hora"],"","","",x["quantidade_ml"]])
-            b=out.getvalue().encode("utf-8-sig");self.send_response(200);self.send_header("Content-Type","text/csv; charset=utf-8");self.send_header("Content-Disposition",f'attachment; filename="diario_{start}_{end}.csv"');self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
         if p.path.startswith("/api/consume/"):
             i=int(p.path.rsplit("/",1)[1]);c=ddb()
             try:r=c.execute("SELECT * FROM consumo WHERE id=? AND usuario_id=?",(i,self.user["id"])).fetchone()
