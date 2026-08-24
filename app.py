@@ -1049,6 +1049,8 @@ main{
   overflow-y:auto;overflow-x:hidden;
   overscroll-behavior:contain;
   -webkit-overflow-scrolling:touch;
+  touch-action:pan-y;
+  scrollbar-width:auto;
   padding:12px 14px;border-radius:12px;
   background:rgba(6,18,31,.98);color:#fff;
   border:1px solid rgba(255,255,255,.18);
@@ -1057,6 +1059,10 @@ main{
   pointer-events:auto;
   backdrop-filter:blur(8px);
 }
+#nutrientTooltip::-webkit-scrollbar{width:10px}
+#nutrientTooltip::-webkit-scrollbar-track{background:rgba(255,255,255,.08);border-radius:8px}
+#nutrientTooltip::-webkit-scrollbar-thumb{background:rgba(255,255,255,.42);border-radius:8px}
+#nutrientTooltip::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.62)}
 #nutrientTooltip .tipTitle{font-weight:900;font-size:13px;margin-bottom:7px}
 #nutrientTooltip .tipTotal{color:#8fe3a8;font-weight:800;margin-bottom:8px}
 #nutrientTooltip .tipRow{
@@ -1881,6 +1887,43 @@ document.addEventListener("mouseout",e=>{
   if(el&&!el.contains(e.relatedTarget)) scheduleHideNutrientTip();
   if(e.target.closest("#nutrientTooltip")&&!nutrientTip.contains(e.relatedTarget)) scheduleHideNutrientTip();
 });
+
+/* Celular: toque no macro/micro abre a lista; a lista aceita swipe vertical. */
+document.addEventListener("click",e=>{
+  const el=e.target.closest(".nutrient-source");
+  if(el){
+    e.preventDefault();
+    clearTimeout(tipHideTimer);
+    const r=el.getBoundingClientRect();
+    const ev={clientX:r.left+r.width/2,clientY:r.bottom+8};
+    showNutrientTip(el,ev);
+    return;
+  }
+  if(!e.target.closest("#nutrientTooltip")){
+    nutrientTip.style.display="none";
+    activeNutrientSource=null;
+  }
+});
+let mobileTouchNutrient=null;
+document.addEventListener("touchstart",e=>{
+  const el=e.target.closest(".nutrient-source");
+  if(el){
+    mobileTouchNutrient=el;
+    clearTimeout(tipHideTimer);
+    const r=el.getBoundingClientRect();
+    showNutrientTip(el,{clientX:r.left+r.width/2,clientY:r.bottom+8});
+  }
+},{passive:true});
+nutrientTip.addEventListener("touchstart",e=>{
+  clearTimeout(tipHideTimer);
+  e.stopPropagation();
+},{passive:true});
+nutrientTip.addEventListener("touchmove",e=>{
+  /* Impede a página de acompanhar o gesto quando o dedo está na lista. */
+  if(nutrientTip.scrollHeight>nutrientTip.clientHeight) e.stopPropagation();
+},{passive:true});
+nutrientTip.addEventListener("touchend",e=>e.stopPropagation(),{passive:true});
+
 nutrientTip.addEventListener("mouseenter",()=>clearTimeout(tipHideTimer));
 nutrientTip.addEventListener("mouseleave",scheduleHideNutrientTip);
 nutrientTip.addEventListener("wheel",e=>{
