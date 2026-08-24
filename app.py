@@ -6,7 +6,7 @@ from urllib.parse import urlparse, parse_qs
 import sqlite3, json
 import psycopg
 from psycopg.rows import dict_row
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import os, time, logging
 import base64, binascii, hashlib, hmac, secrets, csv, io, re, math
@@ -58,6 +58,17 @@ RATE_LOCK = Lock()
 RATE_BUCKETS = {}
 LOG = logging.getLogger("diario_alimentar")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+
+# Horário oficial do aplicativo: Brasil/São_Paulo (UTC-3).
+# O frontend também usa a data local do navegador.
+SAO_PAULO_TZ = timezone(timedelta(hours=-3))
+
+def now_sp():
+    return datetime.now(SAO_PAULO_TZ)
+
+def today_sp():
+    return now_sp().date()
+
 
 MEALS = ["Café da manhã", "Almoço", "Lanche", "Jantar", "Ceia"]
 DEFAULT_GOALS = {"calorias_kcal":2300.0,"proteina_g":180.0,"carboidratos_g":220.0,"gorduras_g":70.0,"fibras_g":30.0,"sodio_mg":2000.0,"agua_ml":4000.0,"manual_override":False}
@@ -1520,7 +1531,7 @@ document.getElementById('profileWeight')?.addEventListener('input',()=>{
     if(w&&t&&g) calculateProfileGoals();
   },500);
 });
-day.value=new Date().toISOString().slice(0,10);
+day.value=isoDate(new Date());
 function fmt(x){return Number(x||0).toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2})}
 function escAttr(s){return String(s).replace(/&/g,'&amp;').replace(/\"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
@@ -2201,7 +2212,7 @@ class H(BaseHTTPRequestHandler):
                 nc.close();pc.close()
             self.js({"foods":[dict(x) for x in own+base][:40]});return
         if p.path=="/api/day":
-            q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];m=q.get("refeicao",[MEALS[0]])[0];c=ddb()
+            q=parse_qs(p.query);d=q.get("data",[today_sp().isoformat()])[0];m=q.get("refeicao",[MEALS[0]])[0];c=ddb()
             try:rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=? ORDER BY id",(self.user["id"],d,)).fetchall()
             finally:c.close()
             nc=ndb();pc=ddb();items=[]
@@ -2242,7 +2253,7 @@ class H(BaseHTTPRequestHandler):
         if p.path=="/api/nutrient_sources":
             q=parse_qs(p.query)
             nutrient=q.get("nutrient",[""])[0]
-            start=q.get("start",[q.get("data",[date.today().isoformat()])[0]])[0]
+            start=q.get("start",[q.get("data",[today_sp().isoformat()])[0]])[0]
             end=q.get("end",[start])[0]
             if nutrient not in [x[0] for x in NUTS]:
                 self.js({"error":"Nutriente inválido"},400);return
@@ -2265,7 +2276,7 @@ class H(BaseHTTPRequestHandler):
             return
 
         if p.path=="/api/history":
-            q=parse_qs(p.query);start=q.get("start",[date.today().isoformat()])[0];end=q.get("end",[start])[0]
+            q=parse_qs(p.query);start=q.get("start",[today_sp().isoformat()])[0];end=q.get("end",[start])[0]
             c=ddb()
             try:
                 rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
@@ -2302,7 +2313,7 @@ class H(BaseHTTPRequestHandler):
 
         if p.path=="/api/report.pdf":
             q = parse_qs(p.query)
-            start = q.get("start", [date.today().isoformat()])[0]
+            start = q.get("start", [today_sp().isoformat()])[0]
             end = q.get("end", [start])[0]
             if not allow_request(f"report:{self.user['id']}", 6, 600):
                 self.js({"error":"Muitas solicitações de relatório. Aguarde alguns minutos."}, 429)
@@ -2328,14 +2339,14 @@ class H(BaseHTTPRequestHandler):
             return
 
         if p.path=="/api/summary":
-            q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];c=ddb()
+            q=parse_qs(p.query);d=q.get("data",[today_sp().isoformat()])[0];c=ddb()
             try:
                 rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchall();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
             self.js({"daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":goal_dict(g)})
             return
         if p.path=="/api/water":
-            q=parse_qs(p.query);d=q.get("data",[date.today().isoformat()])[0];c=ddb()
+            q=parse_qs(p.query);d=q.get("data",[today_sp().isoformat()])[0];c=ddb()
             try: rows=c.execute("SELECT id,hora,quantidade_ml FROM hidratacao WHERE usuario_id=? AND data=? ORDER BY id DESC",(self.user["id"],d,)).fetchall()
             finally:c.close()
             self.js([dict(r) for r in rows]);return
@@ -2532,7 +2543,7 @@ class H(BaseHTTPRequestHandler):
                 x=self.body();ml=float(x.get("quantidade_ml",0));
                 if ml<=0: raise ValueError("Quantidade de água inválida")
                 if ml>10000:raise ValueError("Quantidade de água muito alta para um único registro.")
-                c=ddb();c.execute("INSERT INTO hidratacao(usuario_id,data,hora,quantidade_ml) VALUES(?,?,?,?)",(self.user["id"],x.get("data",date.today().isoformat()),datetime.now().strftime("%H:%M"),ml));c.commit();self.js({"ok":True})
+                c=ddb();c.execute("INSERT INTO hidratacao(usuario_id,data,hora,quantidade_ml) VALUES(?,?,?,?)",(self.user["id"],x.get("data",today_sp().isoformat()),now_sp().strftime("%H:%M"),ml));c.commit();self.js({"ok":True})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
@@ -2587,7 +2598,7 @@ class H(BaseHTTPRequestHandler):
         if self.path=="/api/consume_batch":
             c=None
             try:
-                x=self.body();meal_name=str(x.get("refeicao","")).strip();record_date=str(x.get("data",date.today().isoformat()));items=x.get("items")
+                x=self.body();meal_name=str(x.get("refeicao","")).strip();record_date=str(x.get("data",today_sp().isoformat()));items=x.get("items")
                 if meal_name not in MEALS: raise ValueError("Selecione uma refeição válida.")
                 try: date.fromisoformat(record_date)
                 except Exception: raise ValueError("Data inválida.")
