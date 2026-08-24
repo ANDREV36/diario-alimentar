@@ -1668,7 +1668,7 @@ async function loadPersonalLists(){
         <span>⭐ Favoritos (${fav.length})</span>
         <button onclick="togglePersonalSection('favoritesList',this)" aria-expanded="true"
           style="width:42px;height:34px;padding:0;border:1px solid #ffffff25;border-radius:10px;background:#111827;color:#fff;font-size:20px;line-height:1;cursor:pointer"
-          title="Mostrar ou ocultar favoritos">▼</button>
+          title="Mostrar ou ocultar favoritos">▲</button>
       </h2>
       <div id="favoritesList" style="display:block;margin-top:12px">${fitems}</div>
     </div>`:"";
@@ -1677,7 +1677,7 @@ async function loadPersonalLists(){
         <span>💾 Porções salvas (${port.length})</span>
         <button onclick="togglePersonalSection('portionsList',this)" aria-expanded="true"
           style="width:42px;height:34px;padding:0;border:1px solid #ffffff25;border-radius:10px;background:#111827;color:#fff;font-size:20px;line-height:1;cursor:pointer"
-          title="Mostrar ou ocultar porções salvas">▼</button>
+          title="Mostrar ou ocultar porções salvas">▲</button>
       </h2>
       <div id="portionsList" style="display:block;margin-top:12px">${pitems}</div>
     </div>`:"";
