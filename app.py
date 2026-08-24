@@ -1132,7 +1132,7 @@ main{
   <div id="meals" class="meals"></div>
 </section>
 
-<div class="card"><h2>Data</h2><div class="date"><input id="day" type="date"><button onclick="refresh()">OK</button></div></div>
+<div class="card"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><h2 style="margin:0">Data</h2><span id="currentDateTime" style="font-size:14px;font-weight:600;color:#cbd5e1;white-space:nowrap"></span></div><div class="date"><input id="day" type="date"><button onclick="refresh()">OK</button></div></div>
 <div class="card" id="platePhotoCard" style="border:1px solid #4ade8055;background:linear-gradient(135deg,#10243a,#17304a)">
   <div class="sectionTitle"><div><span class="eyebrow">REGISTRO POR FOTO</span><h2>🍽️ Fotografar prato</h2></div></div>
   <p style="margin:0 0 11px;color:#cbd5e1;font-size:13px;line-height:1.4">Escolha uma imagem ou fotografe o prato. Você confere os alimentos e as quantidades antes de adicionar ao diário.</p>
@@ -1532,6 +1532,16 @@ document.getElementById('profileWeight')?.addEventListener('input',()=>{
   },500);
 });
 day.value=isoDate(new Date());
+function updateCurrentDateTime(){
+  const el=document.getElementById("currentDateTime");
+  if(!el)return;
+  const now=new Date();
+  const date=now.toLocaleDateString("pt-BR");
+  const time=now.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  el.textContent=`${date} · ${time}`;
+}
+updateCurrentDateTime();
+setInterval(updateCurrentDateTime,1000);
 function fmt(x){return Number(x||0).toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2})}
 function escAttr(s){return String(s).replace(/&/g,'&amp;').replace(/\"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
