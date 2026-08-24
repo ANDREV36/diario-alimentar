@@ -1063,6 +1063,7 @@ main{
 #nutrientTooltip::-webkit-scrollbar-track{background:rgba(255,255,255,.08);border-radius:8px}
 #nutrientTooltip::-webkit-scrollbar-thumb{background:rgba(255,255,255,.42);border-radius:8px}
 #nutrientTooltip::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.62)}
+.sectionArrow{font-size:inherit;line-height:1;display:inline-block;min-width:1em;text-align:center;flex:0 0 auto}
 #nutrientTooltip .tipTitle{font-weight:900;font-size:13px;margin-bottom:7px}
 #nutrientTooltip .tipTotal{color:#8fe3a8;font-weight:800;margin-bottom:8px}
 #nutrientTooltip .tipRow{
@@ -1632,14 +1633,11 @@ async function savePortion(){
   try{await api("/api/portion",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({alimento_id:chosen.id,alimento_nome:chosen.nome,nome,quantidade_g:q,unidade})});await loadPersonalLists();alert("Porção salva.")}catch(e){alert(e.message)}
 }
 function togglePersonalSection(id,btn){
-  const el=document.getElementById(id);if(!el)return;
+  const el=document.getElementById(id);if(!el||!btn)return;
   const open=el.style.display!=="none";
   el.style.display=open?"none":"block";
-  if(btn){
-    const arrow=btn.querySelector(".sectionArrow");
-    if(arrow) arrow.textContent=open?"▶":"▼";
-    btn.setAttribute("aria-expanded",String(!open));
-  }
+  btn.textContent=open?"▲":"▼";
+  btn.setAttribute("aria-expanded",String(!open));
 }
 async function addSavedFood(id,nome,quantidade,unidade){
   const q=Number(quantidade);
@@ -1665,8 +1663,24 @@ async function loadPersonalLists(){
     const [fav,port]=await Promise.all([api("/api/favorites"),api("/api/portions")]);
     const fitems=fav.map(f=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(f.alimento_id)},${JSON.stringify(f.alimento_nome)},Number(document.getElementById("weight").value)||100,document.getElementById("quantityUnit").value)' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(f.alimento_nome)}</button><button onclick="deleteFavorite(${Number(f.id)})" title="Excluir favorito" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
     const pitems=port.map(p=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(p.alimento_id)},${JSON.stringify(p.alimento_nome)},${Number(p.quantidade_g)||0},${JSON.stringify(p.unidade||"g")})' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(p.alimento_nome)} · ${esc(p.nome)} (${fmt(p.quantidade_g)} ${esc(p.unidade||"g")})</button><button onclick="deletePortion(${Number(p.id)})" title="Excluir porção" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
-    const fhtml=fav.length?`<div style="margin:8px 0 4px"><button onclick="togglePersonalSection('favoritesList',this)" aria-expanded="true" style="width:100%;display:flex;justify-content:space-between;align-items:center;padding:7px 9px;border:1px solid #ffffff20;border-radius:9px;background:#101f32;color:#fff;font-weight:bold;cursor:pointer"><span>⭐ Favoritos (${fav.length})</span><span class="sectionArrow" aria-hidden="true">▼</span></button><div id="favoritesList" style="display:block;margin-top:3px">${fitems}</div></div>`:"";
-    const phtml=port.length?`<div style="margin:8px 0 4px"><button onclick="togglePersonalSection('portionsList',this)" aria-expanded="true" style="width:100%;display:flex;justify-content:space-between;align-items:center;padding:7px 9px;border:1px solid #ffffff20;border-radius:9px;background:#101f32;color:#fff;font-weight:bold;cursor:pointer"><span>💾 Porções salvas (${port.length})</span><span class="sectionArrow" aria-hidden="true">▼</span></button><div id="portionsList" style="display:block;margin-top:3px">${pitems}</div></div>`:"";
+    const fhtml=fav.length?`<div style="margin:8px 0 4px">
+      <h2 style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:0">
+        <span>⭐ Favoritos (${fav.length})</span>
+        <button onclick="togglePersonalSection('favoritesList',this)" aria-expanded="true"
+          style="width:42px;height:34px;padding:0;border:1px solid #ffffff25;border-radius:10px;background:#111827;color:#fff;font-size:20px;line-height:1;cursor:pointer"
+          title="Mostrar ou ocultar favoritos">▼</button>
+      </h2>
+      <div id="favoritesList" style="display:block;margin-top:12px">${fitems}</div>
+    </div>`:"";
+    const phtml=port.length?`<div style="margin:8px 0 4px">
+      <h2 style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:0">
+        <span>💾 Porções salvas (${port.length})</span>
+        <button onclick="togglePersonalSection('portionsList',this)" aria-expanded="true"
+          style="width:42px;height:34px;padding:0;border:1px solid #ffffff25;border-radius:10px;background:#111827;color:#fff;font-size:20px;line-height:1;cursor:pointer"
+          title="Mostrar ou ocultar porções salvas">▼</button>
+      </h2>
+      <div id="portionsList" style="display:block;margin-top:12px">${pitems}</div>
+    </div>`:"";
     box.innerHTML=fhtml+phtml;
   }catch(e){box.innerHTML=""}
 }
@@ -1884,7 +1898,11 @@ document.addEventListener("mousemove",e=>{
 });
 document.addEventListener("mouseout",e=>{
   const el=e.target.closest(".nutrient-source");
-  if(el&&!el.contains(e.relatedTarget)) scheduleHideNutrientTip();
+  if(el){
+    const to=e.relatedTarget;
+    if(to && nutrientTip.contains(to)) clearTimeout(tipHideTimer);
+    else if(!el.contains(to)) scheduleHideNutrientTip();
+  }
   if(e.target.closest("#nutrientTooltip")&&!nutrientTip.contains(e.relatedTarget)) scheduleHideNutrientTip();
 });
 
@@ -1926,9 +1944,19 @@ nutrientTip.addEventListener("touchend",e=>e.stopPropagation(),{passive:true});
 
 nutrientTip.addEventListener("mouseenter",()=>clearTimeout(tipHideTimer));
 nutrientTip.addEventListener("mouseleave",scheduleHideNutrientTip);
+document.addEventListener("wheel",e=>{
+  if(nutrientTip.style.display==="block" && nutrientTip.contains(e.target)){
+    e.preventDefault();
+    e.stopPropagation();
+    const delta=e.deltaY;
+    nutrientTip.scrollTop += delta;
+  }
+},{passive:false,capture:true});
+
 nutrientTip.addEventListener("wheel",e=>{
-  if(nutrientTip.scrollHeight>nutrientTip.clientHeight) e.preventDefault();
+  e.preventDefault();
   e.stopPropagation();
+  nutrientTip.scrollTop += e.deltaY;
 },{passive:false});
 
 function toggleConsumedFoods(){
