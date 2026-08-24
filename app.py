@@ -1,3 +1,4 @@
+# V56 FINAL — favoritos/porções recolhíveis, exclusão, consumo direto e data/horário visíveis
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -1132,7 +1133,7 @@ main{
   <div id="meals" class="meals"></div>
 </section>
 
-<div class="card"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><h2 style="margin:0">Data</h2><span id="currentDateTime" style="font-size:14px;font-weight:600;color:#cbd5e1;white-space:nowrap"></span></div><div class="date"><input id="day" type="date"><button onclick="refresh()">OK</button></div></div>
+<div class="card"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><h2 style="margin:0">Data e horário</h2><span id="currentDateTime" style="font-size:15px;font-weight:800;color:#fff;white-space:nowrap;padding:8px 12px;border:1px solid #4ade8055;border-radius:10px;background:#0f2a20"></span></div><div class="date" style="display:flex;align-items:center;gap:8px"><input id="day" type="date" style="flex:1"><button onclick="refresh()">OK</button></div></div>
 <div class="card" id="platePhotoCard" style="border:1px solid #4ade8055;background:linear-gradient(135deg,#10243a,#17304a)">
   <div class="sectionTitle"><div><span class="eyebrow">REGISTRO POR FOTO</span><h2>🍽️ Fotografar prato</h2></div></div>
   <p style="margin:0 0 11px;color:#cbd5e1;font-size:13px;line-height:1.4">Escolha uma imagem ou fotografe o prato. Você confere os alimentos e as quantidades antes de adicionar ao diário.</p>
@@ -1619,11 +1620,38 @@ async function savePortion(){
   const unidade=document.getElementById("quantityUnit").value;
   try{await api("/api/portion",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({alimento_id:chosen.id,alimento_nome:chosen.nome,nome,quantidade_g:q,unidade})});await loadPersonalLists();alert("Porção salva.")}catch(e){alert(e.message)}
 }
+function togglePersonalSection(id,btn){
+  const el=document.getElementById(id);if(!el)return;
+  const open=el.style.display!=="none";
+  el.style.display=open?"none":"block";
+  if(btn){btn.textContent=open?"▶":"▼";btn.setAttribute("aria-expanded",String(!open));}
+}
+async function addSavedFood(id,nome,quantidade,unidade){
+  const q=Number(quantidade);
+  if(!Number.isFinite(q)||q<=0){alert("Quantidade inválida.");return}
+  try{
+    await api("/api/consume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,refeicao:meal,alimento_id:Number(id),alimento_nome:nome,quantidade_g:q,unidade:unidade||"g"})});
+    const list=document.getElementById("items"),toggle=document.getElementById("consumedFoodsToggle");
+    if(list){list.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
+    await refresh();
+  }catch(e){alert("Não foi possível adicionar o alimento: "+e.message)}
+}
+async function deleteFavorite(id){
+  if(!confirm("Excluir este favorito?"))return;
+  try{await api("/api/favorite/"+Number(id),{method:"DELETE"});await loadPersonalLists()}catch(e){alert(e.message)}
+}
+async function deletePortion(id){
+  if(!confirm("Excluir esta porção salva?"))return;
+  try{await api("/api/portion/"+Number(id),{method:"DELETE"});await loadPersonalLists()}catch(e){alert(e.message)}
+}
 async function loadPersonalLists(){
   const box=document.getElementById("personalLists");if(!box)return;
-  try{const [fav,port]=await Promise.all([api("/api/favorites"),api("/api/portions")]);
-    const fhtml=fav.length?`<div style="font-size:12px;font-weight:bold;margin:8px 0 4px">⭐ Favoritos</div>`+fav.map(f=>`<button onclick='selectFood(${JSON.stringify({id:f.alimento_id,nome:f.alimento_nome})})' style="margin:3px;padding:7px 9px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff">${esc(f.alimento_nome)}</button>`).join(""):"";
-    const phtml=port.length?`<div style="font-size:12px;font-weight:bold;margin:8px 0 4px">💾 Porções salvas</div>`+port.map(p=>`<button onclick='selectFood(${JSON.stringify({id:p.alimento_id,nome:p.alimento_nome,unidade:p.unidade||"g"})});document.getElementById("weight").value=${Number(p.quantidade_g)||0};setQuantityUnit(${JSON.stringify(p.unidade||"g")})' style="margin:3px;padding:7px 9px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff">${esc(p.alimento_nome)} · ${esc(p.nome)} (${fmt(p.quantidade_g)} ${esc(p.unidade||"g")})</button>`).join(""):"";
+  try{
+    const [fav,port]=await Promise.all([api("/api/favorites"),api("/api/portions")]);
+    const fitems=fav.map(f=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(f.alimento_id)},${JSON.stringify(f.alimento_nome)},Number(document.getElementById("weight").value)||100,document.getElementById("quantityUnit").value)' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(f.alimento_nome)}</button><button onclick="deleteFavorite(${Number(f.id)})" title="Excluir favorito" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
+    const pitems=port.map(p=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(p.alimento_id)},${JSON.stringify(p.alimento_nome)},${Number(p.quantidade_g)||0},${JSON.stringify(p.unidade||"g")})' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(p.alimento_nome)} · ${esc(p.nome)} (${fmt(p.quantidade_g)} ${esc(p.unidade||"g")})</button><button onclick="deletePortion(${Number(p.id)})" title="Excluir porção" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
+    const fhtml=fav.length?`<div style="margin:8px 0 4px"><button onclick="togglePersonalSection('favoritesList',this)" aria-expanded="true" style="width:100%;display:flex;justify-content:space-between;align-items:center;padding:7px 9px;border:1px solid #ffffff20;border-radius:9px;background:#101f32;color:#fff;font-weight:bold;cursor:pointer"><span>⭐ Favoritos (${fav.length})</span><span>▼</span></button><div id="favoritesList" style="display:block;margin-top:3px">${fitems}</div></div>`:"";
+    const phtml=port.length?`<div style="margin:8px 0 4px"><button onclick="togglePersonalSection('portionsList',this)" aria-expanded="true" style="width:100%;display:flex;justify-content:space-between;align-items:center;padding:7px 9px;border:1px solid #ffffff20;border-radius:9px;background:#101f32;color:#fff;font-weight:bold;cursor:pointer"><span>💾 Porções salvas (${port.length})</span><span>▼</span></button><div id="portionsList" style="display:block;margin-top:3px">${pitems}</div></div>`:"";
     box.innerHTML=fhtml+phtml;
   }catch(e){box.innerHTML=""}
 }
