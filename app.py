@@ -821,8 +821,8 @@ def _pdf_compact_chart(pdf, metric, chart_days, goals, x, y, width, height):
     maximum = max([goal] + values + [1]) * 1.08
     pdf.setFillColor(colors.HexColor("#f8fafc")); pdf.roundRect(x, y, width, height, 3, stroke=0, fill=1)
     pdf.setStrokeColor(colors.HexColor("#dbeafe")); pdf.roundRect(x, y, width, height, 3, stroke=1, fill=0)
-    pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 5.8); pdf.drawString(x + 4, y + height - 8, label)
-    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 4.4); pdf.drawRightString(x + width - 4, y + height - 8, f"Meta {_compact_number(goal, unit)} {unit}")
+    pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 8); pdf.drawString(x + 6, y + height - 11, label)
+    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 6.5); pdf.drawRightString(x + width - 6, y + height - 11, f"Meta {_compact_number(goal, unit)} {unit}")
     left, right, bottom, top = x + 8, x + width - 5, y + 13, y + height - 15
     pdf.setStrokeColor(colors.HexColor("#cbd5e1")); pdf.setLineWidth(.35)
     pdf.line(left, bottom, right, bottom); pdf.line(left, (top + bottom) / 2, right, (top + bottom) / 2); pdf.line(left, top, right, top)
@@ -837,11 +837,16 @@ def _pdf_compact_chart(pdf, metric, chart_days, goals, x, y, width, height):
     for index, (px, py) in enumerate(points):
         pdf.setFillColor(colors.HexColor(color)); pdf.circle(px, py, 1.25, stroke=0, fill=1)
         if index % show_every == 0 or index == count - 1:
-            pdf.setFont("Helvetica-Bold", 3.6)
-            label_y = py + 4 if py <= top - 10 else py - 8
-            label_y = max(bottom + 4, min(top - 4, label_y))
+            pdf.setFont("Helvetica-Bold", 5.4)
+            label_y = py + 6 if py <= top - 14 else py - 9
+            label_y = max(bottom + 5, min(top - 7, label_y))
+            label_text = _compact_number(values[index], unit)
+            label_width = stringWidth(label_text, "Helvetica-Bold", 5.4) + 5
+            pdf.setFillColor(colors.white)
+            pdf.roundRect(px - label_width / 2, label_y - 2, label_width, 7, 1.5, stroke=0, fill=1)
+            pdf.setFillColor(colors.HexColor(color))
             pdf.drawCentredString(px, label_y, _compact_number(values[index], unit))
-            pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 3.5); pdf.drawCentredString(px, bottom - 6, chart_days[index]["label"])
+        pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 5.5); pdf.drawCentredString(px, y + 5, chart_days[index]["label"])
 
 def _pdf_one_page_report(pdf, dataset):
     width, height = landscape(A3)
@@ -872,11 +877,11 @@ def _pdf_one_page_report(pdf, dataset):
     table = Table([header] + table_rows + [total], colWidths=column_widths)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10243a")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 4.2), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEADING", (0, 0), (-1, -1), 5.2), ("FONTSIZE", (0, 1), (-1, -2), 3.7), ("GRID", (0, 0), (-1, -1), .16, colors.HexColor("#cbd5e1")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 6), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEADING", (0, 0), (-1, -1), 7), ("FONTSIZE", (0, 1), (-1, -2), 5), ("GRID", (0, 0), (-1, -1), .16, colors.HexColor("#cbd5e1")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f8fafc")]), ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#dbeafe")),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"), ("FONTSIZE", (0, -1), (-1, -1), 3.8),
-        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"), ("FONTSIZE", (0, -1), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
     _, table_height = table.wrap(usable, 230)
     table_y = height - 29 * mm - table_height
@@ -916,7 +921,7 @@ def _pdf_energy_balance_page(pdf, dataset):
       ("Basal", float(totals.get("basal_kcal") or 0), "#0f766e"),
       ("Ativo", float(totals.get("active_kcal") or 0), "#2563eb"),
       ("Consumido", float(totals.get("consumed_kcal") or 0), "#be123c"),
-      ("Saldo", float(totals.get("saldo_kcal") or 0), "#dc2626" if float(totals.get("saldo_kcal") or 0) > 0 else "#16a34a"),
+      ("Saldo", float(totals.get("saldo_kcal") or 0), "#16a34a" if float(totals.get("saldo_kcal") or 0) > 0 else "#dc2626"),
     ]
     gap = 5 * mm
     card_w = (right - left - gap * 3) / 4
@@ -953,19 +958,19 @@ def _pdf_energy_balance_page(pdf, dataset):
       h = (abs(value) / max_abs) * ((chart_top_y - chart_bottom) / 2 - 4)
       if value > 0:
         y = mid_y
-        pdf.setFillColor(colors.HexColor("#dc2626"))
+            pdf.setFillColor(colors.HexColor("#16a34a"))
         pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
       else:
         y = mid_y - h
-        pdf.setFillColor(colors.HexColor("#16a34a"))
+            pdf.setFillColor(colors.HexColor("#dc2626"))
         pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
       if count <= 20 or idx % max(1, count // 16) == 0 or idx == count - 1:
         pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 6)
         pdf.drawCentredString(x + bar_w / 2, chart_bottom - 14, str(item.get("label") or ""))
     legend_y = 21 * mm
-    pdf.setFillColor(colors.HexColor("#dc2626")); pdf.rect(left, legend_y, 6, 3, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(left, legend_y, 6, 3, stroke=0, fill=1)
     pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 7); pdf.drawString(left + 8, legend_y, "Déficit calórico positivo")
-    pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(left + 74 * mm, legend_y, 6, 3, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#dc2626")); pdf.rect(left + 74 * mm, legend_y, 6, 3, stroke=0, fill=1)
     pdf.setFillColor(colors.HexColor("#475569")); pdf.drawString(left + 74 * mm + 8, legend_y, "Superávit negativo")
     _pdf_footer(pdf, 2)
 
