@@ -51,7 +51,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V58 · Histórico inicial de 7 dias + gasto ativo diário"
+APP_VERSION = "V59 · Gordura corporal + gasto previsto + relatório limpo"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -88,6 +88,10 @@ def _basal_from_profile_row(profile_row):
     sexo = str(profile_row.get("sexo") or "").strip().upper()
     peso = float(profile_row.get("peso_kg") or 0)
     altura = float(profile_row.get("altura_cm") or 0)
+    gordura = float(profile_row.get("gordura_corporal_pct") or 0)
+    if 20 <= peso <= 400 and 1 <= gordura <= 75:
+      massa_magra = peso * (1 - gordura / 100.0)
+      return float(round(370 + 21.6 * massa_magra, 2))
     if not (10 <= idade <= 120 and sexo in ("M", "F") and 20 <= peso <= 400 and 100 <= altura <= 250):
       return None
     return float(round(10 * peso + 6.25 * altura - 5 * idade + (5 if sexo == "M" else -161), 2))
@@ -97,7 +101,7 @@ def _basal_from_profile_row(profile_row):
 def _daily_energy_snapshot(c, user_id, day_iso):
   rows = c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=? ORDER BY id", (user_id, day_iso)).fetchall()
   consumed_kcal = float(calc(rows, user_id).get("energia_kcal", 0) or 0)
-  profile_row = c.execute("SELECT idade,sexo,peso_kg,altura_cm FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
+  profile_row = c.execute("SELECT idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
   goals_row = c.execute("SELECT calorias_kcal FROM metas_usuario WHERE usuario_id=?", (user_id,)).fetchone()
   active_row = c.execute("SELECT calorias_kcal,basal_kcal,consumido_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data=?", (user_id, day_iso)).fetchone()
   basal_kcal = _basal_from_profile_row(profile_row)
@@ -193,7 +197,7 @@ def public_error_message(message):
     LOG.warning("internal_error_redacted detail=%s", text)
     return "Não foi possível concluir a solicitação. Tente novamente."
 
-def calculate_profile_goals(idade, sexo, peso_kg, altura_cm, atividade, objetivo, ritmo_kg_semana):
+def calculate_profile_goals(idade, sexo, peso_kg, altura_cm, atividade, objetivo, ritmo_kg_semana, gordura_corporal_pct=None):
     if not all([idade, sexo, peso_kg, altura_cm, atividade, objetivo]):
         return None
     multipliers = {"sedentario":1.20, "leve":1.375, "moderado":1.55, "alto":1.725, "atleta":1.90}
@@ -202,7 +206,12 @@ def calculate_profile_goals(idade, sexo, peso_kg, altura_cm, atividade, objetivo
     rate = float(ritmo_kg_semana or 0)
     if objetivo in ("perder", "ganhar") and rate <= 0:
         return None
-    bmr = 10 * float(peso_kg) + 6.25 * float(altura_cm) - 5 * int(idade) + (5 if sexo == "M" else -161)
+    gordura = float(gordura_corporal_pct or 0)
+    if 1 <= gordura <= 75:
+        massa_magra = float(peso_kg) * (1 - gordura / 100.0)
+        bmr = 370 + 21.6 * massa_magra
+    else:
+        bmr = 10 * float(peso_kg) + 6.25 * float(altura_cm) - 5 * int(idade) + (5 if sexo == "M" else -161)
     kcal = bmr * multipliers[atividade]
     if objetivo == "perder":
         kcal -= rate * 7700 / 7
@@ -354,10 +363,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS perfis(
             usuario_id BIGINT PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
             nome TEXT NOT NULL DEFAULT '', idade INTEGER, sexo TEXT, peso_kg REAL,
-            altura_cm REAL, atividade TEXT, objetivo TEXT, peso_meta_kg REAL,
+            altura_cm REAL, gordura_corporal_pct REAL, atividade TEXT, objetivo TEXT, peso_meta_kg REAL,
             ritmo_kg_semana REAL
         )
     """)
+    c.execute("ALTER TABLE perfis ADD COLUMN IF NOT EXISTS gordura_corporal_pct REAL")
     c.execute("""
         CREATE TABLE IF NOT EXISTS metas_usuario(
             usuario_id BIGINT PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
@@ -469,6 +479,7 @@ def init_db():
         ("sexo", "TEXT"),
         ("peso_kg", "REAL"),
         ("altura_cm", "REAL"),
+        ("gordura_corporal_pct", "REAL"),
         ("atividade", "TEXT"),
         ("objetivo", "TEXT"),
         ("peso_meta_kg", "REAL"),
@@ -547,10 +558,10 @@ def _ensure_user_records(c, user_id, migrate_legacy=False):
         c.execute('UPDATE consumo SET usuario_id=? WHERE usuario_id IS NULL', (user_id,))
         c.execute('UPDATE hidratacao SET usuario_id=? WHERE usuario_id IS NULL', (user_id,))
     p = legacy_profile or {}
-    c.execute('''INSERT INTO perfis(usuario_id,nome,idade,sexo,peso_kg,altura_cm,atividade,objetivo,peso_meta_kg,ritmo_kg_semana)
-                 VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(usuario_id) DO NOTHING''',
+    c.execute('''INSERT INTO perfis(usuario_id,nome,idade,sexo,peso_kg,altura_cm,gordura_corporal_pct,atividade,objetivo,peso_meta_kg,ritmo_kg_semana)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(usuario_id) DO NOTHING''',
               (user_id, p.get('nome',''), p.get('idade'), p.get('sexo'), p.get('peso_kg'),
-               p.get('altura_cm'), p.get('atividade'), p.get('objetivo'), p.get('peso_meta_kg'),
+               p.get('altura_cm'), p.get('gordura_corporal_pct'), p.get('atividade'), p.get('objetivo'), p.get('peso_meta_kg'),
                p.get('ritmo_kg_semana')))
     g = legacy_goals or {}
     c.execute('''INSERT INTO metas_usuario(usuario_id,calorias_kcal,proteina_g,carboidratos_g,gorduras_g,fibras_g,sodio_mg,agua_ml,manual_override)
@@ -633,7 +644,7 @@ def report_period_data(user_id, start, end):
         water_rows = c.execute("SELECT data,COALESCE(SUM(quantidade_ml),0) AS water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? GROUP BY data", (user_id, start, end)).fetchall()
         active_rows = c.execute("SELECT data,calorias_kcal,basal_kcal,consumido_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?", (user_id, start, end)).fetchall()
         goals_row = c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?", (user_id,)).fetchone()
-        profile = c.execute("SELECT nome,idade,sexo,peso_kg,altura_cm FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
+        profile = c.execute("SELECT nome,idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
     finally:
         c.close()
     by_day = {}
@@ -1996,6 +2007,10 @@ main{
       <label style="font-size:12px;font-weight:bold">Altura (cm)
         <input id="profileHeight" type="number" min="100" max="250" step="0.1" placeholder="Ex.: 170" style="width:100%;padding:11px;margin-top:5px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:white">
       </label>
+      <label style="font-size:12px;font-weight:bold">Gordura corporal (%) — opcional
+        <input id="profileBodyFat" type="number" min="1" max="75" step="0.1" placeholder="Ex.: 24,5" style="width:100%;padding:11px;margin-top:5px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:white">
+        <small style="display:block;color:#9fb0c2;margin-top:4px">Se informado, o basal considera a massa magra. Caso contrário, usa idade, sexo, peso e altura.</small>
+      </label>
       <label style="font-size:12px;font-weight:bold">Peso-meta (kg)
         <input id="profileTargetWeight" type="number" min="20" max="400" step="0.1" placeholder="Ex.: 80,0" style="width:100%;padding:11px;margin-top:5px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:white">
       </label>
@@ -2198,6 +2213,7 @@ async function loadProfile(){
     document.getElementById('profileAge').value=j.idade||'';
     document.getElementById('profileWeight').value=j.peso_kg||'';
     document.getElementById('profileHeight').value=j.altura_cm||'';
+    document.getElementById('profileBodyFat').value=j.gordura_corporal_pct??'';
     document.getElementById('profileTargetWeight').value=j.peso_meta_kg||'';
     document.getElementById('profileRate').value=j.ritmo_kg_semana||'';
     document.getElementById('profileSex').value=j.sexo||'';
@@ -2226,6 +2242,8 @@ function calculateProfileGoals(){
   const age=Number(document.getElementById('profileAge').value);
   const weight=Number(document.getElementById('profileWeight').value);
   const height=Number(document.getElementById('profileHeight').value);
+  const bodyFatRaw=String(document.getElementById('profileBodyFat').value||'').trim();
+  const bodyFat=bodyFatRaw===''?null:Number(bodyFatRaw.replace(',','.'));
   const target=Number(document.getElementById('profileTargetWeight').value)||weight;
   const sex=document.getElementById('profileSex').value;
   const act=document.getElementById('profileActivity').value;
@@ -2235,12 +2253,17 @@ function calculateProfileGoals(){
   if(!age||!weight||!height||!sex||!act||!goal){
     alert('Preencha idade, peso, altura, sexo, atividade e objetivo.');return null;
   }
+  if(bodyFat!==null&&(!Number.isFinite(bodyFat)||bodyFat<1||bodyFat>75)){
+    alert('O percentual de gordura corporal deve ficar entre 1% e 75%, ou permanecer em branco.');return null;
+  }
   if(goal==='perder' && rate<=0){alert('Informe o ritmo de perda em kg/semana.');return null}
   if(goal==='ganhar' && rate<=0){alert('Informe o ritmo de ganho em kg/semana.');return null}
   if(goal==='manter')rate=0;
 
   const mult={sedentario:1.20,leve:1.375,moderado:1.55,alto:1.725,atleta:1.90}[act];
-  const bmr=10*weight+6.25*height-5*age+(sex==='M'?5:-161);
+  const leanMass=bodyFat===null?null:weight*(1-bodyFat/100);
+  const bmr=leanMass===null?10*weight+6.25*height-5*age+(sex==='M'?5:-161):370+21.6*leanMass;
+  const basalMethod=leanMass===null?'Mifflin-St Jeor':'Katch-McArdle pela massa magra';
   const tdee=bmr*mult;
 
   // 7.700 kcal/kg é uma aproximação de planejamento energético.
@@ -2282,6 +2305,7 @@ function calculateProfileGoals(){
   const estimate=document.getElementById('profileEstimate');
   estimate.style.display='block';
   estimate.innerHTML=`<b>🎯 Meta personalizada</b><br>
+    Basal estimado: <b>${fmt(bmr)} kcal</b> (${basalMethod})${leanMass===null?'':` · Massa magra: <b>${fmt(leanMass)} kg</b>`}<br>
     Gasto diário estimado: <b>${fmt(tdee)} kcal</b><br>
     Meta calórica: <b>${fmt(kcal)} kcal</b> · Ritmo: <b>${fmt(rate)} kg/semana</b><br>
     Proteína: <b>${fmt(protein)} g</b> · Carboidratos: <b>${fmt(carbs)} g</b> ·
@@ -2308,6 +2332,7 @@ async function saveProfile(){
     idade:document.getElementById('profileAge').value,
     peso_kg:document.getElementById('profileWeight').value,
     altura_cm:document.getElementById('profileHeight').value,
+    gordura_corporal_pct:document.getElementById('profileBodyFat').value,
     peso_meta_kg:document.getElementById('profileTargetWeight').value,
     ritmo_kg_semana:document.getElementById('profileRate').value,
     sexo:document.getElementById('profileSex').value,
@@ -2347,6 +2372,7 @@ function fmt(x){return Number(x||0).toLocaleString("pt-BR",{minimumFractionDigit
 function escAttr(s){return String(s).replace(/&/g,'&amp;').replace(/\"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 let csrfToken="";
+let currentUserId="";
 async function api(u,o={}){const method=(o.method||"GET").toUpperCase();const headers={...(o.headers||{})};if(["POST","PUT","DELETE"].includes(method)&&csrfToken)headers["X-CSRF-Token"]=csrfToken;let r=await fetch(u,{...o,headers}),j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}
 function setAuthStatus(msg){const el=document.getElementById("authStatus");if(el)el.textContent=msg||""}
 let activeHistoryPromptShown=false;
@@ -2383,6 +2409,7 @@ async function ensureYesterdayActivePrompt(){
     if(!Number.isFinite(active)||active<0||active>6000){alert("Valor inválido. Use um gasto ativo entre 0 e 6.000 kcal.");return}
     const saved=await api("/api/active_yesterday",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:y.data||yesterdayIso(),active_kcal:active})});
     const snap=saved?.yesterday||{};
+    localStorage.removeItem(activePreviewStorageKey(snap.data||y.data||yesterdayIso()));
     alert("Registrado: basal "+fmt(snap.basal_kcal||0)+" + ativo "+fmt(snap.active_kcal||0)+" - consumo "+fmt(snap.consumed_kcal||0)+" = saldo "+fmt(snap.saldo_kcal||0)+" kcal.");
     await refresh();
   }catch(error){
@@ -2439,6 +2466,7 @@ async function saveActiveHistory(event){
   status.textContent="";
   try{
     await api("/api/active_week_setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({items})});
+    items.forEach(item=>localStorage.removeItem(activePreviewStorageKey(item.data)));
     closeActiveHistory();
     await refresh();
     alert("Histórico dos sete dias salvo. A partir de amanhã, será solicitado somente o gasto ativo do dia anterior.");
@@ -2449,7 +2477,7 @@ async function saveActiveHistory(event){
     button.textContent="Salvar os 7 dias";
   }
 }
-function showApp(user,csrf=""){csrfToken=csrf||"";document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>ensureWeeklyActiveHistory()).catch(e=>console.error("carregamento inicial:",e))}
+function showApp(user,csrf=""){csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>ensureWeeklyActiveHistory()).catch(e=>console.error("carregamento inicial:",e))}
 async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function logout(){try{await api("/api/auth/logout",{method:"POST"})}finally{location.reload()}}
@@ -2955,15 +2983,35 @@ function drawWater(w,goal,entries=[]){
   document.getElementById("waterBox").innerHTML=`<div style="display:flex;justify-content:space-between"><b>💧 ${fmt(w/1000)} L</b><span>${fmt(goal/1000)} L meta</span></div><div class="waterVisual">${waterSilhouette(profileSex,p)}</div><div style="font-size:12px;color:#cbd5e1;text-align:center">${fmt(p)}% · ${fmt(Math.max(0,goal-w)/1000)} L restantes</div><div class="waterRecordsHeader"><b>Registros de hoje (${entries.length})</b><button id="waterRecordsToggle" class="waterRecordsToggle" onclick="toggleWaterRecords()" aria-expanded="false">VER REGISTROS ▼</button></div><div id="waterRecords" style="display:none">${recordRows}</div>`;
   setTimeout(()=>celebrateWaterGoal(p),40);
 }
+function activePreviewStorageKey(date){return `gasto-ativo-previsto:${currentUserId||"usuario"}:${date}`;}
+function readActivePreview(date){
+  const value=Number(localStorage.getItem(activePreviewStorageKey(date))||0);
+  return Number.isFinite(value)&&value>=0&&value<=6000?value:0;
+}
+function applyActivePreview(date){
+  const input=document.getElementById("activePreviewInput");
+  if(!input)return;
+  const raw=String(input.value||"").trim();
+  const value=Number(raw.replace(",","."));
+  if(raw===""||!Number.isFinite(value)||value<0||value>6000){alert("Informe um gasto ativo previsto entre 0 e 6.000 kcal.");input.focus();return;}
+  localStorage.setItem(activePreviewStorageKey(date),String(value));
+  if(window.lastDaySnapshot?.energy)drawEnergyBalance(window.lastDaySnapshot.energy);
+}
 function drawEnergyBalance(energy){
   const box=document.getElementById("energyBalanceBox");if(!box)return;
-  const basal=Number(energy?.basal_kcal||0),active=Number(energy?.active_kcal||0),consumed=Number(energy?.consumed_kcal||0),saldo=Number(energy?.saldo_kcal||0);
+  const date=String(energy?.data||day.value||isoDate(new Date()));
+  const basal=Number(energy?.basal_kcal||0),actualActive=Number(energy?.active_kcal||0),consumed=Number(energy?.consumed_kcal||0);
+  const isToday=date===isoDate(new Date()),canPreview=isToday&&!energy?.has_active_input;
+  const previewActive=canPreview?readActivePreview(date):actualActive;
+  const active=canPreview?previewActive:actualActive;
+  const saldo=basal+active-consumed;
   const deficit=saldo>0,surplus=saldo<0,equilibrium=!deficit&&!surplus;
   const magnitude=Math.min(100,Math.max(4,Math.round(Math.abs(saldo)/Math.max(1,basal+active)*100)));
   const label=deficit?"Déficit calórico":surplus?"Superávit calórico":"Equilíbrio energético";
   const color=deficit?"#22c55e":surplus?"#ef4444":"#94a3b8";
   const side=deficit?"right":"left";
-  box.innerHTML=`<div class="metric" style="margin-top:10px;padding:12px;background:rgba(255,255,255,.07);border:1px solid #ffffff12;border-radius:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><small style="font-size:14px;color:#f8fafc!important;font-weight:bold">⚖️ Saldo energético</small><strong style="font-size:15px;color:${color}">${label}</strong></div><b style="display:block;font-size:22px;color:${color};margin:7px 0 3px">${fmt(saldo)} kcal</b><small style="display:block;color:#cbd5e1!important;font-size:12px;line-height:1.45">Basal ${fmt(basal)} + ativo ${fmt(active)} - consumido ${fmt(consumed)}</small><div style="position:relative;height:22px;margin:14px 2px 6px;background:#1e293b;border:1px solid #475569;border-radius:11px;overflow:hidden"><div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f8fafc;z-index:2"></div>${equilibrium?"":`<div style="position:absolute;top:4px;bottom:4px;${side}:50%;width:${magnitude/2}%;background:${color};border-radius:8px"></div>`}</div><div style="display:flex;justify-content:space-between;gap:4px;font-size:11px;color:#cbd5e1"><span style="color:#ef4444;font-weight:bold">Superávit (-)</span><span>0 kcal</span><span style="color:#22c55e;font-weight:bold">Déficit (+)</span></div></div>`;
+  const previewField=canPreview?`<div style="margin:9px 0 8px;padding:9px;border-radius:10px;background:#0f172a;border:1px solid #334155"><label for="activePreviewInput" style="display:block;font-size:12px;color:#e2e8f0;font-weight:bold;margin-bottom:6px">Gasto ativo previsto para hoje</label><div style="display:flex;gap:7px;align-items:center"><input id="activePreviewInput" type="number" min="0" max="6000" step="1" value="${previewActive}" onkeydown="if(event.key==='Enter'){event.preventDefault();applyActivePreview('${date}')}" style="min-width:0;flex:1;padding:9px;border:1px solid #475569;border-radius:8px;background:#111827;color:#fff"><span style="font-size:12px;color:#cbd5e1">kcal</span><button type="button" onclick="applyActivePreview('${date}')" style="padding:9px 11px;border:0;border-radius:8px;background:#22c55e;color:#06210f;font-weight:bold">APLICAR</button></div><small style="display:block;color:#94a3b8!important;margin-top:6px">Estimativa temporária usada somente nesta balança. O valor real continuará sendo informado amanhã.</small></div>`:`<small style="display:block;color:#94a3b8!important;margin:7px 0">Gasto ativo registrado: ${fmt(actualActive)} kcal</small>`;
+  box.innerHTML=`<div class="metric" style="margin-top:10px;padding:12px;background:rgba(255,255,255,.07);border:1px solid #ffffff12;border-radius:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><small style="font-size:14px;color:#f8fafc!important;font-weight:bold">⚖️ Saldo energético</small><strong style="font-size:15px;color:${color}">${label}</strong></div>${previewField}<b style="display:block;font-size:22px;color:${color};margin:7px 0 3px">${fmt(saldo)} kcal</b><small style="display:block;color:#cbd5e1!important;font-size:12px;line-height:1.45">Basal ${fmt(basal)} + ${canPreview?'ativo previsto':'ativo'} ${fmt(active)} - consumido ${fmt(consumed)}</small><div style="position:relative;height:22px;margin:14px 2px 6px;background:#1e293b;border:1px solid #475569;border-radius:11px;overflow:hidden"><div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f8fafc;z-index:2"></div>${equilibrium?"":`<div style="position:absolute;top:4px;bottom:4px;${side}:50%;width:${magnitude/2}%;background:${color};border-radius:8px"></div>`}</div><div style="display:flex;justify-content:space-between;gap:4px;font-size:11px;color:#cbd5e1"><span style="color:#ef4444;font-weight:bold">Superávit (-)</span><span>0 kcal</span><span style="color:#22c55e;font-weight:bold">Déficit (+)</span></div></div>`;
 }
 function toggleWaterRecords(){const box=document.getElementById("waterRecords"),btn=document.getElementById("waterRecordsToggle");if(!box||!btn)return;const open=box.style.display!=="none";box.style.display=open?"none":"block";btn.textContent=open?"VER REGISTROS ▼":"OCULTAR REGISTROS ▲";btn.setAttribute("aria-expanded",String(!open));}
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
@@ -3039,10 +3087,7 @@ async function loadHistory(start,end){
     const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     const energyTitle="<h3 style='margin:14px 0 8px'>⚖️ Saldo energético (basal + ativo - consumo)</h3>";
     const energyChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${deficit?"#86efac":"#fecdd3"}'>${fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
-    const totals=j.energy_totals||{};
-    const estimatedFatLoss=Math.max(0,Number(totals.saldo_kcal||0))/7000;
-    const summary=`<div style='margin-top:8px;padding:10px;border-radius:10px;background:#eef2ff;color:#1e293b;font-size:12px'><b>Período:</b> basal ${fmt(totals.basal_kcal||0)} + ativo ${fmt(totals.active_kcal||0)} - consumo ${fmt(totals.consumed_kcal||0)} = <b>${fmt(totals.saldo_kcal||0)} kcal</b> · déficit: ${Number(totals.deficit_days||0)} dia(s), superávit: ${Number(totals.superavit_days||0)} dia(s).<br><b>Evolução estimada:</b> ${fmt(estimatedFatLoss)} kg de gordura (7.000 kcal = 1 kg).</div>`;
-    box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+energyTitle+energyChart+summary;
+    box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+energyTitle+energyChart;
   }catch(e){box.innerHTML=""}
 }
 function energyDeficitCard(totals={}){
@@ -3408,7 +3453,7 @@ class H(BaseHTTPRequestHandler):
             rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
             waters=c.execute("SELECT data,COALESCE(SUM(quantidade_ml),0) AS water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? GROUP BY data ORDER BY data",(self.user["id"],start,end)).fetchall()
             active_rows=c.execute("SELECT data,calorias_kcal,basal_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchall()
-            profile=c.execute("SELECT idade,sexo,peso_kg,altura_cm FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
+            profile=c.execute("SELECT idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
             goals_row=c.execute("SELECT calorias_kcal FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
           finally:
             c.close()
@@ -3455,7 +3500,7 @@ class H(BaseHTTPRequestHandler):
                 water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchone()["total_water"]
                 g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
                 active_rows=c.execute("SELECT data,calorias_kcal,basal_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchall()
-                profile=c.execute("SELECT idade,sexo,peso_kg,altura_cm FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
+                profile=c.execute("SELECT idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
             days=(d2-d1).days+1
             by_day={}
@@ -3681,6 +3726,7 @@ class H(BaseHTTPRequestHandler):
                 sexo=str(x.get("sexo","")).strip() or None
                 peso=float(x["peso_kg"]) if str(x.get("peso_kg","")).strip() else None
                 altura=float(x["altura_cm"]) if str(x.get("altura_cm","")).strip() else None
+                gordura=float(x["gordura_corporal_pct"]) if str(x.get("gordura_corporal_pct","")).strip() else None
                 atividade=str(x.get("atividade","")).strip() or None
                 objetivo=str(x.get("objetivo","")).strip() or None
                 peso_meta=float(x["peso_meta_kg"]) if str(x.get("peso_meta_kg","")).strip() else None
@@ -3688,14 +3734,15 @@ class H(BaseHTTPRequestHandler):
                 if idade is not None and not 10<=idade<=120:raise ValueError("Idade fora do intervalo permitido.")
                 if peso is not None and not 20<=peso<=400:raise ValueError("Peso fora do intervalo permitido.")
                 if altura is not None and not 100<=altura<=250:raise ValueError("Altura fora do intervalo permitido.")
+                if gordura is not None and not 1<=gordura<=75:raise ValueError("Gordura corporal fora do intervalo permitido.")
                 if peso_meta is not None and not 20<=peso_meta<=400:raise ValueError("Peso-meta fora do intervalo permitido.")
                 if ritmo is not None and not 0<=ritmo<=1:raise ValueError("Ritmo fora do intervalo permitido.")
                 c=ddb()
-                c.execute("""INSERT INTO perfis(usuario_id,nome,idade,sexo,peso_kg,altura_cm,atividade,objetivo,peso_meta_kg,ritmo_kg_semana)
-                             VALUES(?,?,?,?,?,?,?,?,?,?)
-                             ON CONFLICT(usuario_id) DO UPDATE SET nome=EXCLUDED.nome,idade=EXCLUDED.idade,sexo=EXCLUDED.sexo,peso_kg=EXCLUDED.peso_kg,altura_cm=EXCLUDED.altura_cm,atividade=EXCLUDED.atividade,objetivo=EXCLUDED.objetivo,peso_meta_kg=EXCLUDED.peso_meta_kg,ritmo_kg_semana=EXCLUDED.ritmo_kg_semana""",
-                          (self.user["id"],name,idade,sexo,peso,altura,atividade,objetivo,peso_meta,ritmo))
-                goals = calculate_profile_goals(idade, sexo, peso, altura, atividade, objetivo, ritmo)
+                c.execute("""INSERT INTO perfis(usuario_id,nome,idade,sexo,peso_kg,altura_cm,gordura_corporal_pct,atividade,objetivo,peso_meta_kg,ritmo_kg_semana)
+                             VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                             ON CONFLICT(usuario_id) DO UPDATE SET nome=EXCLUDED.nome,idade=EXCLUDED.idade,sexo=EXCLUDED.sexo,peso_kg=EXCLUDED.peso_kg,altura_cm=EXCLUDED.altura_cm,gordura_corporal_pct=EXCLUDED.gordura_corporal_pct,atividade=EXCLUDED.atividade,objetivo=EXCLUDED.objetivo,peso_meta_kg=EXCLUDED.peso_meta_kg,ritmo_kg_semana=EXCLUDED.ritmo_kg_semana""",
+                          (self.user["id"],name,idade,sexo,peso,altura,gordura,atividade,objetivo,peso_meta,ritmo))
+                goals = calculate_profile_goals(idade, sexo, peso, altura, atividade, objetivo, ritmo, gordura)
                 existing = c.execute("SELECT manual_override FROM metas_usuario WHERE usuario_id=?", (self.user["id"],)).fetchone()
                 goals_updated = False
                 if goals and not bool(existing and existing["manual_override"]):
