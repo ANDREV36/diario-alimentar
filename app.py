@@ -909,73 +909,641 @@ def _pdf_one_page_report(pdf, dataset):
     pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 4.3); pdf.drawString(12 * mm, 4.3 * mm, "Linhas: realizado na cor do nutriente · meta tracejada verde · dados detalhados na tabela diária")
 
 def _pdf_energy_balance_page(pdf, dataset):
+    """
+    Página de resumo energético.
+
+    Convenção utilizada:
+        saldo_kcal > 0  -> déficit calórico
+        saldo_kcal < 0  -> superávit calórico
+
+    Mantém os dados existentes do dataset e apenas melhora
+    a apresentação no PDF.
+    """
+
     energy = dataset.get("energy") or {}
     days = energy.get("days") or []
     totals = energy.get("totals") or {}
-    width, height = _pdf_header(pdf, "RESUMO ENERGÉTICO", "Basal + ativo - consumido · comparativo diário de superávit e déficit", A3)
-    left, right = 16 * mm, width - 16 * mm
-    card_top = height - 48 * mm
-    card_h = 32 * mm
-    cards = [
-      ("Basal", float(totals.get("basal_kcal") or 0), "#0f766e"),
-      ("Ativo", float(totals.get("active_kcal") or 0), "#2563eb"),
-      ("Consumido", float(totals.get("consumed_kcal") or 0), "#be123c"),
-      ("Saldo", float(totals.get("saldo_kcal") or 0), "#16a34a" if float(totals.get("saldo_kcal") or 0) > 0 else "#dc2626"),
-    ]
+
+    # ============================================================
+    # CABEÇALHO
+    # ============================================================
+
+    width, height = _pdf_header(
+        pdf,
+        "RESUMO ENERGÉTICO",
+        "Gasto basal + atividade × consumo · evolução diária do saldo energético",
+        A3
+    )
+
+    left = 18 * mm
+    right = width - 18 * mm
+
+    # ============================================================
+    # VALORES
+    # ============================================================
+
+    basal = float(totals.get("basal_kcal") or 0)
+    active = float(totals.get("active_kcal") or 0)
+    consumed = float(totals.get("consumed_kcal") or 0)
+    saldo = float(totals.get("saldo_kcal") or 0)
+
+    total_expenditure = basal + active
+
+    superavit_days = int(totals.get("superavit_days") or 0)
+    deficit_days = int(totals.get("deficit_days") or 0)
+
+    estimated_fat_loss = float(
+        totals.get("estimated_fat_loss_kg") or 0
+    )
+
+    # ============================================================
+    # CARDS
+    # ============================================================
+
+    card_top = height - 46 * mm
+    card_h = 38 * mm
+
     gap = 5 * mm
-    card_w = (right - left - gap * 3) / 4
-    for idx, (label, value, color) in enumerate(cards):
-      x = left + idx * (card_w + gap)
-      pdf.setFillColor(colors.HexColor("#f8fafc")); pdf.roundRect(x, card_top - card_h, card_w, card_h, 3, stroke=0, fill=1)
-      pdf.setStrokeColor(colors.HexColor("#dbeafe")); pdf.roundRect(x, card_top - card_h, card_w, card_h, 3, stroke=1, fill=0)
-      pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica-Bold", 11); pdf.drawString(x + 7, card_top - 11, label)
-      pdf.setFillColor(colors.HexColor(color)); pdf.setFont("Helvetica-Bold", 18); pdf.drawString(x + 7, card_top - 22, f"{value:,.0f}".replace(",", "."))
-      pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 9); pdf.drawString(x + 7, card_top - 28, "kcal no período")
-    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 9)
-    pdf.drawString(left, card_top - card_h - 9, f"Dias com superávit: {int(totals.get('superavit_days') or 0)} · dias com déficit: {int(totals.get('deficit_days') or 0)}")
-    pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica-Bold", 9)
-    pdf.drawString(left, card_top - card_h - 16, f"Evolução estimada: {float(totals.get('estimated_fat_loss_kg') or 0):.3f} kg de gordura · referência: 7.000 kcal = 1 kg")
+    card_w = (right - left - gap * 4) / 5
 
-    chart_left, chart_right = left + 2, right - 2
-    chart_bottom, chart_top_y = 42 * mm, card_top - card_h - 14
-    mid_y = chart_bottom + (chart_top_y - chart_bottom) / 2
-    pdf.setStrokeColor(colors.HexColor("#cbd5e1")); pdf.setLineWidth(.5)
+    cards = [
+        (
+            "BASAL",
+            basal,
+            "#0f766e",
+            "Gasto metabólico"
+        ),
+        (
+            "ATIVO",
+            active,
+            "#2563eb",
+            "Atividade física"
+        ),
+        (
+            "GASTO TOTAL",
+            total_expenditure,
+            "#7c3aed",
+            "Basal + ativo"
+        ),
+        (
+            "CONSUMIDO",
+            consumed,
+            "#be123c",
+            "Calorias ingeridas"
+        ),
+        (
+            "SALDO",
+            saldo,
+            "#16a34a" if saldo >= 0 else "#dc2626",
+            "Déficit (+) / superávit (-)"
+        ),
+    ]
+
+    for idx, (label, value, color, subtitle) in enumerate(cards):
+
+        x = left + idx * (card_w + gap)
+        y = card_top - card_h
+
+        # Fundo
+        pdf.setFillColor(colors.HexColor("#f8fafc"))
+        pdf.roundRect(
+            x,
+            y,
+            card_w,
+            card_h,
+            4 * mm,
+            stroke=0,
+            fill=1
+        )
+
+        # Borda
+        pdf.setStrokeColor(colors.HexColor("#d7dee8"))
+        pdf.setLineWidth(0.8)
+        pdf.roundRect(
+            x,
+            y,
+            card_w,
+            card_h,
+            4 * mm,
+            stroke=1,
+            fill=0
+        )
+
+        # Barra lateral colorida
+        pdf.setFillColor(colors.HexColor(color))
+        pdf.roundRect(
+            x,
+            y,
+            2.5 * mm,
+            card_h,
+            1.2 * mm,
+            stroke=0,
+            fill=1
+        )
+
+        # Título
+        pdf.setFillColor(colors.HexColor("#334155"))
+        pdf.setFont("Helvetica-Bold", 10)
+
+        pdf.drawString(
+            x + 7 * mm,
+            card_top - 10 * mm,
+            label
+        )
+
+        # Valor
+        pdf.setFillColor(colors.HexColor(color))
+        pdf.setFont("Helvetica-Bold", 21)
+
+        value_text = f"{value:,.0f}".replace(",", ".")
+
+        pdf.drawString(
+            x + 7 * mm,
+            card_top - 23 * mm,
+            value_text
+        )
+
+        # Unidade
+        pdf.setFillColor(colors.HexColor("#64748b"))
+        pdf.setFont("Helvetica-Bold", 8.5)
+
+        pdf.drawString(
+            x + 7 * mm,
+            card_top - 28 * mm,
+            "kcal"
+        )
+
+        # Subtítulo
+        pdf.setFont("Helvetica", 7.5)
+
+        pdf.drawString(
+            x + 7 * mm,
+            card_top - 33 * mm,
+            subtitle
+        )
+
+    # ============================================================
+    # RESUMO DO PERÍODO
+    # ============================================================
+
+    summary_top = card_top - card_h - 9 * mm
+    summary_h = 18 * mm
+
+    pdf.setFillColor(colors.HexColor("#f1f5f9"))
+    pdf.roundRect(
+        left,
+        summary_top - summary_h,
+        right - left,
+        summary_h,
+        3 * mm,
+        stroke=0,
+        fill=1
+    )
+
+    pdf.setStrokeColor(colors.HexColor("#e2e8f0"))
+    pdf.setLineWidth(0.6)
+    pdf.roundRect(
+        left,
+        summary_top - summary_h,
+        right - left,
+        summary_h,
+        3 * mm,
+        stroke=1,
+        fill=0
+    )
+
+    # Divisão em 3 informações
+    section_w = (right - left) / 3
+
+    # 1 - dias
+    x1 = left + 7 * mm
+
+    pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.setFont("Helvetica-Bold", 9)
+
+    pdf.drawString(
+        x1,
+        summary_top - 7 * mm,
+        "DIAS DO PERÍODO"
+    )
+
+    pdf.setFillColor(colors.HexColor("#475569"))
+    pdf.setFont("Helvetica", 9)
+
+    pdf.drawString(
+        x1,
+        summary_top - 13 * mm,
+        f"{len(days)} dias analisados"
+    )
+
+    # 2 - déficit/superávit
+    x2 = left + section_w + 7 * mm
+
+    pdf.setFillColor(colors.HexColor("#16a34a"))
+    pdf.setFont("Helvetica-Bold", 9)
+
+    pdf.drawString(
+        x2,
+        summary_top - 7 * mm,
+        "DÉFICIT"
+    )
+
+    pdf.setFillColor(colors.HexColor("#475569"))
+    pdf.setFont("Helvetica", 9)
+
+    pdf.drawString(
+        x2,
+        summary_top - 13 * mm,
+        f"{deficit_days} dia(s)"
+    )
+
+    pdf.setFillColor(colors.HexColor("#dc2626"))
+    pdf.setFont("Helvetica-Bold", 9)
+
+    pdf.drawString(
+        x2 + 42 * mm,
+        summary_top - 7 * mm,
+        "SUPERÁVIT"
+    )
+
+    pdf.setFillColor(colors.HexColor("#475569"))
+    pdf.setFont("Helvetica", 9)
+
+    pdf.drawString(
+        x2 + 42 * mm,
+        summary_top - 13 * mm,
+        f"{superavit_days} dia(s)"
+    )
+
+    # 3 - estimativa
+    x3 = right - section_w + 7 * mm
+
+    pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.setFont("Helvetica-Bold", 9)
+
+    pdf.drawString(
+        x3,
+        summary_top - 7 * mm,
+        "ESTIMATIVA TEÓRICA"
+    )
+
+    pdf.setFillColor(colors.HexColor("#475569"))
+    pdf.setFont("Helvetica", 9)
+
+    pdf.drawString(
+        x3,
+        summary_top - 13 * mm,
+        f"{estimated_fat_loss:.3f} kg de gordura"
+    )
+
+    # ============================================================
+    # GRÁFICO
+    # ============================================================
+
+    chart_left = left
+    chart_right = right
+
+    chart_bottom = 43 * mm
+    chart_top = summary_top - summary_h - 12 * mm
+
+    chart_height = chart_top - chart_bottom
+
+    mid_y = chart_bottom + chart_height / 2
+
+    # Fundo do gráfico
+    pdf.setFillColor(colors.HexColor("#ffffff"))
+    pdf.roundRect(
+        chart_left,
+        chart_bottom,
+        chart_right - chart_left,
+        chart_height,
+        3 * mm,
+        stroke=0,
+        fill=1
+    )
+
+    # ============================================================
+    # GRADE HORIZONTAL
+    # ============================================================
+
+    pdf.setLineWidth(0.5)
+
     for step in range(5):
-      y = chart_bottom + (chart_top_y - chart_bottom) * step / 4
-      pdf.line(chart_left, y, chart_right, y)
-    pdf.setStrokeColor(colors.HexColor("#334155")); pdf.setLineWidth(1.1); pdf.line(chart_left, mid_y, chart_right, mid_y)
-    pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica-Bold", 8)
-    pdf.drawString(chart_left, chart_top_y + 4, "Déficit calórico (+)")
-    pdf.drawString(chart_left, chart_bottom - 8, "Superávit (-)")
 
-    balances = [float(item.get("saldo_kcal") or 0) for item in days]
-    max_abs = max([abs(v) for v in balances] + [1.0])
+        y = chart_bottom + chart_height * step / 4
+
+        pdf.setStrokeColor(colors.HexColor("#e2e8f0"))
+        pdf.line(
+            chart_left,
+            y,
+            chart_right,
+            y
+        )
+
+    # Linha zero
+    pdf.setStrokeColor(colors.HexColor("#64748b"))
+    pdf.setLineWidth(1.2)
+
+    pdf.line(
+        chart_left,
+        mid_y,
+        chart_right,
+        mid_y
+    )
+
+    # ============================================================
+    # TÍTULOS DO GRÁFICO
+    # ============================================================
+
+    pdf.setFont("Helvetica-Bold", 9)
+
+    pdf.setFillColor(colors.HexColor("#16a34a"))
+
+    pdf.drawString(
+        chart_left,
+        chart_top + 4 * mm,
+        "DÉFICIT CALÓRICO"
+    )
+
+    pdf.setFillColor(colors.HexColor("#dc2626"))
+
+    pdf.drawRightString(
+        chart_right,
+        chart_top + 4 * mm,
+        "SUPERÁVIT CALÓRICO"
+    )
+
+    # ============================================================
+    # DADOS
+    # ============================================================
+
+    balances = [
+        float(item.get("saldo_kcal") or 0)
+        for item in days
+    ]
+
+    max_abs = max(
+        [abs(v) for v in balances] + [1.0]
+    )
+
     count = max(1, len(days))
-    step_x = (chart_right - chart_left) / count
-    bar_w = max(3, step_x * 0.55)
+
+    step_x = (
+        chart_right - chart_left
+    ) / count
+
+    # largura da barra
+    if count <= 7:
+        bar_w = min(
+            24 * mm,
+            step_x * 0.55
+        )
+    elif count <= 14:
+        bar_w = min(
+            16 * mm,
+            step_x * 0.55
+        )
+    else:
+        bar_w = max(
+            4 * mm,
+            step_x * 0.50
+        )
+
+    # ============================================================
+    # BARRAS
+    # ============================================================
+
     for idx, item in enumerate(days):
-      value = float(item.get("saldo_kcal") or 0)
-      x = chart_left + idx * step_x + (step_x - bar_w) / 2
-      h = (abs(value) / max_abs) * ((chart_top_y - chart_bottom) / 2 - 4)
-      if value > 0:
-        y = mid_y
-        pdf.setFillColor(colors.HexColor("#16a34a"))
-        pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
-      else:
-        y = mid_y - h
-        pdf.setFillColor(colors.HexColor("#dc2626"))
-        pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
-      pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 5.5)
-      pdf.drawCentredString(x + bar_w / 2, chart_bottom - 14, str(item.get("label") or ""))
-      value_label = f"{value:,.0f}".replace(",", ".")
-      value_y = min(chart_top_y - 8, y + h + 4) if value > 0 else max(chart_bottom + 5, y - 8)
-      pdf.setFont("Helvetica-Bold", 5.5)
-      pdf.drawCentredString(x + bar_w / 2, value_y, value_label)
-    legend_y = 21 * mm
-    pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(left, legend_y, 6, 3, stroke=0, fill=1)
-    pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 7); pdf.drawString(left + 8, legend_y, "Déficit calórico positivo")
-    pdf.setFillColor(colors.HexColor("#dc2626")); pdf.rect(left + 74 * mm, legend_y, 6, 3, stroke=0, fill=1)
-    pdf.setFillColor(colors.HexColor("#475569")); pdf.drawString(left + 74 * mm + 8, legend_y, "Superávit negativo")
+
+        value = float(
+            item.get("saldo_kcal") or 0
+        )
+
+        x = (
+            chart_left
+            + idx * step_x
+            + (step_x - bar_w) / 2
+        )
+
+        # Altura máxima disponível
+        max_bar_h = (
+            chart_height / 2
+        ) - 10 * mm
+
+        bar_h = (
+            abs(value)
+            / max_abs
+        ) * max_bar_h
+
+        # Não deixar barra praticamente invisível
+        if abs(value) > 0:
+            bar_h = max(bar_h, 1.5 * mm)
+
+        # --------------------------------------------------------
+        # DÉFICIT
+        # --------------------------------------------------------
+
+        if value > 0:
+
+            y = mid_y
+
+            pdf.setFillColor(
+                colors.HexColor("#16a34a")
+            )
+
+            pdf.roundRect(
+                x,
+                y,
+                bar_w,
+                bar_h,
+                1.2 * mm,
+                stroke=0,
+                fill=1
+            )
+
+            # valor acima da barra
+            value_y = min(
+                chart_top - 8 * mm,
+                y + bar_h + 3 * mm
+            )
+
+        # --------------------------------------------------------
+        # SUPERÁVIT
+        # --------------------------------------------------------
+
+        elif value < 0:
+
+            y = mid_y - bar_h
+
+            pdf.setFillColor(
+                colors.HexColor("#dc2626")
+            )
+
+            pdf.roundRect(
+                x,
+                y,
+                bar_w,
+                bar_h,
+                1.2 * mm,
+                stroke=0,
+                fill=1
+            )
+
+            # valor abaixo da barra
+            value_y = max(
+                chart_bottom + 9 * mm,
+                y - 5 * mm
+            )
+
+        # --------------------------------------------------------
+        # ZERO
+        # --------------------------------------------------------
+
+        else:
+
+            y = mid_y
+
+            pdf.setFillColor(
+                colors.HexColor("#94a3b8")
+            )
+
+            pdf.circle(
+                x + bar_w / 2,
+                mid_y,
+                1.5 * mm,
+                stroke=0,
+                fill=1
+            )
+
+            value_y = mid_y + 3 * mm
+
+        # ========================================================
+        # VALOR DA BARRA
+        # ========================================================
+
+        pdf.setFillColor(colors.HexColor("#334155"))
+        pdf.setFont("Helvetica-Bold", 8)
+
+        value_label = (
+            f"{value:,.0f}".replace(",", ".")
+        )
+
+        pdf.drawCentredString(
+            x + bar_w / 2,
+            value_y,
+            value_label
+        )
+
+        # ========================================================
+        # DATA / DIA
+        # ========================================================
+
+        label = str(
+            item.get("label") or ""
+        )
+
+        pdf.setFillColor(colors.HexColor("#475569"))
+        pdf.setFont("Helvetica-Bold", 8)
+
+        # Para poucos dias, horizontal.
+        # Para muitos dias, reduz um pouco o tamanho.
+        if count <= 10:
+
+            pdf.drawCentredString(
+                x + bar_w / 2,
+                chart_bottom + 3 * mm,
+                label
+            )
+
+        else:
+
+            pdf.setFont("Helvetica-Bold", 6.5)
+
+            pdf.drawCentredString(
+                x + bar_w / 2,
+                chart_bottom + 3 * mm,
+                label
+            )
+
+    # ============================================================
+    # LEGENDA
+    # ============================================================
+
+    legend_y = 22 * mm
+
+    # Déficit
+    pdf.setFillColor(colors.HexColor("#16a34a"))
+
+    pdf.roundRect(
+        left,
+        legend_y,
+        7 * mm,
+        3.5 * mm,
+        1 * mm,
+        stroke=0,
+        fill=1
+    )
+
+    pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.setFont("Helvetica-Bold", 8.5)
+
+    pdf.drawString(
+        left + 10 * mm,
+        legend_y,
+        "Déficit calórico"
+    )
+
+    # Superávit
+    legend_x2 = left + 55 * mm
+
+    pdf.setFillColor(colors.HexColor("#dc2626"))
+
+    pdf.roundRect(
+        legend_x2,
+        legend_y,
+        7 * mm,
+        3.5 * mm,
+        1 * mm,
+        stroke=0,
+        fill=1
+    )
+
+    pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.setFont("Helvetica-Bold", 8.5)
+
+    pdf.drawString(
+        legend_x2 + 10 * mm,
+        legend_y,
+        "Superávit calórico"
+    )
+
+    # Referência
+    pdf.setFillColor(colors.HexColor("#64748b"))
+    pdf.setFont("Helvetica", 8)
+
+    pdf.drawRightString(
+        right,
+        legend_y,
+        "Referência matemática: 7.000 kcal ≈ 1 kg de gordura"
+    )
+
+    # ============================================================
+    # OBSERVAÇÃO
+    # ============================================================
+
+    pdf.setFillColor(colors.HexColor("#64748b"))
+    pdf.setFont("Helvetica", 7.5)
+
+    pdf.drawString(
+        left,
+        15 * mm,
+        "Saldo positivo representa déficit energético; saldo negativo representa superávit energético."
+    )
+
+    # ============================================================
+    # RODAPÉ
+    # ============================================================
+
     _pdf_footer(pdf, 2)
 
 
