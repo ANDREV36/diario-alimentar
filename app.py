@@ -105,7 +105,7 @@ def _daily_energy_snapshot(c, user_id, day_iso):
     basal_kcal = float((goals_row or {}).get("calorias_kcal") or 0)
   active_kcal = float((active_row or {}).get("calorias_kcal") or 0)
   saldo_kcal = float(basal_kcal or 0) + active_kcal - consumed_kcal
-  status = "superavit" if saldo_kcal >= 0 else "deficit"
+  status = "deficit" if saldo_kcal > 0 else "superavit" if saldo_kcal < 0 else "equilibrio"
   return {
     "data": day_iso,
     "basal_kcal": float(round(float(basal_kcal or 0), 2)),
@@ -140,7 +140,7 @@ def _save_daily_active_energy(c, user_id, day_iso, active_kcal):
     "active_kcal": float(round(float(active_kcal), 2)),
     "consumed_kcal": float(round(consumed_kcal, 2)),
     "saldo_kcal": float(round(saldo_kcal, 2)),
-    "status": "superavit" if saldo_kcal >= 0 else "deficit",
+    "status": "deficit" if saldo_kcal > 0 else "superavit" if saldo_kcal < 0 else "equilibrio",
     "has_active_input": True,
   }
 
@@ -651,11 +651,11 @@ def report_period_data(user_id, start, end):
         basal_kcal = float(entry.get("basal_kcal") or basal_fallback or 0)
         active_kcal = float(entry.get("calorias_kcal") or 0)
         saldo_kcal = basal_kcal + active_kcal - consumed_kcal
-        status = "superavit" if saldo_kcal >= 0 else "deficit"
-        if status == "superavit":
-            energy_totals["superavit_days"] += 1
-        else:
+        status = "deficit" if saldo_kcal > 0 else "superavit" if saldo_kcal < 0 else "equilibrio"
+        if status == "deficit":
             energy_totals["deficit_days"] += 1
+        elif status == "superavit":
+          energy_totals["superavit_days"] += 1
         energy_totals["basal_kcal"] += basal_kcal
         energy_totals["active_kcal"] += active_kcal
         energy_totals["consumed_kcal"] += consumed_kcal
@@ -913,7 +913,7 @@ def _pdf_energy_balance_page(pdf, dataset):
       ("Basal", float(totals.get("basal_kcal") or 0), "#0f766e"),
       ("Ativo", float(totals.get("active_kcal") or 0), "#2563eb"),
       ("Consumido", float(totals.get("consumed_kcal") or 0), "#be123c"),
-      ("Saldo", float(totals.get("saldo_kcal") or 0), "#16a34a" if float(totals.get("saldo_kcal") or 0) >= 0 else "#dc2626"),
+      ("Saldo", float(totals.get("saldo_kcal") or 0), "#dc2626" if float(totals.get("saldo_kcal") or 0) > 0 else "#16a34a"),
     ]
     gap = 5 * mm
     card_w = (right - left - gap * 3) / 4
@@ -936,8 +936,8 @@ def _pdf_energy_balance_page(pdf, dataset):
       pdf.line(chart_left, y, chart_right, y)
     pdf.setStrokeColor(colors.HexColor("#334155")); pdf.setLineWidth(1.1); pdf.line(chart_left, mid_y, chart_right, mid_y)
     pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica-Bold", 8)
-    pdf.drawString(chart_left, chart_top_y + 4, "Superávit (+)")
-    pdf.drawString(chart_left, chart_bottom - 8, "Déficit (-)")
+    pdf.drawString(chart_left, chart_top_y + 4, "Déficit calórico (+)")
+    pdf.drawString(chart_left, chart_bottom - 8, "Superávit (-)")
 
     balances = [float(item.get("saldo_kcal") or 0) for item in days]
     max_abs = max([abs(v) for v in balances] + [1.0])
@@ -948,22 +948,22 @@ def _pdf_energy_balance_page(pdf, dataset):
       value = float(item.get("saldo_kcal") or 0)
       x = chart_left + idx * step_x + (step_x - bar_w) / 2
       h = (abs(value) / max_abs) * ((chart_top_y - chart_bottom) / 2 - 4)
-      if value >= 0:
+      if value > 0:
         y = mid_y
-        pdf.setFillColor(colors.HexColor("#16a34a"))
+        pdf.setFillColor(colors.HexColor("#dc2626"))
         pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
       else:
         y = mid_y - h
-        pdf.setFillColor(colors.HexColor("#dc2626"))
+        pdf.setFillColor(colors.HexColor("#16a34a"))
         pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
       if count <= 20 or idx % max(1, count // 16) == 0 or idx == count - 1:
         pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 6)
         pdf.drawCentredString(x + bar_w / 2, chart_bottom - 14, str(item.get("label") or ""))
     legend_y = 21 * mm
-    pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(left, legend_y, 6, 3, stroke=0, fill=1)
-    pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 7); pdf.drawString(left + 8, legend_y, "Saldo diário positivo (superávit)")
-    pdf.setFillColor(colors.HexColor("#dc2626")); pdf.rect(left + 74 * mm, legend_y, 6, 3, stroke=0, fill=1)
-    pdf.setFillColor(colors.HexColor("#475569")); pdf.drawString(left + 74 * mm + 8, legend_y, "Saldo diário negativo (déficit)")
+    pdf.setFillColor(colors.HexColor("#dc2626")); pdf.rect(left, legend_y, 6, 3, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 7); pdf.drawString(left + 8, legend_y, "Déficit calórico positivo")
+    pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(left + 74 * mm, legend_y, 6, 3, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#475569")); pdf.drawString(left + 74 * mm + 8, legend_y, "Superávit negativo")
     _pdf_footer(pdf, 2)
 
 
@@ -2352,9 +2352,9 @@ async function loadHistory(start,end){
     const head="<h3 style='margin:8px 0'>📈 Evolução diária</h3>";
     const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     const energyTitle="<h3 style='margin:14px 0 8px'>⚖️ Saldo energético (basal + ativo - consumo)</h3>";
-    const energyChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const up=v>=0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=up?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${up?"#86efac":"#fecdd3"}'>${fmt(v)}</small><div style='display:flex;align-items:${up?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${up?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
+    const energyChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=deficit?"linear-gradient(#fb7185,#be123c)":"linear-gradient(#22c55e,#15803d)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${deficit?"#fecdd3":"#86efac"}'>${fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     const totals=j.energy_totals||{};
-    const summary=`<div style='margin-top:8px;padding:10px;border-radius:10px;background:#eef2ff;color:#1e293b;font-size:12px'><b>Período:</b> basal ${fmt(totals.basal_kcal||0)} + ativo ${fmt(totals.active_kcal||0)} - consumo ${fmt(totals.consumed_kcal||0)} = <b>${fmt(totals.saldo_kcal||0)} kcal</b> · superávit: ${Number(totals.superavit_days||0)} dia(s), déficit: ${Number(totals.deficit_days||0)} dia(s).</div>`;
+    const summary=`<div style='margin-top:8px;padding:10px;border-radius:10px;background:#eef2ff;color:#1e293b;font-size:12px'><b>Período:</b> basal ${fmt(totals.basal_kcal||0)} + ativo ${fmt(totals.active_kcal||0)} - consumo ${fmt(totals.consumed_kcal||0)} = <b>${fmt(totals.saldo_kcal||0)} kcal</b> · déficit: ${Number(totals.deficit_days||0)} dia(s), superávit: ${Number(totals.superavit_days||0)} dia(s).</div>`;
     box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+energyTitle+energyChart+summary;
   }catch(e){box.innerHTML=""}
 }
