@@ -3111,6 +3111,26 @@ class H(BaseHTTPRequestHandler):
             c.close()
         self.user=user
         return user
+    def do_HEAD(self):
+        p=urlparse(self.path)
+        if p.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(APP_VERSION.encode("utf-8"))))
+            self.end_headers()
+            return
+        if p.path == "/":
+            b=HTML.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            return
+        self.send_error(404)
+
     def do_GET(self):
         p=urlparse(self.path)
         if p.path=="/":
