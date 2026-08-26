@@ -672,6 +672,7 @@ def report_period_data(user_id, start, end):
         })
         cursor += timedelta(days=1)
     energy_totals = {k: (float(round(v, 2)) if isinstance(v, float) else v) for k, v in energy_totals.items()}
+    energy_totals["estimated_fat_loss_kg"] = round(max(0.0, energy_totals["saldo_kcal"]) / 7000.0, 3)
     return {
         "start": d1, "end": d2, "days": rows, "goals": goals,
         "name": (profile["nome"] if profile and profile["nome"] else "Pessoa usuária"),
@@ -833,19 +834,17 @@ def _pdf_compact_chart(pdf, metric, chart_days, goals, x, y, width, height):
         px = left + (index * step if count > 1 else (right - left) / 2); py = bottom + (value / maximum) * (top - bottom); points.append((px, py))
     pdf.setStrokeColor(colors.HexColor(color)); pdf.setLineWidth(1.65)
     for first, second in zip(points, points[1:]): pdf.line(first[0], first[1], second[0], second[1])
-    show_every = 1 if count <= 10 else 2 if count <= 15 else 3
     for index, (px, py) in enumerate(points):
         pdf.setFillColor(colors.HexColor(color)); pdf.circle(px, py, 1.25, stroke=0, fill=1)
-        if index % show_every == 0 or index == count - 1:
-            pdf.setFont("Helvetica-Bold", 7)
-            label_y = py + 6 if py <= top - 14 else py - 9
-            label_y = max(bottom + 9, min(top - 11, label_y))
-            label_text = _compact_number(values[index], unit)
-            label_width = stringWidth(label_text, "Helvetica-Bold", 7) + 8
-            pdf.setFillColor(colors.white)
-            pdf.roundRect(px - label_width / 2, label_y - 3, label_width, 10, 2, stroke=0, fill=1)
-            pdf.setFillColor(colors.HexColor(color))
-            pdf.drawCentredString(px, label_y, _compact_number(values[index], unit))
+        pdf.setFont("Helvetica-Bold", 7)
+        label_y = py + 6 if py <= top - 14 else py - 9
+        label_y = max(bottom + 9, min(top - 11, label_y))
+        label_text = _compact_number(values[index], unit)
+        label_width = stringWidth(label_text, "Helvetica-Bold", 7) + 8
+        pdf.setFillColor(colors.white)
+        pdf.roundRect(px - label_width / 2, label_y - 3, label_width, 10, 2, stroke=0, fill=1)
+        pdf.setFillColor(colors.HexColor(color))
+        pdf.drawCentredString(px, label_y, _compact_number(values[index], unit))
         pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 6.5); pdf.drawCentredString(px, y + 5, chart_days[index]["label"])
 
 def _pdf_one_page_report(pdf, dataset):
@@ -934,6 +933,8 @@ def _pdf_energy_balance_page(pdf, dataset):
       pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 9); pdf.drawString(x + 7, card_top - 28, "kcal no período")
     pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 9)
     pdf.drawString(left, card_top - card_h - 9, f"Dias com superávit: {int(totals.get('superavit_days') or 0)} · dias com déficit: {int(totals.get('deficit_days') or 0)}")
+    pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(left, card_top - card_h - 16, f"Evolução estimada: {float(totals.get('estimated_fat_loss_kg') or 0):.3f} kg de gordura · referência: 7.000 kcal = 1 kg")
 
     chart_left, chart_right = left + 2, right - 2
     chart_bottom, chart_top_y = 42 * mm, card_top - card_h - 14
@@ -964,9 +965,12 @@ def _pdf_energy_balance_page(pdf, dataset):
         y = mid_y - h
         pdf.setFillColor(colors.HexColor("#dc2626"))
         pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
-      if count <= 20 or idx % max(1, count // 16) == 0 or idx == count - 1:
-        pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 6)
-        pdf.drawCentredString(x + bar_w / 2, chart_bottom - 14, str(item.get("label") or ""))
+      pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 5.5)
+      pdf.drawCentredString(x + bar_w / 2, chart_bottom - 14, str(item.get("label") or ""))
+      value_label = f"{value:,.0f}".replace(",", ".")
+      value_y = min(chart_top_y - 8, y + h + 4) if value > 0 else max(chart_bottom + 5, y - 8)
+      pdf.setFont("Helvetica-Bold", 5.5)
+      pdf.drawCentredString(x + bar_w / 2, value_y, value_label)
     legend_y = 21 * mm
     pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(left, legend_y, 6, 3, stroke=0, fill=1)
     pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 7); pdf.drawString(left + 8, legend_y, "Déficit calórico positivo")
@@ -2296,7 +2300,7 @@ function drawEnergyBalance(energy){
   const label=deficit?"Déficit calórico":surplus?"Superávit calórico":"Equilíbrio energético";
   const color=deficit?"#22c55e":surplus?"#ef4444":"#94a3b8";
   const side=deficit?"right":"left";
-  box.innerHTML=`<div style="border-top:1px solid #ffffff18;padding-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b>⚖️ Saldo energético</b><strong style="color:${color}">${label}</strong></div><div style="font-size:12px;color:#cbd5e1;margin-top:5px">Basal ${fmt(basal)} + ativo ${fmt(active)} - consumido ${fmt(consumed)} = <b style="color:${color}">${fmt(saldo)} kcal</b></div><div style="position:relative;height:18px;margin:12px 2px 5px;background:#1e293b;border-radius:10px;overflow:hidden"><div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f8fafc;z-index:2"></div>${equilibrium?"":`<div style="position:absolute;top:3px;bottom:3px;${side}:50%;width:${magnitude/2}%;background:${color};border-radius:7px"></div>`}</div><div style="display:flex;justify-content:space-between;font-size:10px;color:#94a3b8"><span>Superávit (-)</span><span>Equilíbrio</span><span>Déficit (+)</span></div></div>`;
+  box.innerHTML=`<div class="metric" style="margin-top:10px;padding:12px;background:rgba(255,255,255,.07);border:1px solid #ffffff12;border-radius:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><small style="font-size:14px;color:#f8fafc!important;font-weight:bold">⚖️ Saldo energético</small><strong style="font-size:15px;color:${color}">${label}</strong></div><b style="display:block;font-size:22px;color:${color};margin:7px 0 3px">${fmt(saldo)} kcal</b><small style="display:block;color:#cbd5e1!important;font-size:12px;line-height:1.45">Basal ${fmt(basal)} + ativo ${fmt(active)} - consumido ${fmt(consumed)}</small><div style="position:relative;height:22px;margin:14px 2px 6px;background:#1e293b;border:1px solid #475569;border-radius:11px;overflow:hidden"><div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f8fafc;z-index:2"></div>${equilibrium?"":`<div style="position:absolute;top:4px;bottom:4px;${side}:50%;width:${magnitude/2}%;background:${color};border-radius:8px"></div>`}</div><div style="display:flex;justify-content:space-between;gap:4px;font-size:11px;color:#cbd5e1"><span style="color:#ef4444;font-weight:bold">Superávit (-)</span><span>0 kcal</span><span style="color:#22c55e;font-weight:bold">Déficit (+)</span></div></div>`;
 }
 function toggleWaterRecords(){const box=document.getElementById("waterRecords"),btn=document.getElementById("waterRecordsToggle");if(!box||!btn)return;const open=box.style.display!=="none";box.style.display=open?"none":"block";btn.textContent=open?"VER REGISTROS ▼":"OCULTAR REGISTROS ▲";btn.setAttribute("aria-expanded",String(!open));}
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
@@ -2373,7 +2377,8 @@ async function loadHistory(start,end){
     const energyTitle="<h3 style='margin:14px 0 8px'>⚖️ Saldo energético (basal + ativo - consumo)</h3>";
     const energyChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${deficit?"#86efac":"#fecdd3"}'>${fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     const totals=j.energy_totals||{};
-    const summary=`<div style='margin-top:8px;padding:10px;border-radius:10px;background:#eef2ff;color:#1e293b;font-size:12px'><b>Período:</b> basal ${fmt(totals.basal_kcal||0)} + ativo ${fmt(totals.active_kcal||0)} - consumo ${fmt(totals.consumed_kcal||0)} = <b>${fmt(totals.saldo_kcal||0)} kcal</b> · déficit: ${Number(totals.deficit_days||0)} dia(s), superávit: ${Number(totals.superavit_days||0)} dia(s).</div>`;
+    const estimatedFatLoss=Math.max(0,Number(totals.saldo_kcal||0))/7000;
+    const summary=`<div style='margin-top:8px;padding:10px;border-radius:10px;background:#eef2ff;color:#1e293b;font-size:12px'><b>Período:</b> basal ${fmt(totals.basal_kcal||0)} + ativo ${fmt(totals.active_kcal||0)} - consumo ${fmt(totals.consumed_kcal||0)} = <b>${fmt(totals.saldo_kcal||0)} kcal</b> · déficit: ${Number(totals.deficit_days||0)} dia(s), superávit: ${Number(totals.superavit_days||0)} dia(s).<br><b>Evolução estimada:</b> ${fmt(estimatedFatLoss)} kg de gordura (7.000 kcal = 1 kg).</div>`;
     box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+energyTitle+energyChart+summary;
   }catch(e){box.innerHTML=""}
 }
