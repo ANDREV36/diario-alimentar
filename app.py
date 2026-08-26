@@ -51,7 +51,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V55 · Bebidas em ml + Segurança P0"
+APP_VERSION = "V58 · Histórico inicial de 7 dias + gasto ativo diário"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -384,6 +384,13 @@ def init_db():
             criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(usuario_id, data)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS preferencias_usuario(
+            usuario_id BIGINT PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
+            historico_gasto_inicial_concluido BOOLEAN NOT NULL DEFAULT FALSE,
+            atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
     c.execute("""
@@ -2028,6 +2035,24 @@ main{
   </div>
 </div>
 
+<div id="activeHistoryModal" style="display:none;position:fixed;inset:0;background:#000b;z-index:90;overflow:auto;padding:18px">
+  <div style="max-width:680px;margin:20px auto;background:#111827;color:#f8fafc;border:1px solid #334155;border-radius:18px;padding:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+      <h2 style="margin:0">⚡ Histórico de gasto ativo</h2>
+      <button type="button" onclick="closeActiveHistory()" style="border:1px solid #475569;background:#1e293b;color:#f8fafc;border-radius:10px;padding:8px 12px;font-size:18px">✕</button>
+    </div>
+    <p style="font-size:13px;color:#cbd5e1;line-height:1.5;margin:8px 0 14px">Informe o gasto ativo dos sete dias anteriores. O metabolismo basal e o consumo alimentar são calculados separadamente. Use <b>0</b> quando não houver gasto ativo registrado.</p>
+    <form id="activeHistoryForm" onsubmit="saveActiveHistory(event)">
+      <div id="activeHistoryRows" style="display:grid;gap:8px"></div>
+      <div id="activeHistoryStatus" style="min-height:18px;margin-top:10px;color:#fca5a5;font-size:12px"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <button type="button" onclick="closeActiveHistory()" style="border:1px solid #475569;background:#1e293b;color:#f8fafc;border-radius:10px;padding:10px 14px">Agora não</button>
+        <button id="saveActiveHistoryBtn" type="submit" style="border:0;background:#16a34a;color:white;border-radius:10px;padding:10px 14px;font-weight:bold">Salvar os 7 dias</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div id="summaryModal" style="display:none;position:fixed;inset:0;background:#0008;z-index:60;overflow:auto;padding:18px">
   <div style="max-width:680px;margin:20px auto;background:#111827;color:#f8fafc;border:1px solid #334155;border-radius:18px;padding:16px">
     <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2324,11 +2349,21 @@ function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",
 let csrfToken="";
 async function api(u,o={}){const method=(o.method||"GET").toUpperCase();const headers={...(o.headers||{})};if(["POST","PUT","DELETE"].includes(method)&&csrfToken)headers["X-CSRF-Token"]=csrfToken;let r=await fetch(u,{...o,headers}),j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}
 function setAuthStatus(msg){const el=document.getElementById("authStatus");if(el)el.textContent=msg||""}
-let activePromptShown=false;
+let activeHistoryPromptShown=false;
+let activeHistoryDays=[];
+function activeHistoryLabel(iso){
+  const d=new Date(iso+"T12:00:00");
+  return d.toLocaleDateString("pt-BR",{weekday:"short",day:"2-digit",month:"2-digit",year:"numeric"});
+}
+function closeActiveHistory(){
+  const modal=document.getElementById("activeHistoryModal");
+  if(modal)modal.style.display="none";
+}
+let activeDailyPromptShown=false;
 function yesterdayIso(){const d=new Date();d.setDate(d.getDate()-1);return isoDate(d)}
 async function ensureYesterdayActivePrompt(){
-  if(activePromptShown)return;
-  activePromptShown=true;
+  if(activeDailyPromptShown)return;
+  activeDailyPromptShown=true;
   try{
     const j=await api("/api/active_yesterday");
     const y=j?.yesterday||{};
@@ -2345,16 +2380,76 @@ async function ensureYesterdayActivePrompt(){
     const raw=prompt(msg,"0");
     if(raw===null)return;
     const active=Number(String(raw).replace(",","."));
-    if(!(active>=0)){alert("Valor inválido para gasto ativo.");return}
+    if(!Number.isFinite(active)||active<0||active>6000){alert("Valor inválido. Use um gasto ativo entre 0 e 6.000 kcal.");return}
     const saved=await api("/api/active_yesterday",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:y.data||yesterdayIso(),active_kcal:active})});
     const snap=saved?.yesterday||{};
     alert("Registrado: basal "+fmt(snap.basal_kcal||0)+" + ativo "+fmt(snap.active_kcal||0)+" - consumo "+fmt(snap.consumed_kcal||0)+" = saldo "+fmt(snap.saldo_kcal||0)+" kcal.");
     await refresh();
-  }catch(e){
-    console.error("prompt gasto ativo:",e);
+  }catch(error){
+    console.error("gasto ativo de ontem:",error);
   }
 }
-function showApp(user,csrf=""){csrfToken=csrf||"";document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>ensureYesterdayActivePrompt()).catch(e=>console.error("carregamento inicial:",e))}
+async function ensureWeeklyActiveHistory(){
+  if(activeHistoryPromptShown)return;
+  activeHistoryPromptShown=true;
+  try{
+    const result=await api("/api/active_week_setup");
+    if(result?.completed){await ensureYesterdayActivePrompt();return;}
+    activeHistoryDays=Array.isArray(result?.days)?result.days:[];
+    if(!activeHistoryDays.length)return;
+    const rows=document.getElementById("activeHistoryRows");
+    const modal=document.getElementById("activeHistoryModal");
+    if(!rows||!modal)return;
+    rows.innerHTML=activeHistoryDays.map((item,index)=>{
+      const saved=item.has_active_input?String(Number(item.active_kcal||0)):"";
+      return `<label style="display:grid;grid-template-columns:minmax(128px,1fr) minmax(100px,150px);gap:10px;align-items:center;padding:10px;background:#172033;border:1px solid #ffffff12;border-radius:12px">
+        <span><b style="display:block;text-transform:capitalize">${esc(activeHistoryLabel(item.data))}</b><small style="color:#94a3b8">Basal ${fmt(item.basal_kcal||0)} · consumido ${fmt(item.consumed_kcal||0)} kcal</small></span>
+        <span style="display:flex;align-items:center;gap:6px"><input class="activeHistoryInput" data-date="${esc(item.data)}" type="number" min="0" max="6000" step="1" inputmode="decimal" value="${saved}" placeholder="Ex.: 420" required style="width:100%;padding:10px;border-radius:9px;border:1px solid #475569;background:#0b1220;color:#fff"><small style="color:#cbd5e1">kcal</small></span>
+      </label>`;
+    }).join("");
+    document.getElementById("activeHistoryStatus").textContent="";
+    modal.style.display="block";
+    setTimeout(()=>document.querySelector(".activeHistoryInput")?.focus(),60);
+  }catch(error){
+    console.error("histórico semanal de gasto ativo:",error);
+  }
+}
+async function saveActiveHistory(event){
+  event.preventDefault();
+  const status=document.getElementById("activeHistoryStatus");
+  const button=document.getElementById("saveActiveHistoryBtn");
+  const inputs=[...document.querySelectorAll(".activeHistoryInput")];
+  const items=[];
+  for(const input of inputs){
+    const raw=String(input.value||"").trim();
+    const value=Number(raw.replace(",","."));
+    if(raw===""||!Number.isFinite(value)||value<0||value>6000){
+      status.textContent="Preencha todos os dias com valores entre 0 e 6.000 kcal.";
+      input.focus();
+      return;
+    }
+    items.push({data:input.dataset.date,active_kcal:value});
+  }
+  if(items.length!==7){
+    status.textContent="Não foi possível montar os sete dias. Atualize a página e tente novamente.";
+    return;
+  }
+  button.disabled=true;
+  button.textContent="Salvando...";
+  status.textContent="";
+  try{
+    await api("/api/active_week_setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({items})});
+    closeActiveHistory();
+    await refresh();
+    alert("Histórico dos sete dias salvo. A partir de amanhã, será solicitado somente o gasto ativo do dia anterior.");
+  }catch(error){
+    status.textContent=error.message||"Não foi possível salvar o histórico.";
+  }finally{
+    button.disabled=false;
+    button.textContent="Salvar os 7 dias";
+  }
+}
+function showApp(user,csrf=""){csrfToken=csrf||"";document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>ensureWeeklyActiveHistory()).catch(e=>console.error("carregamento inicial:",e))}
 async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function logout(){try{await api("/api/auth/logout",{method:"POST"})}finally{location.reload()}}
@@ -3217,6 +3312,21 @@ class H(BaseHTTPRequestHandler):
             finally:
                 nc.close();pc.close()
             self.js({"foods":[dict(x) for x in own+base][:40]});return
+        if p.path=="/api/active_week_setup":
+            c=ddb()
+            try:
+                pref=c.execute("SELECT historico_gasto_inicial_concluido FROM preferencias_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
+                if pref and bool(pref["historico_gasto_inicial_concluido"]):
+                    self.js({"completed":True,"days":[]})
+                    return
+                days=[]
+                for offset in range(7,0,-1):
+                    target=today_sp()-timedelta(days=offset)
+                    days.append(_daily_energy_snapshot(c,self.user["id"],target.isoformat()))
+                self.js({"completed":False,"days":days})
+            finally:
+                c.close()
+            return
         if p.path=="/api/active_yesterday":
             y=(today_sp()-timedelta(days=1)).isoformat()
             c=ddb()
@@ -3609,6 +3719,48 @@ class H(BaseHTTPRequestHandler):
                 if ml<=0: raise ValueError("Quantidade de água inválida")
                 if ml>10000:raise ValueError("Quantidade de água muito alta para um único registro.")
                 c=ddb();c.execute("INSERT INTO hidratacao(usuario_id,data,hora,quantidade_ml) VALUES(?,?,?,?)",(self.user["id"],x.get("data",today_sp().isoformat()),now_sp().strftime("%H:%M"),ml));c.commit();self.js({"ok":True})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+        if self.path=="/api/active_week_setup":
+            c=None
+            try:
+                payload=self.body()
+                items=payload.get("items")
+                if not isinstance(items,list) or len(items)!=7:
+                    raise ValueError("Informe exatamente os sete dias anteriores.")
+                expected={(today_sp()-timedelta(days=offset)).isoformat() for offset in range(1,8)}
+                normalized=[]
+                received=set()
+                for item in items:
+                    if not isinstance(item,dict):
+                        raise ValueError("Dados de gasto ativo inválidos.")
+                    target_day=str(item.get("data") or "")
+                    try:
+                        parsed=date.fromisoformat(target_day)
+                    except Exception:
+                        raise ValueError("Data inválida no histórico semanal.")
+                    if target_day not in expected or parsed>=today_sp() or target_day in received:
+                        raise ValueError("O histórico deve conter cada um dos sete dias anteriores uma única vez.")
+                    active=float(item.get("active_kcal"))
+                    if not math.isfinite(active) or active<0 or active>6000:
+                        raise ValueError("Gasto ativo inválido. Use valores entre 0 e 6000 kcal.")
+                    received.add(target_day)
+                    normalized.append((target_day,active))
+                if received!=expected:
+                    raise ValueError("O histórico semanal está incompleto.")
+                c=ddb()
+                snapshots=[]
+                for target_day,active in sorted(normalized):
+                    snapshots.append(_save_daily_active_energy(c,self.user["id"],target_day,active))
+                c.execute("""INSERT INTO preferencias_usuario(usuario_id,historico_gasto_inicial_concluido,atualizado_em)
+                             VALUES(?,TRUE,NOW())
+                             ON CONFLICT(usuario_id) DO UPDATE SET historico_gasto_inicial_concluido=TRUE,atualizado_em=NOW()""",(self.user["id"],))
+                c.commit()
+                self.js({"ok":True,"days":snapshots})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
