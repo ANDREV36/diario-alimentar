@@ -80,6 +80,70 @@ def goal_dict(row):
         data.update(dict(row))
     return data
 
+def _basal_from_profile_row(profile_row):
+  if not profile_row:
+    return None
+  try:
+    idade = int(profile_row.get("idade") or 0)
+    sexo = str(profile_row.get("sexo") or "").strip().upper()
+    peso = float(profile_row.get("peso_kg") or 0)
+    altura = float(profile_row.get("altura_cm") or 0)
+    if not (10 <= idade <= 120 and sexo in ("M", "F") and 20 <= peso <= 400 and 100 <= altura <= 250):
+      return None
+    return float(round(10 * peso + 6.25 * altura - 5 * idade + (5 if sexo == "M" else -161), 2))
+  except Exception:
+    return None
+
+def _daily_energy_snapshot(c, user_id, day_iso):
+  rows = c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=? ORDER BY id", (user_id, day_iso)).fetchall()
+  consumed_kcal = float(calc(rows, user_id).get("energia_kcal", 0) or 0)
+  profile_row = c.execute("SELECT idade,sexo,peso_kg,altura_cm FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
+  goals_row = c.execute("SELECT calorias_kcal FROM metas_usuario WHERE usuario_id=?", (user_id,)).fetchone()
+  active_row = c.execute("SELECT calorias_kcal,basal_kcal,consumido_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data=?", (user_id, day_iso)).fetchone()
+  basal_kcal = _basal_from_profile_row(profile_row)
+  if basal_kcal is None:
+    basal_kcal = float((goals_row or {}).get("calorias_kcal") or 0)
+  active_kcal = float((active_row or {}).get("calorias_kcal") or 0)
+  saldo_kcal = float(basal_kcal or 0) + active_kcal - consumed_kcal
+  status = "superavit" if saldo_kcal >= 0 else "deficit"
+  return {
+    "data": day_iso,
+    "basal_kcal": float(round(float(basal_kcal or 0), 2)),
+    "active_kcal": float(round(active_kcal, 2)),
+    "consumed_kcal": float(round(consumed_kcal, 2)),
+    "saldo_kcal": float(round(saldo_kcal, 2)),
+    "status": status,
+    "has_active_input": bool(active_row),
+  }
+
+def _save_daily_active_energy(c, user_id, day_iso, active_kcal):
+  snap = _daily_energy_snapshot(c, user_id, day_iso)
+  basal_kcal = float(snap["basal_kcal"])
+  consumed_kcal = float(snap["consumed_kcal"])
+  saldo_kcal = basal_kcal + float(active_kcal) - consumed_kcal
+  c.execute(
+    """
+    INSERT INTO gasto_ativo_diario(usuario_id,data,calorias_kcal,basal_kcal,consumido_kcal,saldo_kcal,atualizado_em)
+    VALUES(?,?,?,?,?,?,NOW())
+    ON CONFLICT(usuario_id,data) DO UPDATE SET
+      calorias_kcal=EXCLUDED.calorias_kcal,
+      basal_kcal=EXCLUDED.basal_kcal,
+      consumido_kcal=EXCLUDED.consumido_kcal,
+      saldo_kcal=EXCLUDED.saldo_kcal,
+      atualizado_em=NOW()
+    """,
+    (user_id, day_iso, float(active_kcal), basal_kcal, consumed_kcal, saldo_kcal),
+  )
+  return {
+    "data": day_iso,
+    "basal_kcal": float(round(basal_kcal, 2)),
+    "active_kcal": float(round(float(active_kcal), 2)),
+    "consumed_kcal": float(round(consumed_kcal, 2)),
+    "saldo_kcal": float(round(saldo_kcal, 2)),
+    "status": "superavit" if saldo_kcal >= 0 else "deficit",
+    "has_active_input": True,
+  }
+
 def json_default(value):
     if isinstance(value, Decimal):
         return float(value)
@@ -309,6 +373,20 @@ def init_db():
         )
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS gasto_ativo_diario(
+            id BIGSERIAL PRIMARY KEY,
+            usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            data TEXT NOT NULL,
+            calorias_kcal REAL NOT NULL,
+            basal_kcal REAL NOT NULL DEFAULT 0,
+            consumido_kcal REAL NOT NULL DEFAULT 0,
+            saldo_kcal REAL NOT NULL DEFAULT 0,
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(usuario_id, data)
+        )
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS favoritos(
             id BIGSERIAL PRIMARY KEY,
             usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
@@ -337,7 +415,11 @@ def init_db():
             c.execute(f"ALTER TABLE {table} ADD COLUMN usuario_id BIGINT")
     c.execute("CREATE INDEX IF NOT EXISTS idx_consumo_usuario_data ON consumo(usuario_id, data)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_hidratacao_usuario_data ON hidratacao(usuario_id, data)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_gasto_ativo_diario_usuario_data ON gasto_ativo_diario(usuario_id, data)")
     c.execute("ALTER TABLE consumo ADD COLUMN IF NOT EXISTS unidade TEXT NOT NULL DEFAULT 'g'")
+    c.execute("ALTER TABLE gasto_ativo_diario ADD COLUMN IF NOT EXISTS basal_kcal REAL NOT NULL DEFAULT 0")
+    c.execute("ALTER TABLE gasto_ativo_diario ADD COLUMN IF NOT EXISTS consumido_kcal REAL NOT NULL DEFAULT 0")
+    c.execute("ALTER TABLE gasto_ativo_diario ADD COLUMN IF NOT EXISTS saldo_kcal REAL NOT NULL DEFAULT 0")
     c.execute("ALTER TABLE porcoes ADD COLUMN IF NOT EXISTS unidade TEXT NOT NULL DEFAULT 'g'")
     c.execute("""
         CREATE TABLE IF NOT EXISTS alimentos_usuario(
@@ -542,25 +624,58 @@ def report_period_data(user_id, start, end):
     try:
         consumed = c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id", (user_id, start, end)).fetchall()
         water_rows = c.execute("SELECT data,COALESCE(SUM(quantidade_ml),0) AS water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? GROUP BY data", (user_id, start, end)).fetchall()
+        active_rows = c.execute("SELECT data,calorias_kcal,basal_kcal,consumido_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?", (user_id, start, end)).fetchall()
         goals_row = c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?", (user_id,)).fetchone()
-        profile = c.execute("SELECT nome FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
+        profile = c.execute("SELECT nome,idade,sexo,peso_kg,altura_cm FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
     finally:
         c.close()
     by_day = {}
     for row in consumed:
         by_day.setdefault(str(row["data"]), []).append(row)
     water_by_day = {str(row["data"]): float(row["water"] or 0) for row in water_rows}
+    active_by_day = {str(row["data"]): dict(row) for row in active_rows}
     goals = goal_dict(goals_row)
+    basal_fallback = _basal_from_profile_row(profile)
+    if basal_fallback is None:
+        basal_fallback = float(goals.get("calorias_kcal") or 0)
+    energy_days = []
+    energy_totals = {"basal_kcal": 0.0, "active_kcal": 0.0, "consumed_kcal": 0.0, "saldo_kcal": 0.0, "deficit_days": 0, "superavit_days": 0}
     rows, cursor = [], d1
     while cursor <= d2:
         day_key = cursor.isoformat()
         nutrients = calc(by_day.get(day_key, []), user_id)
         nutrients["agua_ml"] = water_by_day.get(day_key, 0.0)
         rows.append({"data": day_key, "label": cursor.strftime("%d/%m"), "values": nutrients})
+        entry = active_by_day.get(day_key) or {}
+        consumed_kcal = float(nutrients.get("energia_kcal", 0) or 0)
+        basal_kcal = float(entry.get("basal_kcal") or basal_fallback or 0)
+        active_kcal = float(entry.get("calorias_kcal") or 0)
+        saldo_kcal = basal_kcal + active_kcal - consumed_kcal
+        status = "superavit" if saldo_kcal >= 0 else "deficit"
+        if status == "superavit":
+            energy_totals["superavit_days"] += 1
+        else:
+            energy_totals["deficit_days"] += 1
+        energy_totals["basal_kcal"] += basal_kcal
+        energy_totals["active_kcal"] += active_kcal
+        energy_totals["consumed_kcal"] += consumed_kcal
+        energy_totals["saldo_kcal"] += saldo_kcal
+        energy_days.append({
+            "data": day_key,
+            "label": cursor.strftime("%d/%m"),
+            "basal_kcal": float(round(basal_kcal, 2)),
+            "active_kcal": float(round(active_kcal, 2)),
+            "consumed_kcal": float(round(consumed_kcal, 2)),
+            "saldo_kcal": float(round(saldo_kcal, 2)),
+            "status": status,
+            "has_active_input": day_key in active_by_day,
+        })
         cursor += timedelta(days=1)
+    energy_totals = {k: (float(round(v, 2)) if isinstance(v, float) else v) for k, v in energy_totals.items()}
     return {
         "start": d1, "end": d2, "days": rows, "goals": goals,
         "name": (profile["nome"] if profile and profile["nome"] else "Pessoa usuária"),
+        "energy": {"days": energy_days, "totals": energy_totals},
     }
 
 def _pdf_header(pdf, title, subtitle):
@@ -786,6 +901,71 @@ def _pdf_one_page_report(pdf, dataset):
     pdf.setStrokeColor(colors.HexColor("#d7e1ea")); pdf.line(12 * mm, 8 * mm, width - 12 * mm, 8 * mm)
     pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 4.3); pdf.drawString(12 * mm, 4.3 * mm, "Linhas: realizado na cor do nutriente · meta tracejada verde · dados detalhados na tabela diária")
 
+def _pdf_energy_balance_page(pdf, dataset):
+    energy = dataset.get("energy") or {}
+    days = energy.get("days") or []
+    totals = energy.get("totals") or {}
+    width, height = _pdf_header(pdf, "RESUMO ENERGÉTICO", "Basal + ativo - consumido · comparativo diário de superávit e déficit")
+    left, right = 16 * mm, width - 16 * mm
+    card_top = height - 48 * mm
+    card_h = 22 * mm
+    cards = [
+      ("Basal", float(totals.get("basal_kcal") or 0), "#0f766e"),
+      ("Ativo", float(totals.get("active_kcal") or 0), "#2563eb"),
+      ("Consumido", float(totals.get("consumed_kcal") or 0), "#be123c"),
+      ("Saldo", float(totals.get("saldo_kcal") or 0), "#16a34a" if float(totals.get("saldo_kcal") or 0) >= 0 else "#dc2626"),
+    ]
+    gap = 5 * mm
+    card_w = (right - left - gap * 3) / 4
+    for idx, (label, value, color) in enumerate(cards):
+      x = left + idx * (card_w + gap)
+      pdf.setFillColor(colors.HexColor("#f8fafc")); pdf.roundRect(x, card_top - card_h, card_w, card_h, 3, stroke=0, fill=1)
+      pdf.setStrokeColor(colors.HexColor("#dbeafe")); pdf.roundRect(x, card_top - card_h, card_w, card_h, 3, stroke=1, fill=0)
+      pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica-Bold", 8); pdf.drawString(x + 4, card_top - 8, label)
+      pdf.setFillColor(colors.HexColor(color)); pdf.setFont("Helvetica-Bold", 13); pdf.drawString(x + 4, card_top - 16, f"{value:,.0f}".replace(",", "."))
+      pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 7); pdf.drawString(x + 4, card_top - 21, "kcal no período")
+    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 8)
+    pdf.drawString(left, card_top - card_h - 5, f"Dias com superávit: {int(totals.get('superavit_days') or 0)} · dias com déficit: {int(totals.get('deficit_days') or 0)}")
+
+    chart_left, chart_right = left + 2, right - 2
+    chart_bottom, chart_top_y = 42 * mm, card_top - card_h - 14
+    mid_y = chart_bottom + (chart_top_y - chart_bottom) / 2
+    pdf.setStrokeColor(colors.HexColor("#cbd5e1")); pdf.setLineWidth(.5)
+    for step in range(5):
+      y = chart_bottom + (chart_top_y - chart_bottom) * step / 4
+      pdf.line(chart_left, y, chart_right, y)
+    pdf.setStrokeColor(colors.HexColor("#334155")); pdf.setLineWidth(1.1); pdf.line(chart_left, mid_y, chart_right, mid_y)
+    pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica-Bold", 8)
+    pdf.drawString(chart_left, chart_top_y + 4, "Superávit (+)")
+    pdf.drawString(chart_left, chart_bottom - 8, "Déficit (-)")
+
+    balances = [float(item.get("saldo_kcal") or 0) for item in days]
+    max_abs = max([abs(v) for v in balances] + [1.0])
+    count = max(1, len(days))
+    step_x = (chart_right - chart_left) / count
+    bar_w = max(3, step_x * 0.55)
+    for idx, item in enumerate(days):
+      value = float(item.get("saldo_kcal") or 0)
+      x = chart_left + idx * step_x + (step_x - bar_w) / 2
+      h = (abs(value) / max_abs) * ((chart_top_y - chart_bottom) / 2 - 4)
+      if value >= 0:
+        y = mid_y
+        pdf.setFillColor(colors.HexColor("#16a34a"))
+        pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
+      else:
+        y = mid_y - h
+        pdf.setFillColor(colors.HexColor("#dc2626"))
+        pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
+      if count <= 20 or idx % max(1, count // 16) == 0 or idx == count - 1:
+        pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 6)
+        pdf.drawCentredString(x + bar_w / 2, chart_bottom - 14, str(item.get("label") or ""))
+    legend_y = 21 * mm
+    pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(left, legend_y, 6, 3, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 7); pdf.drawString(left + 8, legend_y, "Saldo diário positivo (superávit)")
+    pdf.setFillColor(colors.HexColor("#dc2626")); pdf.rect(left + 74 * mm, legend_y, 6, 3, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#475569")); pdf.drawString(left + 74 * mm + 8, legend_y, "Saldo diário negativo (déficit)")
+    _pdf_footer(pdf, 2)
+
 
 def build_food_report_pdf(user_id, start, end):
     if not REPORTLAB_AVAILABLE:
@@ -793,6 +973,8 @@ def build_food_report_pdf(user_id, start, end):
     dataset = report_period_data(user_id, start, end)
     output = io.BytesIO(); pdf = pdf_canvas.Canvas(output, pagesize=landscape(A3), pageCompression=1)
     _pdf_one_page_report(pdf, dataset)
+    pdf.showPage()
+    _pdf_energy_balance_page(pdf, dataset)
     pdf.save()
     return output.getvalue()
 
@@ -1561,7 +1743,37 @@ function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",
 let csrfToken="";
 async function api(u,o={}){const method=(o.method||"GET").toUpperCase();const headers={...(o.headers||{})};if(["POST","PUT","DELETE"].includes(method)&&csrfToken)headers["X-CSRF-Token"]=csrfToken;let r=await fetch(u,{...o,headers}),j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}
 function setAuthStatus(msg){const el=document.getElementById("authStatus");if(el)el.textContent=msg||""}
-function showApp(user,csrf=""){csrfToken=csrf||"";document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).catch(e=>console.error("carregamento inicial:",e))}
+let activePromptShown=false;
+function yesterdayIso(){const d=new Date();d.setDate(d.getDate()-1);return isoDate(d)}
+async function ensureYesterdayActivePrompt(){
+  if(activePromptShown)return;
+  activePromptShown=true;
+  try{
+    const j=await api("/api/active_yesterday");
+    const y=j?.yesterday||{};
+    if(y.has_active_input)return;
+    const msg=[
+      "Informe o gasto ativo de ontem (kcal).",
+      "",
+      "Data: "+(y.data||yesterdayIso()),
+      "Basal identificado: "+fmt(y.basal_kcal||0)+" kcal",
+      "Consumido ontem: "+fmt(y.consumed_kcal||0)+" kcal",
+      "",
+      "Exemplo: 420"
+    ].join("\n");
+    const raw=prompt(msg,"0");
+    if(raw===null)return;
+    const active=Number(String(raw).replace(",","."));
+    if(!(active>=0)){alert("Valor inválido para gasto ativo.");return}
+    const saved=await api("/api/active_yesterday",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:y.data||yesterdayIso(),active_kcal:active})});
+    const snap=saved?.yesterday||{};
+    alert("Registrado: basal "+fmt(snap.basal_kcal||0)+" + ativo "+fmt(snap.active_kcal||0)+" - consumo "+fmt(snap.consumed_kcal||0)+" = saldo "+fmt(snap.saldo_kcal||0)+" kcal.");
+    await refresh();
+  }catch(e){
+    console.error("prompt gasto ativo:",e);
+  }
+}
+function showApp(user,csrf=""){csrfToken=csrf||"";document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>ensureYesterdayActivePrompt()).catch(e=>console.error("carregamento inicial:",e))}
 async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function logout(){try{await api("/api/auth/logout",{method:"POST"})}finally{location.reload()}}
@@ -2133,7 +2345,18 @@ async function downloadReport(){
 }
 async function loadHistory(start,end){
   const box=document.getElementById("historyChart");if(!box)return;
-  try{const j=await api("/api/history?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end));const max=Math.max(1,...j.days.map(x=>Number(x.energia_kcal||0)));box.innerHTML="<h3 style='margin:8px 0'>📈 Evolução diária</h3>"+`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div><small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"}catch(e){box.innerHTML=""}
+  try{
+    const j=await api("/api/history?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end));
+    const max=Math.max(1,...j.days.map(x=>Number(x.energia_kcal||0)));
+    const maxSaldo=Math.max(1,...j.days.map(x=>Math.abs(Number(x.saldo_kcal||0))));
+    const head="<h3 style='margin:8px 0'>📈 Evolução diária</h3>";
+    const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
+    const energyTitle="<h3 style='margin:14px 0 8px'>⚖️ Saldo energético (basal + ativo - consumo)</h3>";
+    const energyChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const up=v>=0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=up?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${up?"#86efac":"#fecdd3"}'>${fmt(v)}</small><div style='display:flex;align-items:${up?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${up?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
+    const totals=j.energy_totals||{};
+    const summary=`<div style='margin-top:8px;padding:10px;border-radius:10px;background:#eef2ff;color:#1e293b;font-size:12px'><b>Período:</b> basal ${fmt(totals.basal_kcal||0)} + ativo ${fmt(totals.active_kcal||0)} - consumo ${fmt(totals.consumed_kcal||0)} = <b>${fmt(totals.saldo_kcal||0)} kcal</b> · superávit: ${Number(totals.superavit_days||0)} dia(s), déficit: ${Number(totals.deficit_days||0)} dia(s).</div>`;
+    box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+energyTitle+energyChart+summary;
+  }catch(e){box.innerHTML=""}
 }
 function periodCard(key,label,icon,total,goal,unit,days,limit=false,start, end){
   total=Number(total||0);goal=Number(goal||0);
@@ -2174,6 +2397,7 @@ async function loadPeriod(){
       periodCard("fibra_g","Fibras","🌱",j.daily.fibra_g,g.fibras_g,"g",days,false,j.start,j.end)+
       periodCard("sodio_mg","Sódio","🧂",j.daily.sodio_mg,g.sodio_mg,"mg",days,true,j.start,j.end)+
       periodCard("","Água","💧",j.water,g.agua_ml,"ml",days,false,j.start,j.end)+
+      (()=>{const e=j.energy||{},tot=e.totals||{},rows=e.days||[];const maxSaldo=Math.max(1,...rows.map(x=>Math.abs(Number(x.saldo_kcal||0))));return `<h3 style="margin:14px 0 8px">⚖️ Balanço energético do período</h3><div style="padding:11px;border-radius:12px;background:#eef2ff;color:#1e293b;font-size:12px;line-height:1.5"><b>Basal:</b> ${fmt(tot.basal_kcal||0)} kcal · <b>Ativo:</b> ${fmt(tot.active_kcal||0)} kcal · <b>Consumido:</b> ${fmt(tot.consumed_kcal||0)} kcal<br><b>Saldo:</b> ${fmt(tot.saldo_kcal||0)} kcal (${Number(tot.saldo_kcal||0)>=0?"superávit":"déficit"}) · superávit em ${Number(tot.superavit_days||0)} dia(s) e déficit em ${Number(tot.deficit_days||0)} dia(s)</div><div style="margin-top:9px;display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,rows.length))},minmax(26px,1fr));gap:6px;align-items:stretch;height:195px;padding:10px;background:#0f172a;border-radius:12px">${rows.map(x=>{const v=Number(x.saldo_kcal||0),up=v>=0,p=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));return `<div title='${x.label}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${up?"#86efac":"#fecdd3"}'>${fmt(v)}</small><div style='display:flex;align-items:${up?"flex-end":"flex-start"};height:130px;width:100%'><div style='width:100%;height:${p}%;min-height:5px;background:${up?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)"};border-radius:${up?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${x.label}</small></div>`}).join("")}</div><small style="display:block;color:#9fb0c4;margin-top:6px">Saldo diário: verde = superávit, rosa = déficit. Fórmula: basal + ativo - consumido.</small>`})()+
       `<details style="margin-top:12px"><summary style="font-weight:bold;cursor:pointer">🔬 Ver micronutrientes</summary>
         <div class="metrics" style="margin-top:8px">${[
           ["calcio_mg","Cálcio","mg"],["magnesio_mg","Magnésio","mg"],["manganes_mg","Manganês","mg"],
@@ -2357,6 +2581,15 @@ class H(BaseHTTPRequestHandler):
             finally:
                 nc.close();pc.close()
             self.js({"foods":[dict(x) for x in own+base][:40]});return
+        if p.path=="/api/active_yesterday":
+            y=(today_sp()-timedelta(days=1)).isoformat()
+            c=ddb()
+            try:
+                snap=_daily_energy_snapshot(c,self.user["id"],y)
+            finally:
+                c.close()
+            self.js({"yesterday":snap})
+            return
         if p.path=="/api/day":
             q=parse_qs(p.query);d=q.get("data",[today_sp().isoformat()])[0];m=q.get("refeicao",[MEALS[0]])[0];c=ddb()
             try:rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=? ORDER BY id",(self.user["id"],d,)).fetchall()
@@ -2375,9 +2608,10 @@ class H(BaseHTTPRequestHandler):
                 water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"]
                 water_entries=c.execute("SELECT id,hora,quantidade_ml FROM hidratacao WHERE usuario_id=? AND data=? ORDER BY id DESC",(self.user["id"],d,)).fetchall()
                 g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
+                energy=_daily_energy_snapshot(c,self.user["id"],d)
             finally:
                 c.close()
-            self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"water_entries":[dict(x) for x in water_entries],"goals":goal_dict(g)});return
+            self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"water_entries":[dict(x) for x in water_entries],"goals":goal_dict(g),"energy":energy});return
         if p.path.startswith("/api/food/"):
             try: food_id=int(p.path.rsplit("/",1)[1])
             except ValueError:
@@ -2422,18 +2656,44 @@ class H(BaseHTTPRequestHandler):
             return
 
         if p.path=="/api/history":
-            q=parse_qs(p.query);start=q.get("start",[today_sp().isoformat()])[0];end=q.get("end",[start])[0]
-            c=ddb()
-            try:
-                rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
-                waters=c.execute("SELECT data,COALESCE(SUM(quantidade_ml),0) AS water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? GROUP BY data ORDER BY data",(self.user["id"],start,end)).fetchall()
-            finally:c.close()
-            by_day={}
-            for r in rows:by_day.setdefault(r["data"],[]).append(r)
-            wmap={x["data"]:float(x["water"] or 0) for x in waters};d1=date.fromisoformat(start);d2=date.fromisoformat(end);out=[];cur=d1
-            while cur<=d2:
-                ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"]);out.append({"data":ds,"energia_kcal":t["energia_kcal"],"proteina_g":t["proteina_g"],"agua_ml":wmap.get(ds,0)});cur+=timedelta(days=1)
-            self.js({"days":out});return
+          q=parse_qs(p.query);start=q.get("start",[today_sp().isoformat()])[0];end=q.get("end",[start])[0]
+          c=ddb()
+          try:
+            rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
+            waters=c.execute("SELECT data,COALESCE(SUM(quantidade_ml),0) AS water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? GROUP BY data ORDER BY data",(self.user["id"],start,end)).fetchall()
+            active_rows=c.execute("SELECT data,calorias_kcal,basal_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchall()
+            profile=c.execute("SELECT idade,sexo,peso_kg,altura_cm FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
+            goals_row=c.execute("SELECT calorias_kcal FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
+          finally:
+            c.close()
+          by_day={}
+          for r in rows:
+            by_day.setdefault(r["data"],[]).append(r)
+          wmap={x["data"]:float(x["water"] or 0) for x in waters}
+          amap={x["data"]:dict(x) for x in active_rows}
+          basal_fallback=_basal_from_profile_row(profile)
+          if basal_fallback is None:
+            basal_fallback=float((goals_row or {}).get("calorias_kcal") or 0)
+          totals={"basal_kcal":0.0,"active_kcal":0.0,"consumed_kcal":0.0,"saldo_kcal":0.0,"deficit_days":0,"superavit_days":0}
+          d1=date.fromisoformat(start);d2=date.fromisoformat(end);out=[];cur=d1
+          while cur<=d2:
+            ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"])
+            consumed=float(t["energia_kcal"] or 0)
+            active=float((amap.get(ds) or {}).get("calorias_kcal") or 0)
+            basal=float((amap.get(ds) or {}).get("basal_kcal") or basal_fallback or 0)
+            saldo=basal+active-consumed
+            status="superavit" if saldo>=0 else "deficit"
+            if status=="superavit":
+              totals["superavit_days"]+=1
+            else:
+              totals["deficit_days"]+=1
+            totals["basal_kcal"]+=basal
+            totals["active_kcal"]+=active
+            totals["consumed_kcal"]+=consumed
+            totals["saldo_kcal"]+=saldo
+            out.append({"data":ds,"energia_kcal":t["energia_kcal"],"proteina_g":t["proteina_g"],"agua_ml":wmap.get(ds,0),"basal_kcal":round(basal,2),"active_kcal":round(active,2),"consumed_kcal":round(consumed,2),"saldo_kcal":round(saldo,2),"status":status,"has_active_input":ds in amap})
+            cur+=timedelta(days=1)
+          self.js({"days":out,"energy_totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()}});return
         if p.path=="/api/period":
             q=parse_qs(p.query)
             start=q.get("start",[""])[0]
@@ -2448,12 +2708,35 @@ class H(BaseHTTPRequestHandler):
                 rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
                 water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchone()["total_water"]
                 g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
+                active_rows=c.execute("SELECT data,calorias_kcal,basal_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchall()
+                profile=c.execute("SELECT idade,sexo,peso_kg,altura_cm FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
             days=(d2-d1).days+1
+            by_day={}
+            for r in rows:by_day.setdefault(r["data"],[]).append(r)
+            amap={x["data"]:dict(x) for x in active_rows}
+            basal_fallback=_basal_from_profile_row(profile)
+            if basal_fallback is None: basal_fallback=float(goal_dict(g).get("calorias_kcal") or 0)
+            energy_days=[]
+            totals={"basal_kcal":0.0,"active_kcal":0.0,"consumed_kcal":0.0,"saldo_kcal":0.0,"deficit_days":0,"superavit_days":0}
+            cur=d1
+            while cur<=d2:
+                ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"])
+                consumed=float(t.get("energia_kcal",0) or 0)
+                active=float((amap.get(ds) or {}).get("calorias_kcal") or 0)
+                basal=float((amap.get(ds) or {}).get("basal_kcal") or basal_fallback or 0)
+                saldo=basal+active-consumed
+                status="superavit" if saldo>=0 else "deficit"
+                if status=="superavit": totals["superavit_days"]+=1
+                else: totals["deficit_days"]+=1
+                totals["basal_kcal"]+=basal;totals["active_kcal"]+=active;totals["consumed_kcal"]+=consumed;totals["saldo_kcal"]+=saldo
+                energy_days.append({"data":ds,"label":cur.strftime("%d/%m"),"basal_kcal":round(basal,2),"active_kcal":round(active,2),"consumed_kcal":round(consumed,2),"saldo_kcal":round(saldo,2),"status":status,"has_active_input":ds in amap})
+                cur+=timedelta(days=1)
             self.js({
                 "start":start,"end":end,"days":days,
                 "start_br":d1.strftime("%d/%m/%Y"),"end_br":d2.strftime("%d/%m/%Y"),
-                "daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":goal_dict(g)
+                "daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":goal_dict(g),
+                "energy":{"days":energy_days,"totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()}}
             })
             return
 
@@ -2690,6 +2973,30 @@ class H(BaseHTTPRequestHandler):
                 if ml<=0: raise ValueError("Quantidade de água inválida")
                 if ml>10000:raise ValueError("Quantidade de água muito alta para um único registro.")
                 c=ddb();c.execute("INSERT INTO hidratacao(usuario_id,data,hora,quantidade_ml) VALUES(?,?,?,?)",(self.user["id"],x.get("data",today_sp().isoformat()),now_sp().strftime("%H:%M"),ml));c.commit();self.js({"ok":True})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+        if self.path=="/api/active_yesterday":
+            c=None
+            try:
+                x=self.body()
+                target_day=str(x.get("data") or (today_sp()-timedelta(days=1)).isoformat())
+                try:
+                    day_value=date.fromisoformat(target_day)
+                except Exception:
+                    raise ValueError("Data inválida.")
+                if day_value >= today_sp():
+                    raise ValueError("Informe um dia anterior ao dia atual.")
+                active=float(x.get("active_kcal",0))
+                if not math.isfinite(active) or active < 0 or active > 6000:
+                    raise ValueError("Gasto ativo inválido. Use um valor entre 0 e 6000 kcal.")
+                c=ddb()
+                snapshot=_save_daily_active_energy(c,self.user["id"],target_day,active)
+                c.commit()
+                self.js({"ok":True,"yesterday":snapshot})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
