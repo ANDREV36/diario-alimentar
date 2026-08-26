@@ -958,11 +958,11 @@ def _pdf_energy_balance_page(pdf, dataset):
       h = (abs(value) / max_abs) * ((chart_top_y - chart_bottom) / 2 - 4)
       if value > 0:
         y = mid_y
-            pdf.setFillColor(colors.HexColor("#16a34a"))
+        pdf.setFillColor(colors.HexColor("#16a34a"))
         pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
       else:
         y = mid_y - h
-            pdf.setFillColor(colors.HexColor("#dc2626"))
+        pdf.setFillColor(colors.HexColor("#dc2626"))
         pdf.rect(x, y, bar_w, h, stroke=0, fill=1)
       if count <= 20 or idx % max(1, count // 16) == 0 or idx == count - 1:
         pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 6)
