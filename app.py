@@ -916,7 +916,7 @@ def _pdf_energy_balance_page(pdf, dataset):
     width, height = _pdf_header(pdf, "RESUMO ENERGÉTICO", "Basal + ativo - consumido · comparativo diário de superávit e déficit", A3)
     left, right = 16 * mm, width - 16 * mm
     card_top = height - 48 * mm
-    card_h = 22 * mm
+    card_h = 32 * mm
     cards = [
       ("Basal", float(totals.get("basal_kcal") or 0), "#0f766e"),
       ("Ativo", float(totals.get("active_kcal") or 0), "#2563eb"),
@@ -929,11 +929,11 @@ def _pdf_energy_balance_page(pdf, dataset):
       x = left + idx * (card_w + gap)
       pdf.setFillColor(colors.HexColor("#f8fafc")); pdf.roundRect(x, card_top - card_h, card_w, card_h, 3, stroke=0, fill=1)
       pdf.setStrokeColor(colors.HexColor("#dbeafe")); pdf.roundRect(x, card_top - card_h, card_w, card_h, 3, stroke=1, fill=0)
-      pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica-Bold", 8); pdf.drawString(x + 4, card_top - 8, label)
-      pdf.setFillColor(colors.HexColor(color)); pdf.setFont("Helvetica-Bold", 13); pdf.drawString(x + 4, card_top - 16, f"{value:,.0f}".replace(",", "."))
-      pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 7); pdf.drawString(x + 4, card_top - 21, "kcal no período")
-    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 8)
-    pdf.drawString(left, card_top - card_h - 5, f"Dias com superávit: {int(totals.get('superavit_days') or 0)} · dias com déficit: {int(totals.get('deficit_days') or 0)}")
+      pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica-Bold", 11); pdf.drawString(x + 7, card_top - 11, label)
+      pdf.setFillColor(colors.HexColor(color)); pdf.setFont("Helvetica-Bold", 18); pdf.drawString(x + 7, card_top - 22, f"{value:,.0f}".replace(",", "."))
+      pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 9); pdf.drawString(x + 7, card_top - 28, "kcal no período")
+    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 9)
+    pdf.drawString(left, card_top - card_h - 9, f"Dias com superávit: {int(totals.get('superavit_days') or 0)} · dias com déficit: {int(totals.get('deficit_days') or 0)}")
 
     chart_left, chart_right = left + 2, right - 2
     chart_bottom, chart_top_y = 42 * mm, card_top - card_h - 14
