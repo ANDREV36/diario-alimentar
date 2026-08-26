@@ -678,8 +678,8 @@ def report_period_data(user_id, start, end):
         "energy": {"days": energy_days, "totals": energy_totals},
     }
 
-def _pdf_header(pdf, title, subtitle):
-    width, height = landscape(A4)
+def _pdf_header(pdf, title, subtitle, page_size=None):
+    width, height = landscape(page_size or A4)
     pdf.setFillColor(colors.HexColor("#0b1728"))
     pdf.rect(0, height - 38 * mm, width, 38 * mm, stroke=0, fill=1)
     pdf.setFillColor(colors.white)
@@ -837,7 +837,10 @@ def _pdf_compact_chart(pdf, metric, chart_days, goals, x, y, width, height):
     for index, (px, py) in enumerate(points):
         pdf.setFillColor(colors.HexColor(color)); pdf.circle(px, py, 1.25, stroke=0, fill=1)
         if index % show_every == 0 or index == count - 1:
-            pdf.setFont("Helvetica-Bold", 3.6); pdf.drawCentredString(px, min(top + 3, py + 3), _compact_number(values[index], unit))
+            pdf.setFont("Helvetica-Bold", 3.6)
+            label_y = py + 4 if py <= top - 10 else py - 8
+            label_y = max(bottom + 4, min(top - 4, label_y))
+            pdf.drawCentredString(px, label_y, _compact_number(values[index], unit))
             pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 3.5); pdf.drawCentredString(px, bottom - 6, chart_days[index]["label"])
 
 def _pdf_one_page_report(pdf, dataset):
@@ -870,10 +873,10 @@ def _pdf_one_page_report(pdf, dataset):
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10243a")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 4.2), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("FONTSIZE", (0, 1), (-1, -2), 3.7), ("GRID", (0, 0), (-1, -1), .16, colors.HexColor("#cbd5e1")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEADING", (0, 0), (-1, -1), 5.2), ("FONTSIZE", (0, 1), (-1, -2), 3.7), ("GRID", (0, 0), (-1, -1), .16, colors.HexColor("#cbd5e1")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f8fafc")]), ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#dbeafe")),
         ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"), ("FONTSIZE", (0, -1), (-1, -1), 3.8),
-        ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
     _, table_height = table.wrap(usable, 230)
     table_y = height - 29 * mm - table_height
@@ -905,7 +908,7 @@ def _pdf_energy_balance_page(pdf, dataset):
     energy = dataset.get("energy") or {}
     days = energy.get("days") or []
     totals = energy.get("totals") or {}
-    width, height = _pdf_header(pdf, "RESUMO ENERGÉTICO", "Basal + ativo - consumido · comparativo diário de superávit e déficit")
+    width, height = _pdf_header(pdf, "RESUMO ENERGÉTICO", "Basal + ativo - consumido · comparativo diário de superávit e déficit", A3)
     left, right = 16 * mm, width - 16 * mm
     card_top = height - 48 * mm
     card_h = 22 * mm
@@ -2397,7 +2400,7 @@ async function loadPeriod(){
       periodCard("fibra_g","Fibras","🌱",j.daily.fibra_g,g.fibras_g,"g",days,false,j.start,j.end)+
       periodCard("sodio_mg","Sódio","🧂",j.daily.sodio_mg,g.sodio_mg,"mg",days,true,j.start,j.end)+
       periodCard("","Água","💧",j.water,g.agua_ml,"ml",days,false,j.start,j.end)+
-      (()=>{const e=j.energy||{},tot=e.totals||{},rows=e.days||[];const maxSaldo=Math.max(1,...rows.map(x=>Math.abs(Number(x.saldo_kcal||0))));return `<h3 style="margin:14px 0 8px">⚖️ Balanço energético do período</h3><div style="padding:11px;border-radius:12px;background:#eef2ff;color:#1e293b;font-size:12px;line-height:1.5"><b>Basal:</b> ${fmt(tot.basal_kcal||0)} kcal · <b>Ativo:</b> ${fmt(tot.active_kcal||0)} kcal · <b>Consumido:</b> ${fmt(tot.consumed_kcal||0)} kcal<br><b>Saldo:</b> ${fmt(tot.saldo_kcal||0)} kcal (${Number(tot.saldo_kcal||0)>=0?"superávit":"déficit"}) · superávit em ${Number(tot.superavit_days||0)} dia(s) e déficit em ${Number(tot.deficit_days||0)} dia(s)</div><div style="margin-top:9px;display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,rows.length))},minmax(26px,1fr));gap:6px;align-items:stretch;height:195px;padding:10px;background:#0f172a;border-radius:12px">${rows.map(x=>{const v=Number(x.saldo_kcal||0),up=v>=0,p=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));return `<div title='${x.label}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${up?"#86efac":"#fecdd3"}'>${fmt(v)}</small><div style='display:flex;align-items:${up?"flex-end":"flex-start"};height:130px;width:100%'><div style='width:100%;height:${p}%;min-height:5px;background:${up?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)"};border-radius:${up?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${x.label}</small></div>`}).join("")}</div><small style="display:block;color:#9fb0c4;margin-top:6px">Saldo diário: verde = superávit, rosa = déficit. Fórmula: basal + ativo - consumido.</small>`})()+
+      (()=>{const e=j.energy||{},tot=e.totals||{},rows=e.days||[];const maxSaldo=Math.max(1,...rows.map(x=>Math.abs(Number(x.saldo_kcal||0))));return `<h3 style="margin:14px 0 8px">⚖️ Balanço energético do período</h3><div style="padding:11px;border-radius:12px;background:#eef2ff;color:#1e293b;font-size:12px;line-height:1.5"><b>Basal:</b> ${fmt(tot.basal_kcal||0)} kcal · <b>Ativo:</b> ${fmt(tot.active_kcal||0)} kcal · <b>Consumido:</b> ${fmt(tot.consumed_kcal||0)} kcal<br><b>Saldo:</b> ${fmt(tot.saldo_kcal||0)} kcal (${Number(tot.saldo_kcal||0)>0?"déficit calórico":Number(tot.saldo_kcal||0)<0?"superávit":"equilíbrio"}) · déficit em ${Number(tot.deficit_days||0)} dia(s) e superávit em ${Number(tot.superavit_days||0)} dia(s)</div><div style="margin-top:9px;display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,rows.length))},minmax(26px,1fr));gap:6px;align-items:stretch;height:195px;padding:10px;background:#0f172a;border-radius:12px">${rows.map(x=>{const v=Number(x.saldo_kcal||0),deficit=v>0,p=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));return `<div title='${x.label}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${deficit?"#fecdd3":"#86efac"}'>${fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:130px;width:100%'><div style='width:100%;height:${p}%;min-height:5px;background:${deficit?"linear-gradient(#fb7185,#be123c)":"linear-gradient(#22c55e,#15803d)"};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${x.label}</small></div>`}).join("")}</div><small style="display:block;color:#9fb0c4;margin-top:6px">Saldo diário: rosa = déficit calórico positivo, verde = superávit negativo. Fórmula: basal + ativo - consumido.</small>`})()+
       `<details style="margin-top:12px"><summary style="font-weight:bold;cursor:pointer">🔬 Ver micronutrientes</summary>
         <div class="metrics" style="margin-top:8px">${[
           ["calcio_mg","Cálcio","mg"],["magnesio_mg","Magnésio","mg"],["manganes_mg","Manganês","mg"],
@@ -2682,11 +2685,11 @@ class H(BaseHTTPRequestHandler):
             active=float((amap.get(ds) or {}).get("calorias_kcal") or 0)
             basal=float((amap.get(ds) or {}).get("basal_kcal") or basal_fallback or 0)
             saldo=basal+active-consumed
-            status="superavit" if saldo>=0 else "deficit"
-            if status=="superavit":
-              totals["superavit_days"]+=1
-            else:
+            status="deficit" if saldo>0 else "superavit" if saldo<0 else "equilibrio"
+            if status=="deficit":
               totals["deficit_days"]+=1
+            elif status=="superavit":
+              totals["superavit_days"]+=1
             totals["basal_kcal"]+=basal
             totals["active_kcal"]+=active
             totals["consumed_kcal"]+=consumed
@@ -2726,9 +2729,9 @@ class H(BaseHTTPRequestHandler):
                 active=float((amap.get(ds) or {}).get("calorias_kcal") or 0)
                 basal=float((amap.get(ds) or {}).get("basal_kcal") or basal_fallback or 0)
                 saldo=basal+active-consumed
-                status="superavit" if saldo>=0 else "deficit"
-                if status=="superavit": totals["superavit_days"]+=1
-                else: totals["deficit_days"]+=1
+                status="deficit" if saldo>0 else "superavit" if saldo<0 else "equilibrio"
+                if status=="deficit": totals["deficit_days"]+=1
+                elif status=="superavit": totals["superavit_days"]+=1
                 totals["basal_kcal"]+=basal;totals["active_kcal"]+=active;totals["consumed_kcal"]+=consumed;totals["saldo_kcal"]+=saldo
                 energy_days.append({"data":ds,"label":cur.strftime("%d/%m"),"basal_kcal":round(basal,2),"active_kcal":round(active,2),"consumed_kcal":round(consumed,2),"saldo_kcal":round(saldo,2),"status":status,"has_active_input":ds in amap})
                 cur+=timedelta(days=1)
