@@ -1391,6 +1391,7 @@ main{
       <button onclick="addWater(200)">💧 200 ml</button><button onclick="addWater(300)">💧 300 ml</button><button onclick="addWater(500)">💧 500 ml</button>
       <button onclick="addWater(750)">💧 750 ml</button><button onclick="addWater(1000)">💧 1 L</button><button onclick="customWater()">✏️ Outra</button>
     </div>
+    <div id="energyBalanceBox" style="margin-top:16px"></div>
   </div>
 </div></section>
 </main>
@@ -2228,7 +2229,7 @@ async function refresh(){
     items.innerHTML=consumed.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" "+esc(x.unidade||"g")+" · "+fmt(x.kcal)+" kcal</div></div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
     if(consumed.length){const toggle=document.getElementById("consumedFoodsToggle");items.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
     try{draw(partial,j.partial||{});}catch(e){console.error("nutrientes:",e)}
-    try{drawWater(Number(j.water||0),Number(goals.agua_ml||0),j.water_entries||[]);}catch(e){console.error("hidratação:",e)}
+    try{drawWater(Number(j.water||0),Number(goals.agua_ml||0),j.water_entries||[]);drawEnergyBalance(j.energy||{});}catch(e){console.error("hidratação:",e)}
     try{updateHeroFromDay({...j,goals});renderGoalCards({...j,goals});renderBottomProgress({...j,goals});}catch(e){console.error("resumo:",e)}
   }catch(e){console.error("refresh:",e)}
 }function pct(v,m){if(!m||m<=0)return 0;return Math.min(100,(v/m)*100)}
@@ -2286,6 +2287,16 @@ function drawWater(w,goal,entries=[]){
   const recordRows=entries.length?entries.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.10)"><span>💧 ${fmt(Number(x.quantidade_ml)/1000)} L <small style="color:#94a3b8">${esc(x.hora||'')}</small></span><button onclick="deleteWater(${x.id})" style="padding:5px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.15);background:#26364a;color:#fff">Excluir</button></div>`).join(''):`<div style="font-size:12px;color:#94a3b8;margin-top:7px">Nenhum registro de água.</div>`;
   document.getElementById("waterBox").innerHTML=`<div style="display:flex;justify-content:space-between"><b>💧 ${fmt(w/1000)} L</b><span>${fmt(goal/1000)} L meta</span></div><div class="waterVisual">${waterSilhouette(profileSex,p)}</div><div style="font-size:12px;color:#cbd5e1;text-align:center">${fmt(p)}% · ${fmt(Math.max(0,goal-w)/1000)} L restantes</div><div class="waterRecordsHeader"><b>Registros de hoje (${entries.length})</b><button id="waterRecordsToggle" class="waterRecordsToggle" onclick="toggleWaterRecords()" aria-expanded="false">VER REGISTROS ▼</button></div><div id="waterRecords" style="display:none">${recordRows}</div>`;
   setTimeout(()=>celebrateWaterGoal(p),40);
+}
+function drawEnergyBalance(energy){
+  const box=document.getElementById("energyBalanceBox");if(!box)return;
+  const basal=Number(energy?.basal_kcal||0),active=Number(energy?.active_kcal||0),consumed=Number(energy?.consumed_kcal||0),saldo=Number(energy?.saldo_kcal||0);
+  const deficit=saldo>0,surplus=saldo<0,equilibrium=!deficit&&!surplus;
+  const magnitude=Math.min(100,Math.max(4,Math.round(Math.abs(saldo)/Math.max(1,basal+active)*100)));
+  const label=deficit?"Déficit calórico":surplus?"Superávit calórico":"Equilíbrio energético";
+  const color=deficit?"#22c55e":surplus?"#ef4444":"#94a3b8";
+  const side=deficit?"right":"left";
+  box.innerHTML=`<div style="border-top:1px solid #ffffff18;padding-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b>⚖️ Saldo energético</b><strong style="color:${color}">${label}</strong></div><div style="font-size:12px;color:#cbd5e1;margin-top:5px">Basal ${fmt(basal)} + ativo ${fmt(active)} - consumido ${fmt(consumed)} = <b style="color:${color}">${fmt(saldo)} kcal</b></div><div style="position:relative;height:18px;margin:12px 2px 5px;background:#1e293b;border-radius:10px;overflow:hidden"><div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f8fafc;z-index:2"></div>${equilibrium?"":`<div style="position:absolute;top:3px;bottom:3px;${side}:50%;width:${magnitude/2}%;background:${color};border-radius:7px"></div>`}</div><div style="display:flex;justify-content:space-between;font-size:10px;color:#94a3b8"><span>Superávit (-)</span><span>Equilíbrio</span><span>Déficit (+)</span></div></div>`;
 }
 function toggleWaterRecords(){const box=document.getElementById("waterRecords"),btn=document.getElementById("waterRecordsToggle");if(!box||!btn)return;const open=box.style.display!=="none";box.style.display=open?"none":"block";btn.textContent=open?"VER REGISTROS ▼":"OCULTAR REGISTROS ▲";btn.setAttribute("aria-expanded",String(!open));}
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
