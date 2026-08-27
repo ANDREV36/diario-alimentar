@@ -51,7 +51,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V59 · Gordura corporal + gasto previsto + relatório limpo"
+APP_VERSION = "V62 · Educação dos objetivos + exclusão segura + micronutrientes"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -445,15 +445,24 @@ def init_db():
             nome TEXT NOT NULL,
             energia_kcal REAL, proteina_g REAL, carboidrato_g REAL,
             lipidios_g REAL, fibra_g REAL, colesterol_mg REAL,
-            calcio_mg REAL, magnesio_mg REAL, fosforo_mg REAL, ferro_mg REAL,
-            sodio_mg REAL, potassio_mg REAL, zinco_mg REAL, vitamina_c_mg REAL,
+            calcio_mg REAL, magnesio_mg REAL, manganes_mg REAL, fosforo_mg REAL, ferro_mg REAL,
+            sodio_mg REAL, potassio_mg REAL, cobre_mg REAL, zinco_mg REAL, vitamina_c_mg REAL,
+            tiamina_mg REAL, riboflavina_mg REAL, niacina_mg REAL, piridoxina_mg REAL,
             porcao_valor REAL, porcao_unidade TEXT, base_calculo TEXT DEFAULT '100g',
-            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(), atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(), atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            ativo BOOLEAN NOT NULL DEFAULT TRUE
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_alimentos_usuario_nome ON alimentos_usuario(usuario_id, nome)")
     c.execute("ALTER TABLE alimentos_usuario ADD COLUMN IF NOT EXISTS origem TEXT")
     c.execute("ALTER TABLE alimentos_usuario ADD COLUMN IF NOT EXISTS confianca_ia REAL")
+    c.execute("ALTER TABLE alimentos_usuario ADD COLUMN IF NOT EXISTS manganes_mg REAL")
+    c.execute("ALTER TABLE alimentos_usuario ADD COLUMN IF NOT EXISTS cobre_mg REAL")
+    c.execute("ALTER TABLE alimentos_usuario ADD COLUMN IF NOT EXISTS tiamina_mg REAL")
+    c.execute("ALTER TABLE alimentos_usuario ADD COLUMN IF NOT EXISTS riboflavina_mg REAL")
+    c.execute("ALTER TABLE alimentos_usuario ADD COLUMN IF NOT EXISTS niacina_mg REAL")
+    c.execute("ALTER TABLE alimentos_usuario ADD COLUMN IF NOT EXISTS piridoxina_mg REAL")
+    c.execute("ALTER TABLE alimentos_usuario ADD COLUMN IF NOT EXISTS ativo BOOLEAN NOT NULL DEFAULT TRUE")
 
     prow = c.execute(
         "SELECT id FROM perfil WHERE id=1"
@@ -1590,11 +1599,11 @@ def find_plate_food(name, user_id):
         return None
     pc = ddb()
     try:
-        rows = pc.execute("SELECT id,nome,energia_kcal,proteina_g,carboidrato_g,lipidios_g FROM alimentos_usuario WHERE usuario_id=? AND LOWER(nome)=LOWER(?)", (user_id, query)).fetchall()
+        rows = pc.execute("SELECT id,nome,energia_kcal,proteina_g,carboidrato_g,lipidios_g FROM alimentos_usuario WHERE usuario_id=? AND ativo=TRUE AND LOWER(nome)=LOWER(?)", (user_id, query)).fetchall()
         for row in rows:
             if has_usable_energy(row):
                 return {"id": -int(row["id"]), "nome": row["nome"]}
-        rows = pc.execute("SELECT id,nome,energia_kcal,proteina_g,carboidrato_g,lipidios_g FROM alimentos_usuario WHERE usuario_id=? AND LOWER(nome) LIKE LOWER(?) ORDER BY LENGTH(nome) LIMIT 8", (user_id, "%" + query + "%")).fetchall()
+        rows = pc.execute("SELECT id,nome,energia_kcal,proteina_g,carboidrato_g,lipidios_g FROM alimentos_usuario WHERE usuario_id=? AND ativo=TRUE AND LOWER(nome) LIKE LOWER(?) ORDER BY LENGTH(nome) LIMIT 8", (user_id, "%" + query + "%")).fetchall()
         for row in rows:
             if has_usable_energy(row):
                 return {"id": -int(row["id"]), "nome": row["nome"]}
@@ -1614,8 +1623,9 @@ def find_plate_food(name, user_id):
 
 ESTIMATED_NUTRIENT_FIELDS = [
     "energia_kcal", "proteina_g", "carboidrato_g", "lipidios_g", "fibra_g",
-    "colesterol_mg", "calcio_mg", "magnesio_mg", "fosforo_mg", "ferro_mg",
-    "sodio_mg", "potassio_mg", "zinco_mg", "vitamina_c_mg"
+    "colesterol_mg", "calcio_mg", "magnesio_mg", "manganes_mg", "fosforo_mg", "ferro_mg",
+    "sodio_mg", "potassio_mg", "cobre_mg", "zinco_mg", "vitamina_c_mg",
+    "tiamina_mg", "riboflavina_mg", "niacina_mg", "piridoxina_mg"
 ]
 
 def normalize_estimated_nutrients(raw):
@@ -2041,6 +2051,10 @@ main{
         <option value="ganhar">Ganhar massa muscular</option>
       </select>
     </label>
+    <div id="profileGoalEducation" style="display:none;margin-top:10px;padding:12px;border-radius:12px;background:#082f49;border:1px solid #38bdf855;color:#e0f2fe;font-size:12px;line-height:1.5">
+      <div id="profileGoalEducationText"></div>
+      <button id="profileGoalEducationOk" type="button" onclick="acknowledgeGoalEducation()" style="margin-top:10px;padding:9px 13px;border:0;border-radius:9px;background:#38bdf8;color:#082f49;font-weight:bold;cursor:pointer">OK, ENTENDI</button>
+    </div>
     <div id="profileEstimate" style="display:none;margin-top:12px;padding:11px;border-radius:12px;background:#ffffff08;border:1px solid #ffffff14;font-size:12px"></div>
     <div style="display:flex;gap:8px;margin-top:14px">
       <button onclick="calculateProfileGoals()" style="flex:1;padding:12px;border:1px solid #ffffff25;border-radius:10px;background:#16263a;color:white;font-weight:bold">RECALCULAR METAS</button>
@@ -2165,13 +2179,14 @@ main{
 
 <div id="foodModal" style="display:none;position:fixed;inset:0;background:#0008;z-index:50;overflow:auto;padding:18px">
   <div style="max-width:680px;margin:20px auto;background:#111827;color:#f8fafc;border:1px solid #334155;border-radius:16px;padding:16px">
-    <h2>Editar alimento da base</h2>
+    <h2>Editar meu alimento</h2>
     <div style="font-size:12px;color:#cbd5e1;margin-bottom:10px">
-      Os valores abaixo são considerados por 100 g do alimento.
+      Os valores abaixo são considerados por 100 g do alimento. Se este alimento já tiver sido usado, a exclusão apenas o desativará para preservar seu histórico.
     </div>
     <div id="foodForm"></div>
     <div style="display:flex;gap:8px;margin-top:14px">
       <button onclick="closeFoodModal()" style="flex:1;padding:12px;border:1px solid #475569;border-radius:10px;background:#1e293b;color:#f8fafc">CANCELAR</button>
+      <button onclick="deleteChosenFood()" style="flex:1;padding:12px;border:1px solid #fecaca;border-radius:10px;background:#7f1d1d;color:#fff;font-weight:bold">EXCLUIR</button>
       <button onclick="saveFood()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#111827;color:#fff;font-weight:bold">SALVAR</button>
     </div>
   </div>
@@ -2219,6 +2234,8 @@ async function loadProfile(){
     document.getElementById('profileSex').value=j.sexo||'';
     document.getElementById('profileActivity').value=j.atividade||'';
     document.getElementById('profileGoal').value=j.objetivo||'';
+    syncGoalEducationUI();
+    if(j.objetivo)acknowledgeGoalEducation();
     renderProfileGreeting();
     if(window.lastDaySnapshot){drawWater(Number(window.lastDaySnapshot.water||0),Number((window.lastDaySnapshot.goals||{}).agua_ml||0),window.lastDaySnapshot.water_entries||[]);}
     if(!profileName) openProfile(true);
@@ -2238,7 +2255,41 @@ function updateRateHelp(goal){
   else if(goal==='ganhar'){el.placeholder='Ex.: 0,2 kg/semana';el.max=.5}
   else {el.placeholder='0 kg/semana';el.value='0';el.max=0}
 }
+const goalEducationText={
+  manter:`<b>Manter o peso</b><br>A meta calórica fica próxima do gasto diário estimado. O peso pode oscilar naturalmente por água, horário, ciclo menstrual, sal e conteúdo intestinal; manter não significa ter exatamente o mesmo número todos os dias.`,
+  perder:`<b>Perder gordura</b><br>A meta fica abaixo do gasto diário estimado para favorecer a redução gradual do peso, priorizando a perda de gordura. O ritmo informado é uma estimativa de planejamento; preserve proteína, alimentação adequada, sono e atividade física.`,
+  ganhar:`<b>Ganhar massa muscular</b><br>A meta fica acima do gasto diário estimado para favorecer o ganho de peso e de massa muscular. O excedente calórico não vira músculo automaticamente: sem treino de força, recuperação e proteína adequados, parte do ganho pode ser gordura. Escolha um nível de atividade que represente sua rotina real; o aplicativo não confirma se você treina.`,
+};
+let goalEducationAcknowledged=false;
+function syncGoalEducationUI(){
+  const goal=document.getElementById('profileGoal')?.value||'';
+  const box=document.getElementById('profileGoalEducation'),text=document.getElementById('profileGoalEducationText'),button=document.getElementById('profileGoalEducationOk');
+  goalEducationAcknowledged=false;
+  if(button){button.textContent='OK, ENTENDI';button.style.background='#38bdf8';button.style.color='#082f49'}
+  if(box)box.style.borderColor='#38bdf855';
+  if(!box||!text)return;
+  if(!goal){box.style.display='none';text.innerHTML='';return}
+  text.innerHTML=(goalEducationText[goal]||'')+`<div style="margin-top:9px;padding-top:8px;border-top:1px solid #38bdf855"><b>Como a meta é calculada:</b> o metabolismo basal é estimado separadamente. O aplicativo calcula o gasto diário estimado considerando o basal e o nível de atividade, e só depois ajusta as calorias conforme o objetivo. O basal não é aumentado artificialmente.<br><small style="color:#bae6fd">Estas são estimativas educativas, não uma prescrição médica. Pessoas com condições de saúde, gestantes, lactantes, menores de idade, atletas ou histórico de transtorno alimentar devem buscar orientação profissional.</small></div>`;
+  box.style.display='block';
+}
+function acknowledgeGoalEducation(){
+  goalEducationAcknowledged=true;
+  const box=document.getElementById('profileGoalEducation'),button=document.getElementById('profileGoalEducationOk');
+  if(button){button.textContent='CONFIRMADO';button.style.background='#22c55e';button.style.color='#052e16'}
+  if(box)box.style.borderColor='#22c55e88';
+}
+function ensureGoalEducationAcknowledged(){
+  const goal=document.getElementById('profileGoal')?.value||'';
+  if(!goal){alert('Selecione um objetivo.');return false}
+  if(!goalEducationAcknowledged){
+    syncGoalEducationUI();
+    alert('Leia a orientação do objetivo e toque em “OK, ENTENDI” antes de continuar.');
+    return false;
+  }
+  return true;
+}
 function calculateProfileGoals(){
+  if(!ensureGoalEducationAcknowledged())return null;
   const age=Number(document.getElementById('profileAge').value);
   const weight=Number(document.getElementById('profileWeight').value);
   const height=Number(document.getElementById('profileHeight').value);
@@ -2325,6 +2376,7 @@ function calculateProfileGoals(){
   return window.profileCalculatedGoals;
 }
 async function saveProfile(){
+  if(!ensureGoalEducationAcknowledged())return;
   const name=document.getElementById('profileName').value.trim();
   if(!name){alert('Digite seu nome.');return;}
   const data={
@@ -2346,7 +2398,7 @@ async function saveProfile(){
   closeProfile();
   await refresh();
 }
-document.getElementById('profileGoal')?.addEventListener('change',e=>updateRateHelp(e.target.value));
+document.getElementById('profileGoal')?.addEventListener('change',e=>{updateRateHelp(e.target.value);syncGoalEducationUI()});
 let weightRecalcTimer=null;
 document.getElementById('profileWeight')?.addEventListener('input',()=>{
   clearTimeout(weightRecalcTimer);
@@ -2600,7 +2652,7 @@ async function loadPersonalLists(){
     box.innerHTML=fhtml+phtml;
   }catch(e){box.innerHTML=""}
 }
-const editFields=[["nome","Nome","text"],["energia_kcal","Calorias (kcal)","number"],["proteina_g","Proteína (g)","number"],["carboidrato_g","Carboidratos (g)","number"],["lipidios_g","Gorduras (g)","number"],["fibra_g","Fibras (g)","number"],["colesterol_mg","Colesterol (mg)","number"],["calcio_mg","Cálcio (mg)","number"],["magnesio_mg","Magnésio (mg)","number"],["fosforo_mg","Fósforo (mg)","number"],["ferro_mg","Ferro (mg)","number"],["sodio_mg","Sódio (mg)","number"],["potassio_mg","Potássio (mg)","number"],["zinco_mg","Zinco (mg)","number"],["vitamina_c_mg","Vitamina C (mg)","number"]];
+const editFields=[["nome","Nome","text"],["energia_kcal","Calorias (kcal)","number"],["proteina_g","Proteína (g)","number"],["carboidrato_g","Carboidratos (g)","number"],["lipidios_g","Gorduras (g)","number"],["fibra_g","Fibras (g)","number"],["colesterol_mg","Colesterol (mg)","number"],["calcio_mg","Cálcio (mg)","number"],["magnesio_mg","Magnésio (mg)","number"],["manganes_mg","Manganês (mg)","number"],["fosforo_mg","Fósforo (mg)","number"],["ferro_mg","Ferro (mg)","number"],["sodio_mg","Sódio (mg)","number"],["potassio_mg","Potássio (mg)","number"],["cobre_mg","Cobre (mg)","number"],["zinco_mg","Zinco (mg)","number"],["vitamina_c_mg","Vitamina C (mg)","number"],["tiamina_mg","B1 — Tiamina (mg)","number"],["riboflavina_mg","B2 — Riboflavina (mg)","number"],["niacina_mg","B3 — Niacina (mg)","number"],["piridoxina_mg","B6 — Piridoxina (mg)","number"]];
 function syncFoodBase(prefix){const unit=document.getElementById(prefix+"_base_unit")?.value==="ml"?"ml":"g",hint=document.getElementById(prefix+"_base_hint");if(hint)hint.textContent="Valores por 100 "+unit}
 
 async function resizePhoto(file){
@@ -2724,6 +2776,25 @@ async function openFoodEditor(){
 }
 function closeFoodModal(){
   document.getElementById("foodModal").style.display="none";
+}
+async function deleteChosenFood(){
+  if(!chosen || Number(chosen.id)>=0){alert("Somente alimentos pessoais podem ser excluídos.");return}
+  const foodId=Number(chosen.id),foodName=String(chosen.nome||"este alimento");
+  if(!confirm("Excluir "+foodName+"? Se ele já tiver sido usado, será apenas desativado para preservar o histórico."))return;
+  try{
+    const result=await api("/api/food/"+foodId,{method:"DELETE"});
+    closeFoodModal();
+    chosen=null;
+    searchEl.value="";
+    foods.innerHTML="";
+    sel.textContent="Nenhum alimento selecionado.";
+    searchCache.clear();
+    const edit=document.getElementById("editBase");
+    if(edit){edit.style.display="none";edit.disabled=false;}
+    await loadPersonalLists();
+    await refresh();
+    alert(result.message||"Operação concluída.");
+  }catch(e){alert("Não foi possível excluir o alimento: "+e.message)}
 }
 async function saveFood(){
   if(!chosen)return;
@@ -3349,11 +3420,11 @@ class H(BaseHTTPRequestHandler):
             try:
                 prefix=f"{q}%";contains=f"%{q}%"
                 base=list(nc.execute("SELECT id,nome,'g' AS unidade FROM alimentos WHERE nome LIKE ? COLLATE NOCASE ORDER BY nome LIMIT 30",(prefix,)).fetchall())
-                own=list(pc.execute("SELECT -id AS id,nome,CASE WHEN base_calculo='100ml' OR LOWER(COALESCE(porcao_unidade,''))='ml' THEN 'ml' ELSE 'g' END AS unidade FROM alimentos_usuario WHERE usuario_id=? AND nome ILIKE ? ORDER BY nome LIMIT 30",(self.user["id"],prefix)).fetchall())
+                own=list(pc.execute("SELECT -id AS id,nome,CASE WHEN base_calculo='100ml' OR LOWER(COALESCE(porcao_unidade,''))='ml' THEN 'ml' ELSE 'g' END AS unidade FROM alimentos_usuario WHERE usuario_id=? AND ativo=TRUE AND nome ILIKE ? ORDER BY nome LIMIT 30",(self.user["id"],prefix)).fetchall())
                 if len(base)<20:
                     extra=nc.execute("SELECT id,nome,'g' AS unidade FROM alimentos WHERE nome LIKE ? COLLATE NOCASE AND nome NOT LIKE ? COLLATE NOCASE ORDER BY nome LIMIT ?",(contains,prefix,30-len(base))).fetchall();base.extend(extra)
                 if len(own)<20:
-                    extra=pc.execute("SELECT -id AS id,nome,CASE WHEN base_calculo='100ml' OR LOWER(COALESCE(porcao_unidade,''))='ml' THEN 'ml' ELSE 'g' END AS unidade FROM alimentos_usuario WHERE usuario_id=? AND nome ILIKE ? AND nome NOT ILIKE ? ORDER BY nome LIMIT ?",(self.user["id"],contains,prefix,30-len(own))).fetchall();own.extend(extra)
+                    extra=pc.execute("SELECT -id AS id,nome,CASE WHEN base_calculo='100ml' OR LOWER(COALESCE(porcao_unidade,''))='ml' THEN 'ml' ELSE 'g' END AS unidade FROM alimentos_usuario WHERE usuario_id=? AND ativo=TRUE AND nome ILIKE ? AND nome NOT ILIKE ? ORDER BY nome LIMIT ?",(self.user["id"],contains,prefix,30-len(own))).fetchall();own.extend(extra)
             finally:
                 nc.close();pc.close()
             self.js({"foods":[dict(x) for x in own+base][:40]});return
@@ -3704,14 +3775,14 @@ class H(BaseHTTPRequestHandler):
                 client_args={"api_key":os.environ.get("OPENAI_API_KEY")}
                 if os.environ.get("OPENAI_API_BASE"):client_args["base_url"]=os.environ.get("OPENAI_API_BASE")
                 client=OpenAI(**client_args)
-                schema={"nome":"string ou null","porcao_valor":"number ou null","porcao_unidade":"g, ml ou null","base_calculo":"100g, 100ml ou por_porcao","energia_kcal":"number ou null","proteina_g":"number ou null","carboidrato_g":"number ou null","lipidios_g":"number ou null","fibra_g":"number ou null","colesterol_mg":"number ou null","calcio_mg":"number ou null","magnesio_mg":"number ou null","fosforo_mg":"number ou null","ferro_mg":"number ou null","sodio_mg":"number ou null","potassio_mg":"number ou null","zinco_mg":"number ou null","vitamina_c_mg":"number ou null"}
+                schema={"nome":"string ou null","porcao_valor":"number ou null","porcao_unidade":"g, ml ou null","base_calculo":"100g, 100ml ou por_porcao","energia_kcal":"number ou null","proteina_g":"number ou null","carboidrato_g":"number ou null","lipidios_g":"number ou null","fibra_g":"number ou null","colesterol_mg":"number ou null","calcio_mg":"number ou null","magnesio_mg":"number ou null","manganes_mg":"number ou null","fosforo_mg":"number ou null","ferro_mg":"number ou null","sodio_mg":"number ou null","potassio_mg":"number ou null","cobre_mg":"number ou null","zinco_mg":"number ou null","vitamina_c_mg":"number ou null","tiamina_mg":"number ou null","riboflavina_mg":"number ou null","niacina_mg":"number ou null","piridoxina_mg":"number ou null"}
                 prompt="Leia a tabela nutricional desta imagem. Retorne SOMENTE JSON válido com exatamente estas chaves: "+json.dumps(schema,ensure_ascii=False)+". Preserve os números da tabela e não invente valores. Se um campo não estiver legível, use null. Identifique se os valores são por 100 g, 100 ml ou por porção; não converta valores."
                 resp=client.chat.completions.create(model=VISION_MODEL,messages=[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":image,"detail":"high"}}]}],response_format={"type":"json_object"},max_tokens=1800)
                 raw=resp.choices[0].message.content or "{}";data=json.loads(raw)
                 original_base=data.get("base_calculo");portion=data.get("porcao_valor");unit=str(data.get("porcao_unidade") or "").lower();normalizado=False
                 if original_base=="por_porcao" and portion and float(portion)>0:
                     factor=100.0/float(portion)
-                    for key in ["energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","zinco_mg","vitamina_c_mg"]:
+                    for key in ["energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","manganes_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","cobre_mg","zinco_mg","vitamina_c_mg","tiamina_mg","riboflavina_mg","niacina_mg","piridoxina_mg"]:
                         if isinstance(data.get(key),(int,float)):data[key]=round(float(data[key])*factor,4)
                     data["base_calculo"]="100ml" if "ml" in unit else "100g";normalizado=True
                 allowed=set(schema);clean={k:data.get(k) for k in allowed};clean["base_calculo_original"]=original_base;clean["normalizado"]=normalizado;clean["confianca"]=float(data.get("confianca",0) or 0);self.js({"ok":True,"data":clean})
@@ -3864,7 +3935,7 @@ class H(BaseHTTPRequestHandler):
                 if not nome: raise ValueError("Nome do alimento é obrigatório.")
                 base_calculo="100ml" if str(data.get("base_calculo","")).lower()=="100ml" or str(data.get("porcao_unidade","")).lower()=="ml" else "100g"
                 data["base_calculo"]=base_calculo;data["porcao_unidade"]="ml" if base_calculo=="100ml" else "g"
-                allowed={"nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","zinco_mg","vitamina_c_mg","porcao_valor","porcao_unidade","base_calculo"}
+                allowed={"nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","manganes_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","cobre_mg","zinco_mg","vitamina_c_mg","tiamina_mg","riboflavina_mg","niacina_mg","piridoxina_mg","porcao_valor","porcao_unidade","base_calculo"}
                 fields=["usuario_id"];vals=[self.user["id"]]
                 for k,v in data.items():
                     if k in allowed and v is not None:
@@ -3899,7 +3970,7 @@ class H(BaseHTTPRequestHandler):
                         aid=int(raw_id)
                         if aid == 0: raise ValueError("Identificador inválido para alimento. Corrija o item antes de confirmar.")
                         if aid < 0:
-                            owned=c.execute("SELECT 1 FROM alimentos_usuario WHERE id=? AND usuario_id=?",(-aid,self.user["id"])).fetchone()
+                            owned=c.execute("SELECT 1 FROM alimentos_usuario WHERE id=? AND usuario_id=? AND ativo=TRUE",(-aid,self.user["id"])).fetchone()
                             if not owned: raise ValueError("Alimento pessoal não encontrado.")
                         else:
                             source=ndb()
@@ -3913,7 +3984,7 @@ class H(BaseHTTPRequestHandler):
                         if key in created:
                             aid=created[key]
                         else:
-                            existing=c.execute("SELECT id,nome,energia_kcal,proteina_g,carboidrato_g,lipidios_g FROM alimentos_usuario WHERE usuario_id=? AND LOWER(nome)=LOWER(?) LIMIT 1",(self.user["id"],name)).fetchone()
+                            existing=c.execute("SELECT id,nome,energia_kcal,proteina_g,carboidrato_g,lipidios_g FROM alimentos_usuario WHERE usuario_id=? AND ativo=TRUE AND LOWER(nome)=LOWER(?) LIMIT 1",(self.user["id"],name)).fetchone()
                             if existing:
                                 aid=-int(existing["id"]);name=existing["nome"]
                                 if not has_usable_energy(existing):
@@ -3954,7 +4025,7 @@ class H(BaseHTTPRequestHandler):
             if self.path.startswith("/api/food/"):
                 i=int(self.path.rsplit("/",1)[1])
                 if i>=0: raise ValueError("A base nutricional compartilhada não pode ser alterada por este cadastro.")
-                x=self.body();base_calculo="100ml" if str(x.get("base_calculo","")).lower()=="100ml" or str(x.get("porcao_unidade","")).lower()=="ml" else "100g";x["base_calculo"]=base_calculo;x["porcao_unidade"]="ml" if base_calculo=="100ml" else "g";allowed={"nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","zinco_mg","vitamina_c_mg","porcao_valor","porcao_unidade","base_calculo"};sets=[];vals=[]
+                x=self.body();base_calculo="100ml" if str(x.get("base_calculo","")).lower()=="100ml" or str(x.get("porcao_unidade","")).lower()=="ml" else "100g";x["base_calculo"]=base_calculo;x["porcao_unidade"]="ml" if base_calculo=="100ml" else "g";allowed={"nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","manganes_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","cobre_mg","zinco_mg","vitamina_c_mg","tiamina_mg","riboflavina_mg","niacina_mg","piridoxina_mg","porcao_valor","porcao_unidade","base_calculo"};sets=[];vals=[]
                 for k,v in x.items():
                     if k in allowed:
                         if k not in ("nome","porcao_unidade","base_calculo") and v is not None:v=float(v)
@@ -3970,6 +4041,30 @@ class H(BaseHTTPRequestHandler):
         if not user:return
         if not self.verify_csrf(): return
         try:
+            if self.path.startswith("/api/food/"):
+                i=int(self.path.rsplit("/",1)[1])
+                if i>=0: raise ValueError("A base nutricional compartilhada não pode ser excluída.")
+                food_id=-i
+                c=ddb()
+                try:
+                    food=c.execute("SELECT id FROM alimentos_usuario WHERE id=? AND usuario_id=?",(food_id,self.user["id"])).fetchone()
+                    if not food: raise ValueError("Alimento pessoal não encontrado.")
+                    used=c.execute("SELECT 1 FROM consumo WHERE alimento_id=? AND usuario_id=? LIMIT 1",(i,self.user["id"])).fetchone()
+                    c.execute("DELETE FROM favoritos WHERE usuario_id=? AND alimento_id=?",(self.user["id"],i))
+                    c.execute("DELETE FROM porcoes WHERE usuario_id=? AND alimento_id=?",(self.user["id"],i))
+                    if used:
+                        c.execute("UPDATE alimentos_usuario SET ativo=FALSE, atualizado_em=NOW() WHERE id=? AND usuario_id=?",(food_id,self.user["id"]))
+                        result={"ok":True,"mode":"deactivated","message":"Alimento desativado. Ele já foi usado no histórico e foi preservado para manter os cálculos antigos."}
+                    else:
+                        c.execute("DELETE FROM alimentos_usuario WHERE id=? AND usuario_id=?",(food_id,self.user["id"]))
+                        result={"ok":True,"mode":"deleted","message":"Alimento excluído da sua base pessoal."}
+                    c.commit()
+                except Exception:
+                    c.rollback()
+                    raise
+                finally:
+                    c.close()
+                self.js(result);return
             if self.path.startswith("/api/water/"):
                 i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM hidratacao WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True});return
             if self.path.startswith("/api/favorite/"):
