@@ -1,4 +1,4 @@
-# V63 — calendário alimentar mensal, educação dos objetivos, exclusão segura e micronutrientes
+# V65 — login corrigido, layout móvel protegido, calendário alimentar, educação e micronutrientes
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -51,7 +51,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V63 · Calendário alimentar mensal + educação + micronutrientes"
+APP_VERSION = "V65 · Login corrigido + layout móvel protegido + calendário + educação + micronutrientes"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -3449,18 +3449,6 @@ async function saveConsumeEdit(){
 }
 const searchEl=document.getElementById("search"),foods=document.getElementById("foods"),items=document.getElementById("items"),partial=document.getElementById("partial"),daily=document.getElementById("daily"),sel=document.getElementById("sel"),mealsEl=document.getElementById("meals"),pm=document.getElementById("pm");
 searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,40)};bootstrap();
-<script>
-(function(){
-  document.addEventListener('gesturestart',function(event){event.preventDefault()},{passive:false});
-  document.addEventListener('gesturechange',function(event){event.preventDefault()},{passive:false});
-  document.addEventListener('gestureend',function(event){event.preventDefault()},{passive:false});
-  let lastTouchEnd=0;
-  document.addEventListener('touchend',function(event){
-    const now=Date.now();
-    if(now-lastTouchEnd<=300)event.preventDefault();
-    lastTouchEnd=now;
-  },{passive:false});
-})();
 </script></body></html>
 """
 HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V55 · Diário Alimentar · Bebidas em ml").replace("V45 · DIÁRIO ALIMENTAR", "V55 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V55 · Diário Alimentar · Bebidas em ml</title>")
