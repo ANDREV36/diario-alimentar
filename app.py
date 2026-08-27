@@ -2009,7 +2009,7 @@ main{
   background:rgba(7,22,38,.64)!important;
 }
 
-.nutrient-source{cursor:pointer;position:relative}
+.nutrient-source,.period-nutrient-source{cursor:pointer;position:relative}
 #nutrientTooltip{
   display:none;position:fixed;z-index:300;
   width:min(380px,calc(100vw - 24px));
@@ -3073,7 +3073,7 @@ document.addEventListener("mouseout",e=>{
 
 /* Celular: toque no macro/micro abre a lista; a lista aceita swipe vertical. */
 document.addEventListener("click",e=>{
-  const el=e.target.closest(".nutrient-source");
+  const el=e.target.closest(".nutrient-source,.period-nutrient-source");
   if(el){
     e.preventDefault();
     clearTimeout(tipHideTimer);
@@ -3371,7 +3371,7 @@ function periodCard(key,label,icon,total,goal,unit,days,limit=false,start, end){
   const diff=target-total;
   const text=goal>0 ? (limit ? (diff>=0?`Dentro do limite · restam ${fmt(diff)} ${unit}`:`Acima do limite em ${fmt(-diff)} ${unit}`)
                      : (diff>=0?`Faltam ${fmt(diff)} ${unit}`:`Meta superada em ${fmt(-diff)} ${unit}`)) : "Meta não cadastrada";
-  return `<div class="metric nutrient-source" data-nutrient="${key}" data-start="${start}" data-end="${end}" style="margin-bottom:9px">
+  return `<div class="metric period-nutrient-source" data-nutrient="${key}" data-start="${start}" data-end="${end}" style="margin-bottom:9px">
     <small>${icon} ${label}</small>
     <b>${fmt(total)} ${unit} / ${fmt(target)} ${unit}</b>
     <div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden">
@@ -3410,7 +3410,7 @@ async function loadPeriod(){
           ["cobre_mg","Cobre","mg"],["zinco_mg","Zinco","mg"],["vitamina_c_mg","Vitamina C","mg"],
           ["tiamina_mg","B1","mg"],["riboflavina_mg","B2","mg"],["niacina_mg","B3","mg"],
           ["piridoxina_mg","B6","mg"],["colesterol_mg","Colesterol","mg"]
-        ].map(x=>`<div class="metric nutrient-source" data-nutrient="${x[0]}" data-start="${j.start}" data-end="${j.end}"><small>${x[1]} ⓘ</small><b>${fmt(j.daily[x[0]])} ${x[2]}</b><small>Média: ${fmt(Number(j.daily[x[0]]||0)/days)} ${x[2]}/dia</small></div>`).join("")}</div>
+        ].map(x=>`<div class="metric period-nutrient-source" data-nutrient="${x[0]}" data-start="${j.start}" data-end="${j.end}"><small>${x[1]} ⓘ</small><b>${fmt(j.daily[x[0]])} ${x[2]}</b><small>Média: ${fmt(Number(j.daily[x[0]]||0)/days)} ${x[2]}/dia</small></div>`).join("")}</div>
       </details>`;
     loadHistory(s,e);
   }catch(err){alert("Não foi possível carregar o período: "+err.message);}
