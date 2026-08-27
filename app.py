@@ -1,4 +1,4 @@
-# V56 FINAL — favoritos/porções recolhíveis, exclusão, consumo direto e data/horário visíveis
+# V63 — calendário alimentar mensal, educação dos objetivos, exclusão segura e micronutrientes
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -51,7 +51,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V62 · Educação dos objetivos + exclusão segura + micronutrientes"
+APP_VERSION = "V63 · Calendário alimentar mensal + educação + micronutrientes"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -672,7 +672,8 @@ def report_period_data(user_id, start, end):
         day_key = cursor.isoformat()
         nutrients = calc(by_day.get(day_key, []), user_id)
         nutrients["agua_ml"] = water_by_day.get(day_key, 0.0)
-        rows.append({"data": day_key, "label": cursor.strftime("%d/%m"), "values": nutrients})
+        foods = [{"nome": str(r.get("alimento_nome") or "Alimento"), "refeicao": str(r.get("refeicao") or ""), "quantidade_g": float(r.get("quantidade_g") or 0), "unidade": str(r.get("unidade") or "g")} for r in by_day.get(day_key, [])]
+        rows.append({"data": day_key, "label": cursor.strftime("%d/%m"), "values": nutrients, "foods": foods})
         entry = active_by_day.get(day_key) or {}
         consumed_kcal = float(nutrients.get("energia_kcal", 0) or 0)
         basal_kcal = float(entry.get("basal_kcal") or basal_fallback or 0)
@@ -873,6 +874,175 @@ def _pdf_compact_chart(pdf, metric, chart_days, goals, x, y, width, height):
         pdf.setFillColor(colors.HexColor(color))
         pdf.drawCentredString(px, label_y, _compact_number(values[index], unit))
         pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 6.5); pdf.drawCentredString(px, y + 5, chart_days[index]["label"])
+
+def _pdf_calendar_fit(text, font_name, font_size, max_width):
+    text = " ".join(str(text or "").split())
+    if stringWidth(text, font_name, font_size) <= max_width:
+        return text
+    suffix = "..."
+    while text and stringWidth(text + suffix, font_name, font_size) > max_width:
+        text = text[:-1]
+    return text.rstrip() + suffix
+
+
+def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
+    """Desenha uma página A3 paisagem por mês, com uma linha para cada semana."""
+    month_names = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+    month_label = f"{month_names[month_start.month - 1].capitalize()} de {month_start.year}"
+    width, height = _pdf_header(
+        pdf,
+        "CALENDÁRIO ALIMENTAR",
+        f"{dataset['name']} · {month_label} · consumo, água e saldo energético diário",
+        A3,
+    )
+    month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    grid_start = month_start - timedelta(days=month_start.weekday())
+    grid_end = month_end + timedelta(days=6 - month_end.weekday())
+    week_count = ((grid_end - grid_start).days + 1) // 7
+    selected_start, selected_end = dataset["start"], dataset["end"]
+    day_rows = {date.fromisoformat(row["data"]): row for row in dataset.get("days", [])}
+    energy_rows = {date.fromisoformat(row["data"]): row for row in (dataset.get("energy") or {}).get("days", [])}
+    weekdays = ["SEG", "TER", "QUA", "QUI", "SEX", "SÁB", "DOM"]
+
+    left, right = 11 * mm, width - 11 * mm
+    saldo_width = 48 * mm
+    day_width = (right - left - saldo_width) / 7
+    top = height - 45 * mm
+    bottom = 19 * mm
+    weekday_height = 8 * mm
+    body_top = top - weekday_height
+    row_height = (body_top - bottom) / week_count
+
+    pdf.setFillColor(colors.HexColor("#64748b"))
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(left, height - 41 * mm, "Dias fora do período selecionado aparecem em cinza e não entram nos totais semanais.")
+
+    for column, label in enumerate(weekdays):
+        x = left + column * day_width
+        pdf.setFillColor(colors.HexColor("#10243a"))
+        pdf.rect(x, body_top, day_width, weekday_height, stroke=0, fill=1)
+        pdf.setFillColor(colors.white)
+        pdf.setFont("Helvetica-Bold", 7)
+        pdf.drawCentredString(x + day_width / 2, body_top + 3 * mm, label)
+
+    saldo_x = left + 7 * day_width
+    pdf.setFillColor(colors.HexColor("#0f766e"))
+    pdf.rect(saldo_x, body_top, saldo_width, weekday_height, stroke=0, fill=1)
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica-Bold", 6.3)
+    pdf.drawCentredString(saldo_x + saldo_width / 2, body_top + 4.3 * mm, "SALDO DA SEMANA")
+    pdf.setFont("Helvetica", 5.2)
+    pdf.drawCentredString(saldo_x + saldo_width / 2, body_top + 1.8 * mm, "basal + ativo - consumido")
+
+    for week_index in range(week_count):
+        cell_y = body_top - (week_index + 1) * row_height
+        week_dates = [grid_start + timedelta(days=week_index * 7 + column) for column in range(7)]
+        week_in_scope = [d for d in week_dates if selected_start <= d <= selected_end and d.month == month_start.month]
+        week_energy = [energy_rows[d] for d in week_in_scope if d in energy_rows]
+        weekly_basal = sum(float(row.get("basal_kcal") or 0) for row in week_energy)
+        weekly_active = sum(float(row.get("active_kcal") or 0) for row in week_energy)
+        weekly_consumed = sum(float(row.get("consumed_kcal") or 0) for row in week_energy)
+        weekly_saldo = weekly_basal + weekly_active - weekly_consumed
+        weekly_status = "DÉFICIT" if weekly_saldo > 0 else "SUPERÁVIT" if weekly_saldo < 0 else "EQUILÍBRIO"
+        if not week_in_scope:
+            weekly_status = "FORA DO PERÍODO"
+        saldo_color = "#dcfce7" if weekly_saldo > 0 and week_in_scope else "#ffe4e6" if weekly_saldo < 0 and week_in_scope else "#f1f5f9"
+        saldo_text_color = "#166534" if weekly_saldo > 0 and week_in_scope else "#be123c" if weekly_saldo < 0 and week_in_scope else "#64748b"
+
+        for column, current_date in enumerate(week_dates):
+            x = left + column * day_width
+            in_period = selected_start <= current_date <= selected_end
+            in_scope = in_period and current_date.month == month_start.month
+            row = day_rows.get(current_date)
+            energy = energy_rows.get(current_date)
+            background = "#ffffff" if in_scope else "#f1f5f9" if in_period else "#e2e8f0"
+            if in_scope and current_date.weekday() >= 5:
+                background = "#f8fafc"
+            pdf.setFillColor(colors.HexColor(background))
+            pdf.setStrokeColor(colors.HexColor("#cbd5e1"))
+            pdf.rect(x, cell_y, day_width, row_height, stroke=1, fill=1)
+
+            pdf.setFillColor(colors.HexColor("#0f172a" if in_scope else "#94a3b8"))
+            pdf.setFont("Helvetica-Bold", 8)
+            pdf.drawString(x + 3, cell_y + row_height - 12, str(current_date.day))
+            if not in_scope:
+                pdf.setFont("Helvetica", 4.6)
+                label = "fora do período" if not in_period else "outro mês"
+                pdf.drawRightString(x + day_width - 3, cell_y + row_height - 11, label)
+                continue
+
+            values = (row or {}).get("values", {})
+            consumed_kcal = float(values.get("energia_kcal") or 0)
+            water_ml = float(values.get("agua_ml") or 0)
+            foods = (row or {}).get("foods", [])
+            food_lines = []
+            meal_short = {"Café da manhã": "Café", "Almoço": "Alm", "Lanche": "L", "Jantar": "Jant", "Ceia": "Ceia"}
+            for food in foods:
+                meal = meal_short.get(food.get("refeicao", ""), food.get("refeicao", ""))
+                quantity = float(food.get("quantidade_g") or 0)
+                quantity_text = f"{quantity:.0f}" if quantity.is_integer() else f"{quantity:.1f}"
+                unit = str(food.get("unidade") or "g")
+                line = f"{meal}: {food.get('nome') or 'Alimento'} ({quantity_text} {unit})" if meal else f"{food.get('nome') or 'Alimento'} ({quantity_text} {unit})"
+                food_lines.append(line)
+            if not food_lines:
+                food_lines = ["Sem consumo registrado"]
+
+            food_font = 5.2
+            if len(food_lines) > 12:
+                food_font = max(3.6, 5.2 - (len(food_lines) - 12) * 0.12)
+            line_height = food_font + 1.0
+            available_lines = max(1, int((row_height - 31) / line_height))
+            if len(food_lines) > available_lines:
+                food_lines = food_lines[:max(1, available_lines - 1)] + [f"+ {len(food_lines) - max(1, available_lines - 1)} itens; veja a tabela"]
+            pdf.setFillColor(colors.HexColor("#334155"))
+            pdf.setFont("Helvetica", food_font)
+            text_y = cell_y + row_height - 22
+            for line in food_lines:
+                pdf.drawString(x + 3, text_y, _pdf_calendar_fit(line, "Helvetica", food_font, day_width - 6))
+                text_y -= line_height
+
+            pdf.setFillColor(colors.HexColor("#0f172a"))
+            pdf.setFont("Helvetica-Bold", 5.2)
+            pdf.drawString(x + 3, cell_y + 16, f"Cons.: {_compact_number(consumed_kcal, 'kcal')} kcal")
+            pdf.setFont("Helvetica", 5.1)
+            pdf.drawString(x + 3, cell_y + 9, f"Água: {water_ml / 1000:.2f} L")
+            if energy:
+                daily_saldo = float(energy.get("saldo_kcal") or 0)
+                daily_status = "DÉFICIT" if daily_saldo > 0 else "SUPERÁVIT" if daily_saldo < 0 else "EQUILÍBRIO"
+                daily_color = "#166534" if daily_saldo > 0 else "#be123c" if daily_saldo < 0 else "#475569"
+                pdf.setFillColor(colors.HexColor(daily_color))
+                pdf.setFont("Helvetica-Bold", 5.1)
+                pdf.drawString(x + 3, cell_y + 3, f"Saldo: {daily_saldo:+.0f} kcal · {daily_status}")
+
+        pdf.setFillColor(colors.HexColor(saldo_color))
+        pdf.setStrokeColor(colors.HexColor("#94a3b8"))
+        pdf.rect(saldo_x, cell_y, saldo_width, row_height, stroke=1, fill=1)
+        pdf.setFillColor(colors.HexColor(saldo_text_color))
+        pdf.setFont("Helvetica-Bold", 7)
+        pdf.drawString(saldo_x + 5, cell_y + row_height - 15, f"SEMANA {week_index + 1}")
+        pdf.setFont("Helvetica-Bold", 12)
+        saldo_display = f"{weekly_saldo:+,.0f} kcal".replace(",", ".") if week_in_scope else "—"
+        pdf.drawString(saldo_x + 5, cell_y + row_height - 31, saldo_display)
+        pdf.setFont("Helvetica-Bold", 7)
+        pdf.drawString(saldo_x + 5, cell_y + row_height - 43, weekly_status)
+        pdf.setFont("Helvetica", 6.1)
+        if week_in_scope:
+            pdf.drawString(saldo_x + 5, cell_y + row_height - 56, f"Basal: {_compact_number(weekly_basal, 'kcal')} kcal")
+            pdf.drawString(saldo_x + 5, cell_y + row_height - 66, f"Ativo: {_compact_number(weekly_active, 'kcal')} kcal")
+            pdf.drawString(saldo_x + 5, cell_y + row_height - 76, f"Consumido: {_compact_number(weekly_consumed, 'kcal')} kcal")
+        else:
+            pdf.drawString(saldo_x + 5, cell_y + row_height - 61, "Nenhum dia selecionado")
+        pdf.setFont("Helvetica", 5.7)
+        pdf.drawString(saldo_x + 5, cell_y + 8, "Positivo = déficit")
+        pdf.drawString(saldo_x + 5, cell_y + 1, "Negativo = superávit")
+
+    pdf.setStrokeColor(colors.HexColor("#d7e1ea"))
+    pdf.line(left, 10 * mm, right, 10 * mm)
+    pdf.setFillColor(colors.HexColor("#64748b"))
+    pdf.setFont("Helvetica", 6.5)
+    pdf.drawString(left, 6 * mm, "Cada dia: alimentos, quantidade, água e saldo = basal + ativo - consumido. Valores são estimativas de acompanhamento.")
+    pdf.drawRightString(right, 6 * mm, f"Página {page_no}")
+
 
 def _pdf_one_page_report(pdf, dataset):
     width, height = landscape(A3)
@@ -1579,9 +1749,15 @@ def build_food_report_pdf(user_id, start, end):
         raise RuntimeError("A geração de PDF não está disponível. Atualize as dependências do serviço.")
     dataset = report_period_data(user_id, start, end)
     output = io.BytesIO(); pdf = pdf_canvas.Canvas(output, pagesize=landscape(A3), pageCompression=1)
+    page_no = 1
     _pdf_one_page_report(pdf, dataset)
-    pdf.showPage()
+    pdf.showPage(); page_no += 1
     _pdf_energy_balance_page(pdf, dataset)
+    month_cursor = dataset["start"].replace(day=1)
+    while month_cursor <= dataset["end"]:
+        pdf.showPage(); page_no += 1
+        _pdf_month_calendar_page(pdf, dataset, month_cursor, page_no)
+        month_cursor = (month_cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
     pdf.save()
     return output.getvalue()
 
