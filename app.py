@@ -1,4 +1,4 @@
-# V65 — login corrigido, layout móvel protegido, calendário alimentar, educação e micronutrientes
+# V66 — detalhes nutricionais somente por clique, login corrigido, layout protegido, calendário, educação e micronutrientes
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -51,7 +51,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V65 · Login corrigido + layout móvel protegido + calendário + educação + micronutrientes"
+APP_VERSION = "V66 · Detalhes nutricionais somente por clique + login corrigido + layout protegido"
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -3026,15 +3026,6 @@ function tipPos(ev){
   nutrientTip.style.left=Math.max(p,Math.min(x,innerWidth-w-p))+"px";
   nutrientTip.style.top=Math.max(p,Math.min(y,innerHeight-h-p))+"px";
 }
-function scheduleHideNutrientTip(){
-  clearTimeout(tipHideTimer);
-  tipHideTimer=setTimeout(()=>{
-    if(!nutrientTip.matches(":hover") && !(activeNutrientSource&&activeNutrientSource.matches(":hover"))){
-      nutrientTip.style.display="none";
-      activeNutrientSource=null;
-    }
-  },150);
-}
 async function showNutrientTip(el,ev){
   const nutrient=el.dataset.nutrient;if(!nutrient)return;
   activeNutrientSource=el;clearTimeout(tipHideTimer);
@@ -3052,26 +3043,7 @@ async function showNutrientTip(el,ev){
     tipPos(ev);
   }catch(e){nutrientTip.innerHTML=`<div class="tipTitle">🔎 ${esc(nutrientLabel(nutrient))}</div><div class="tipEmpty">Não foi possível calcular as fontes.</div>`}
 }
-document.addEventListener("mouseover",e=>{
-  const el=e.target.closest(".nutrient-source");
-  if(el){clearTimeout(tipHideTimer);showNutrientTip(el,e);}
-  if(e.target.closest("#nutrientTooltip")) clearTimeout(tipHideTimer);
-});
-document.addEventListener("mousemove",e=>{
-  const el=e.target.closest(".nutrient-source");
-  if(el&&nutrientTip.style.display==="block") tipPos(e);
-});
-document.addEventListener("mouseout",e=>{
-  const el=e.target.closest(".nutrient-source");
-  if(el){
-    const to=e.relatedTarget;
-    if(to && nutrientTip.contains(to)) clearTimeout(tipHideTimer);
-    else if(!el.contains(to)) scheduleHideNutrientTip();
-  }
-  if(e.target.closest("#nutrientTooltip")&&!nutrientTip.contains(e.relatedTarget)) scheduleHideNutrientTip();
-});
-
-/* Celular: toque no macro/micro abre a lista; a lista aceita swipe vertical. */
+/* Os detalhes ficam fechados por padrão. A abertura ocorre somente no clique abaixo. */
 document.addEventListener("click",e=>{
   const el=e.target.closest(".nutrient-source");
   if(el){
@@ -3087,16 +3059,6 @@ document.addEventListener("click",e=>{
     activeNutrientSource=null;
   }
 });
-let mobileTouchNutrient=null;
-document.addEventListener("touchstart",e=>{
-  const el=e.target.closest(".nutrient-source");
-  if(el){
-    mobileTouchNutrient=el;
-    clearTimeout(tipHideTimer);
-    const r=el.getBoundingClientRect();
-    showNutrientTip(el,{clientX:r.left+r.width/2,clientY:r.bottom+8});
-  }
-},{passive:true});
 nutrientTip.addEventListener("touchstart",e=>{
   clearTimeout(tipHideTimer);
   e.stopPropagation();
