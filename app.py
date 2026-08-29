@@ -366,10 +366,14 @@ def init_db():
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_eventos_usuario_criado ON eventos_usuario(usuario_id, criado_em)")
-    if ADMIN_EMAIL and ADMIN_PASSWORD:
-        admin_hash = _hash_password(ADMIN_PASSWORD)
-        c.execute("""INSERT INTO usuarios(email,senha_hash,papel) VALUES(?,?, 'admin')
-                     ON CONFLICT(email) DO UPDATE SET papel='admin'""", (ADMIN_EMAIL, admin_hash))
+    # O administrador é um usuário normal já cadastrado.
+    # Basta informar o e-mail ADMIN_EMAIL no ambiente do Render.
+    # Não é necessário criar outra senha nem substituir a senha existente.
+    if ADMIN_EMAIL:
+        c.execute(
+            "UPDATE usuarios SET papel='admin' WHERE LOWER(email)=?",
+            (ADMIN_EMAIL,)
+        )
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS sessoes(
