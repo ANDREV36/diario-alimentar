@@ -51,7 +51,9 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V65 · Login corrigido + layout móvel protegido + calendário + educação + micronutrientes"
+APP_VERSION = "V66 · Painel administrativo + usuários online + bloqueio + métricas"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
 MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
@@ -168,7 +170,7 @@ def validate_image_data(image_data):
         raise ValueError("Imagem inválida.")
     if not raw or len(raw) > MAX_IMAGE_DECODED:
         raise ValueError("A imagem deve ter no máximo 5 MB.")
-    valid_magic = raw.startswith(b"\xff\xd8\xff") or raw.startswith(b"\x89PNG\r\n\x1a\n") or raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
+    valid_magic = raw.startswith(b"\xff\xd8\xff") or raw.startswith(b"\x89PNG\r\x1a") or raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
     if not valid_magic:
         raise ValueError("O arquivo de imagem não é válido.")
 
@@ -350,6 +352,25 @@ def init_db():
             criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
+    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS papel TEXT NOT NULL DEFAULT 'user'")
+    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS bloqueado BOOLEAN NOT NULL DEFAULT FALSE")
+    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS ultimo_acesso TIMESTAMPTZ")
+    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS ultima_atividade TIMESTAMPTZ")
+    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS segundos_uso BIGINT NOT NULL DEFAULT 0")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS eventos_usuario(
+            id BIGSERIAL PRIMARY KEY,
+            usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            tipo TEXT NOT NULL,
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_eventos_usuario_criado ON eventos_usuario(usuario_id, criado_em)")
+    if ADMIN_EMAIL and ADMIN_PASSWORD:
+        admin_hash = _hash_password(ADMIN_PASSWORD)
+        c.execute("""INSERT INTO usuarios(email,senha_hash,papel) VALUES(?,?, 'admin')
+                     ON CONFLICT(email) DO UPDATE SET papel='admin'""", (ADMIN_EMAIL, admin_hash))
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS sessoes(
             id BIGSERIAL PRIMARY KEY,
@@ -578,15 +599,34 @@ def _ensure_user_records(c, user_id, migrate_legacy=False):
               (user_id, g.get('calorias_kcal',2300), g.get('proteina_g',180), g.get('carboidratos_g',220),
                g.get('gorduras_g',70), g.get('fibras_g',30), g.get('sodio_mg',2000), g.get('agua_ml',4000)))
 
+def _touch_user_activity(user_id, event_type=None, seconds=0):
+    c=ddb()
+    try:
+        c.execute("UPDATE usuarios SET ultima_atividade=NOW(), ultimo_acesso=COALESCE(ultimo_acesso,NOW()), segundos_uso=segundos_uso+? WHERE id=?", (max(0,int(seconds)), user_id))
+        if event_type:
+            c.execute("INSERT INTO eventos_usuario(usuario_id,tipo) VALUES(?,?)", (user_id,event_type))
+        c.commit()
+    finally:
+        c.close()
+
+def _require_admin(handler):
+    user=_current_user(handler)
+    if not user:
+        handler.js({"error":"Autenticação necessária"},401); return None
+    if user.get("papel") != "admin":
+        handler.js({"error":"Acesso administrativo não autorizado"},403); return None
+    handler.user=user
+    return user
+
 def _current_user(handler):
     token = _cookie_value(handler, SESSION_COOKIE)
     if not token:
         return None
     c = ddb()
     try:
-        row = c.execute('''SELECT u.id, u.email FROM sessoes s JOIN usuarios u ON u.id=s.usuario_id
+        row = c.execute('''SELECT u.id, u.email, u.papel, u.bloqueado FROM sessoes s JOIN usuarios u ON u.id=s.usuario_id
                            WHERE s.token_hash=? AND s.expira_em>NOW()''', (_token_hash(token),)).fetchone()
-        if not row:
+        if not row or row.get("bloqueado"):
             return None
         user = dict(row)
         _ensure_user_records(c, user['id'])
@@ -737,7 +777,7 @@ def _pdf_table(pdf, dataset, page_no):
         percent_values = []
         for key, goal_key, _, unit, _ in REPORT_METRICS:
             actual, goal = item["values"].get(key, 0), dataset["goals"].get(goal_key, 0)
-            cells.append(f"{_report_value(actual, unit)}\n{_report_value(goal, unit)}")
+            cells.append(f"{_report_value(actual, unit)}{_report_value(goal, unit)}")
             if float(goal or 0) > 0:
                 percent_values.append(float(actual or 0) / float(goal) * 100)
         cells.append(f"{sum(percent_values)/len(percent_values):.0f}%" if percent_values else "—")
@@ -748,7 +788,7 @@ def _pdf_table(pdf, dataset, page_no):
         actual = sum(float(item["values"].get(key, 0) or 0) for item in dataset["days"])
         goal = float(dataset["goals"].get(goal_key, 0) or 0) * period_days
         pct = actual / goal * 100 if goal > 0 else 0
-        total_cells.append(f"{_report_value(actual, unit)}\n{_report_value(goal, unit)} · {pct:.0f}%")
+        total_cells.append(f"{_report_value(actual, unit)}{_report_value(goal, unit)} · {pct:.0f}%")
     all_pct = []
     for key, goal_key, _, _, _ in REPORT_METRICS:
         goal = float(dataset["goals"].get(goal_key, 0) or 0) * period_days
@@ -1050,7 +1090,7 @@ def _pdf_one_page_report(pdf, dataset):
     pdf.setFillColor(colors.white); pdf.setFont("Helvetica-Bold", 15); pdf.drawString(12 * mm, height - 12 * mm, "RESUMO DE ALIMENTAÇÃO")
     pdf.setFillColor(colors.HexColor("#bfdbfe")); pdf.setFont("Helvetica", 6.4)
     pdf.drawString(12 * mm, height - 18 * mm, f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')} · consumo diário, metas e acumulados")
-    header = ["Dia"] + [f"{metric[2]}\n{metric[3]}" for metric in REPORT_METRICS] + ["Média\nmeta"]
+    header = ["Dia"] + [f"{metric[2]}{metric[3]}" for metric in REPORT_METRICS] + ["Médiameta"]
     table_rows = []
     for day in dataset["days"]:
         cells, percents = [day["label"]], []
@@ -2632,7 +2672,7 @@ async function ensureYesterdayActivePrompt(){
       "Consumido ontem: "+fmt(y.consumed_kcal||0)+" kcal",
       "",
       "Exemplo: 420"
-    ].join("\n");
+    ].join("");
     const raw=prompt(msg,"0");
     if(raw===null)return;
     const active=Number(String(raw).replace(",","."));
@@ -2708,6 +2748,7 @@ async function saveActiveHistory(event){
   }
 }
 function showApp(user,csrf=""){csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>ensureWeeklyActiveHistory()).catch(e=>console.error("carregamento inicial:",e))}
+setInterval(()=>{if(currentUserId)api("/api/heartbeat",{headers:{"X-CSRF-Token":csrfToken}}).catch(()=>{})},30000);
 async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function logout(){try{await api("/api/auth/logout",{method:"POST"})}finally{location.reload()}}
@@ -3453,6 +3494,8 @@ searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,40
 """
 HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V55 · Diário Alimentar · Bebidas em ml").replace("V45 · DIÁRIO ALIMENTAR", "V55 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V55 · Diário Alimentar · Bebidas em ml</title>")
 
+ADMIN_HTML = r"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Painel Administrativo</title><style>body{font-family:Arial,sans-serif;margin:0;background:#07111f;color:#e5eef8}main{max-width:1200px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:22px}.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.card{background:#0b1728;border:1px solid #ffffff18;border-radius:14px;padding:16px}.card b{display:block;font-size:28px;margin-top:7px}.muted{color:#94a3b8;font-size:12px}table{width:100%;border-collapse:collapse;margin-top:18px;background:#0b1728;border-radius:14px;overflow:hidden}th,td{padding:11px;border-bottom:1px solid #ffffff12;text-align:left;font-size:13px}th{color:#94a3b8;font-size:11px;text-transform:uppercase}.on{color:#4ade80}.off{color:#94a3b8}.blocked{color:#fb7185}button{border:0;border-radius:8px;padding:8px 11px;cursor:pointer;font-weight:bold}button.block{background:#7f1d1d;color:#fff}button.unblock{background:#166534;color:#fff}@media(max-width:800px){.cards{grid-template-columns:repeat(2,1fr)}table{display:block;overflow:auto;white-space:nowrap}.top{align-items:flex-start;flex-direction:column}}</style></head><body><main><div class="top"><div><h1>🔐 Painel Administrativo</h1><div class="muted">Controle de usuários e utilização do Diário Alimentar</div></div><button id="refresh">Atualizar</button></div><section class="cards"><div class="card">Usuários<b id="total">—</b></div><div class="card">Online agora<b id="online">—</b></div><div class="card">Novos hoje<b id="today">—</b></div><div class="card">Ativos 24h<b id="active24">—</b></div><div class="card">Bloqueados<b id="blocked">—</b></div></section><table><thead><tr><th>ID</th><th>E-mail</th><th>Cadastro</th><th>Último acesso</th><th>Atividade</th><th>Uso</th><th>Status</th><th>Ação</th></tr></thead><tbody id="users"><tr><td colspan="8">Carregando...</td></tr></tbody></table></main><script>async function api(u,o={}){const r=await fetch(u,o);const j=await r.json();if(!r.ok)throw Error(j.error||'Erro');return j}function fmt(d){return d?new Date(d).toLocaleString('pt-BR'):'—'}function usage(s){s=Number(s||0);return s<60?s+'s':Math.floor(s/60)+' min'}async function load(){try{const [st,us]=await Promise.all([api('/api/admin/stats'),api('/api/admin/users')]);for(const k of ['total','online','today','active24','blocked'])document.getElementById(k).textContent=st[k];document.getElementById('users').innerHTML=us.users.map(u=>{const online=!u.bloqueado&&u.ultima_atividade&&Date.now()-new Date(u.ultima_atividade).getTime()<90000;return '<tr><td>'+u.id+'</td><td>'+u.email+(u.papel==='admin'?' <b>ADMIN</b>':'')+'</td><td>'+fmt(u.criado_em)+'</td><td>'+fmt(u.ultimo_acesso)+'</td><td>'+fmt(u.ultima_atividade)+'</td><td>'+usage(u.segundos_uso)+'</td><td class="'+(u.bloqueado?'blocked':online?'on':'off')+'">'+(u.bloqueado?'BLOQUEADO':online?'ONLINE':'OFFLINE')+'</td><td>'+(u.papel==='admin'?'—':u.bloqueado?'<button class="unblock" data-id="'+u.id+'">Desbloquear</button>':'<button class="block" data-id="'+u.id+'">Bloquear</button>')+'</td></tr>'}).join('');document.querySelectorAll('[data-id]').forEach(b=>b.addEventListener('click',async()=>{b.disabled=true;await api('/api/admin/'+(b.classList.contains('block')?'block':'unblock'),{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({user_id:Number(b.dataset.id)})});load()}))}catch(e){alert(e.message)}}async function csrf(){const j=await api('/api/me');return j.csrf||''}document.getElementById('refresh').addEventListener('click',load);load();setInterval(load,30000)</script></body></html>"""
+
 class H(BaseHTTPRequestHandler):
     def end_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -3550,6 +3593,30 @@ class H(BaseHTTPRequestHandler):
             b=HTML.encode();self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");self.send_header("Pragma","no-cache");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
         if p.path=="/health":
             self.send_response(200);self.send_header("Content-Type","text/plain; charset=utf-8");self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(APP_VERSION.encode("utf-8"));return
+        if p.path=="/admin":
+            user=_require_admin(self)
+            if not user:return
+            b=ADMIN_HTML.encode("utf-8");self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
+        if p.path=="/api/admin/stats":
+            user=_require_admin(self)
+            if not user:return
+            c=ddb()
+            try:
+                total=c.execute("SELECT COUNT(*) AS n FROM usuarios").fetchone()["n"]
+                blocked=c.execute("SELECT COUNT(*) AS n FROM usuarios WHERE bloqueado").fetchone()["n"]
+                online=c.execute("SELECT COUNT(*) AS n FROM usuarios WHERE bloqueado=FALSE AND ultima_atividade>NOW()-INTERVAL '90 seconds'").fetchone()["n"]
+                today=c.execute("SELECT COUNT(*) AS n FROM usuarios WHERE criado_em::date=CURRENT_DATE").fetchone()["n"]
+                active24=c.execute("SELECT COUNT(*) AS n FROM usuarios WHERE bloqueado=FALSE AND ultima_atividade>NOW()-INTERVAL '24 hours'").fetchone()["n"]
+            finally:c.close()
+            self.js({"total":int(total),"blocked":int(blocked),"online":int(online),"today":int(today),"active24":int(active24)});return
+        if p.path=="/api/admin/users":
+            user=_require_admin(self)
+            if not user:return
+            c=ddb()
+            try:
+                rows=c.execute("SELECT u.id,u.email,u.papel,u.bloqueado,u.criado_em,u.ultimo_acesso,u.ultima_atividade,u.segundos_uso,(SELECT COUNT(*) FROM eventos_usuario e WHERE e.usuario_id=u.id) AS eventos FROM usuarios u ORDER BY u.criado_em DESC").fetchall()
+            finally:c.close()
+            self.js({"users":[dict(r) for r in rows]});return
         if p.path=="/api/me":
             user=_current_user(self)
             if user:self.js({"authenticated":True,"user":user,"csrf":self.csrf_token()})
@@ -3573,6 +3640,12 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b)
             return
+
+        if p.path=="/api/heartbeat":
+            user=self.require_user()
+            if not user:return
+            _touch_user_activity(user["id"], "heartbeat", 30)
+            self.js({"ok":True});return
 
         user=self.require_user()
         if not user:return
@@ -3860,9 +3933,9 @@ class H(BaseHTTPRequestHandler):
             try:
                 if not self.enforce_rate_limit("login",5,900): return
                 x=self.body();email=str(x.get("email","")).strip().lower();password=str(x.get("password",""));c=ddb()
-                row=c.execute("SELECT id,email,senha_hash FROM usuarios WHERE email=?",(email,)).fetchone()
-                if not row or not _verify_password(password,row["senha_hash"]): raise ValueError("E-mail ou senha inválidos.")
-                token=secrets.token_urlsafe(32);c.execute("INSERT INTO sessoes(usuario_id,token_hash,expira_em) VALUES(?,?,NOW()+INTERVAL '30 days')",(row["id"],_token_hash(token)));c.commit()
+                row=c.execute("SELECT id,email,senha_hash,papel,bloqueado FROM usuarios WHERE email=?",(email,)).fetchone()
+                if not row or row.get("bloqueado") or not _verify_password(password,row["senha_hash"]): raise ValueError("E-mail ou senha inválidos.")
+                token=secrets.token_urlsafe(32);c.execute("INSERT INTO sessoes(usuario_id,token_hash,expira_em) VALUES(?,?,NOW()+INTERVAL '30 days')",(row["id"],_token_hash(token)));c.execute("UPDATE usuarios SET ultimo_acesso=NOW(), ultima_atividade=NOW() WHERE id=?",(row["id"],));c.execute("INSERT INTO eventos_usuario(usuario_id,tipo) VALUES(?,?)",(row["id"],"login"));c.commit()
                 self.js({"ok":True,"user":{"id":row["id"],"email":row["email"]},"csrf":_csrf_for_token(token)},headers={"Set-Cookie":_session_cookie(token)})
             except Exception as e:
                 if c:c.rollback()
@@ -3877,6 +3950,20 @@ class H(BaseHTTPRequestHandler):
                 if token:c.execute("DELETE FROM sessoes WHERE token_hash=?",(_token_hash(token),));c.commit()
             finally:c.close()
             self.js({"ok":True},headers={"Set-Cookie":_session_cookie("",0)});return
+        if self.path=="/api/admin/block" or self.path=="/api/admin/unblock":
+            user=_require_admin(self)
+            if not user:return
+            if not self.verify_csrf():return
+            try:
+                x=self.body();target=int(x.get("user_id"));blocked=self.path.endswith("/block")
+                if target==user["id"] and blocked: raise ValueError("O administrador não pode bloquear a própria conta.")
+                c=ddb()
+                c.execute("UPDATE usuarios SET bloqueado=? WHERE id=?",(blocked,target))
+                if blocked:c.execute("DELETE FROM sessoes WHERE usuario_id=?",(target,))
+                c.execute("INSERT INTO eventos_usuario(usuario_id,tipo) VALUES(?,?)",(target,"blocked" if blocked else "unblocked"));c.commit();c.close();self.js({"ok":True})
+            except Exception as e:self.js({"error":str(e)},400)
+            return
+
         user=self.require_user()
         if not user:return
         if not self.verify_csrf(): return
