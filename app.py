@@ -955,7 +955,49 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
     bottom = 19 * mm
     weekday_height = 8 * mm
     body_top = top - weekday_height
-    row_height = (body_top - bottom) / week_count
+
+    # A altura de cada semana passa a ser definida pelo dia mais extenso
+    # daquela semana. Assim, os 7 dias de uma mesma semana sempre têm
+    # exatamente a mesma altura, sem cortar a lista de alimentos.
+    week_data = []
+    for week_index in range(week_count):
+        week_dates = [grid_start + timedelta(days=week_index * 7 + column) for column in range(7)]
+        max_foods = 0
+        for current_date in week_dates:
+            in_period = selected_start <= current_date <= selected_end
+            in_scope = in_period and current_date.month == month_start.month
+            if not in_scope:
+                continue
+            foods = (day_rows.get(current_date) or {}).get("foods", [])
+            max_foods = max(max_foods, len(foods))
+        # Espaço reservado para: dia + lista completa + consumo/água/saldo.
+        # Nunca usamos a altura para esconder itens; se necessário, a fonte
+        # da semana é reduzida de forma controlada.
+        food_font = max(3.4, min(5.2, 5.2 - max(0, max_foods - 12) * 0.08))
+        line_height = food_font + 1.0
+        required_height = max(55, 31 + max(1, max_foods) * line_height + 10)
+        week_data.append({"max_foods": max_foods, "food_font": food_font, "line_height": line_height, "required_height": required_height})
+
+    available_height = body_top - bottom
+    required_total = sum(item["required_height"] for item in week_data)
+    if required_total <= available_height:
+        row_heights = [item["required_height"] for item in week_data]
+    else:
+        # Mantém as semanas proporcionais ao conteúdo. Se houver muitos
+        # alimentos, reduzimos a tipografia apenas o necessário para que
+        # todas as semanas caibam na página, sem eliminar alimentos.
+        scale = available_height / required_total
+        row_heights = [max(45, item["required_height"] * scale) for item in week_data]
+        # Ajuste final para somar exatamente a área disponível.
+        excess = sum(row_heights) - available_height
+        if excess > 0:
+            largest = max(range(len(row_heights)), key=lambda i: row_heights[i])
+            row_heights[largest] = max(45, row_heights[largest] - excess)
+        # A tipografia acompanha a redução da semana, preservando todos os
+        # alimentos mesmo quando o período contém semanas muito extensas.
+        for item in week_data:
+            item["food_font"] = max(2.8, item["food_font"] * scale)
+            item["line_height"] = item["food_font"] + 1.0
 
     pdf.setFillColor(colors.HexColor("#64748b"))
     pdf.setFont("Helvetica", 7)
@@ -978,8 +1020,10 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
     pdf.setFont("Helvetica", 5.2)
     pdf.drawCentredString(saldo_x + saldo_width / 2, body_top + 1.8 * mm, "basal + ativo - consumido")
 
+    current_y = body_top
     for week_index in range(week_count):
-        cell_y = body_top - (week_index + 1) * row_height
+        row_height = row_heights[week_index]
+        cell_y = current_y - row_height
         week_dates = [grid_start + timedelta(days=week_index * 7 + column) for column in range(7)]
         week_in_scope = [d for d in week_dates if selected_start <= d <= selected_end and d.month == month_start.month]
         week_energy = [energy_rows[d] for d in week_in_scope if d in energy_rows]
@@ -1031,13 +1075,10 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
             if not food_lines:
                 food_lines = ["Sem consumo registrado"]
 
-            food_font = 5.2
-            if len(food_lines) > 12:
-                food_font = max(3.6, 5.2 - (len(food_lines) - 12) * 0.12)
-            line_height = food_font + 1.0
-            available_lines = max(1, int((row_height - 31) / line_height))
-            if len(food_lines) > available_lines:
-                food_lines = food_lines[:max(1, available_lines - 1)] + [f"+ {len(food_lines) - max(1, available_lines - 1)} itens; veja a tabela"]
+            week_cfg = week_data[week_index]
+            food_font = week_cfg["food_font"]
+            line_height = week_cfg["line_height"]
+            # Não truncar: todos os alimentos do dia são desenhados.
             pdf.setFillColor(colors.HexColor("#334155"))
             pdf.setFont("Helvetica", food_font)
             text_y = cell_y + row_height - 22
@@ -1079,6 +1120,7 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
         pdf.setFont("Helvetica", 5.7)
         pdf.drawString(saldo_x + 5, cell_y + 8, "Positivo = déficit")
         pdf.drawString(saldo_x + 5, cell_y + 1, "Negativo = superávit")
+        current_y = cell_y
 
     pdf.setStrokeColor(colors.HexColor("#d7e1ea"))
     pdf.line(left, 10 * mm, right, 10 * mm)
