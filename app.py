@@ -3807,9 +3807,15 @@ class H(BaseHTTPRequestHandler):
                     if not f or nutrient not in f.keys() or f[nutrient] is None: continue
                     amount=float(f[nutrient])*float(r["quantidade_g"])/100.0
                     if abs(amount)<0.000001: continue
-                    key=(aid,str(r["alimento_nome"]).strip().lower(),str(r.get("unidade","g")))
+                    # No detalhamento por período, o alimento deve aparecer uma única vez.
+                    # Não usamos o alimento_id na chave: registros do mesmo alimento podem
+                    # ter IDs diferentes (por exemplo, base geral versus base pessoal), mas
+                    # ainda assim precisam ser consolidados pelo nome exibido ao usuário.
+                    food_name = " ".join(str(r.get("alimento_nome") or "Alimento").split())
+                    food_unit = str(r.get("unidade") or "g").strip().lower() or "g"
+                    key=(food_name.casefold(), food_unit)
                     if key not in sources_by_food:
-                        sources_by_food[key]={"nome":r["alimento_nome"],"quantidade_g":0.0,"unidade":r.get("unidade","g"),"refeicao":"Período","data":f"{start} a {end}","valor":0.0}
+                        sources_by_food[key]={"nome":food_name,"quantidade_g":0.0,"unidade":food_unit,"refeicao":"Período","data":f"{start} a {end}","valor":0.0}
                     sources_by_food[key]["quantidade_g"]+=float(r["quantidade_g"])
                     sources_by_food[key]["valor"]+=amount
             finally:
