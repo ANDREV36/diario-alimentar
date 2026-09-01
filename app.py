@@ -1134,7 +1134,7 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
     pdf.drawRightString(right, 6 * mm, f"Página {page_no}")
 
 
-def _pdf_one_page_report(pdf, dataset):
+def _pdf_one_page_report(pdf, dataset, page_no=1):
     width, height = landscape(A3)
     pdf.setFillColor(colors.HexColor("#0b1728")); pdf.rect(0, height - 25 * mm, width, 25 * mm, stroke=0, fill=1)
     pdf.setFillColor(colors.white); pdf.setFont("Helvetica-Bold", 15); pdf.drawString(12 * mm, height - 12 * mm, "RESUMO DE ALIMENTAÇÃO")
@@ -1172,30 +1172,9 @@ def _pdf_one_page_report(pdf, dataset):
     _, table_height = table.wrap(usable, 230)
     table_y = height - 29 * mm - table_height
     table.drawOn(pdf, 12 * mm, table_y)
-    chart_top = table_y - 10; chart_height = 100; chart_width = (usable - 3 * 7) / 4
-    for index, metric in enumerate(REPORT_METRICS):
-        row, col = divmod(index, 4)
-        x = 12 * mm + col * (chart_width + 7); y = chart_top - (row + 1) * chart_height - row * 7
-        _pdf_compact_chart(pdf, metric, dataset["days"], dataset["goals"], x, y, chart_width, chart_height)
-    bars_top = chart_top - 2 * chart_height - 18
-    bar_height = 72; pdf.setFillColor(colors.HexColor("#f8fafc")); pdf.roundRect(12 * mm, bars_top - bar_height, usable, bar_height, 3, stroke=0, fill=1)
-    pdf.setStrokeColor(colors.HexColor("#dbeafe")); pdf.roundRect(12 * mm, bars_top - bar_height, usable, bar_height, 3, stroke=1, fill=0)
-    pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 5.8); pdf.drawString(12 * mm + 5, bars_top - 8, "ACUMULADOS DO PERÍODO")
-    pdf.setFillColor(colors.HexColor("#0284c7")); pdf.rect(12 * mm + 88, bars_top - 10, 8, 3, stroke=0, fill=1); pdf.setFillColor(colors.HexColor("#475569")); pdf.setFont("Helvetica", 4.6); pdf.drawString(12 * mm + 99, bars_top - 9, "Realizado")
-    pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(12 * mm + 133, bars_top - 10, 8, 3, stroke=0, fill=1); pdf.setFillColor(colors.HexColor("#475569")); pdf.drawString(12 * mm + 144, bars_top - 9, "Meta")
-    group_width = usable / 7
-    for index, (key, goal_key, label, unit, _) in enumerate(REPORT_METRICS):
-        actual = sum(float(day["values"].get(key, 0) or 0) for day in dataset["days"]); goal = float(dataset["goals"].get(goal_key, 0) or 0) * count_days
-        ratio = actual / goal * 100 if goal else 0; scale = max(130, ratio, 100); base = bars_top - bar_height + 16; max_h = 38
-        x = 12 * mm + index * group_width + group_width * .30; bar_w = group_width * .15
-        pdf.setFillColor(colors.HexColor("#0284c7")); pdf.rect(x, base, bar_w, max_h * min(ratio, scale) / scale, stroke=0, fill=1)
-        pdf.setFillColor(colors.HexColor("#16a34a")); pdf.rect(x + bar_w + 2, base, bar_w, max_h * 100 / scale, stroke=0, fill=1)
-        pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 5.4); pdf.drawCentredString(x + bar_w, base - 7, label)
-        pdf.setFont("Helvetica", 4.7); pdf.drawCentredString(x + bar_w, base - 14, f"{_compact_number(actual, unit)}/{_compact_number(goal, unit)} · {ratio:.0f}%")
-    pdf.setStrokeColor(colors.HexColor("#d7e1ea")); pdf.line(12 * mm, 8 * mm, width - 12 * mm, 8 * mm)
-    pdf.setFillColor(colors.HexColor("#64748b")); pdf.setFont("Helvetica", 4.3); pdf.drawString(12 * mm, 4.3 * mm, "Linhas: realizado na cor do nutriente · meta tracejada verde · dados detalhados na tabela diária")
+    _pdf_footer(pdf, page_no)
 
-def _pdf_energy_balance_page(pdf, dataset):
+def _pdf_energy_balance_page(pdf, dataset, page_no=1):
     """
     Página de resumo energético.
 
@@ -1831,7 +1810,42 @@ def _pdf_energy_balance_page(pdf, dataset):
     # RODAPÉ
     # ============================================================
 
-    _pdf_footer(pdf, 2)
+    _pdf_footer(pdf, page_no)
+
+
+def _pdf_daily_charts_page(pdf, dataset, page_no):
+    """Exibe todos os nutrientes em gráficos diários com os valores de cada dia."""
+    width, height = _pdf_header(
+        pdf,
+        "GRÁFICOS DIÁRIOS",
+        f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')} · valores por dia",
+        A3,
+    )
+    left, right = 14 * mm, width - 14 * mm
+    top = height - 48 * mm
+    bottom = 19 * mm
+    columns = 2
+    gap_x, gap_y = 8, 10
+    chart_width = (right - left - gap_x) / columns
+    chart_height = (top - bottom - gap_y * 3) / 4
+    for index, metric in enumerate(REPORT_METRICS):
+        row, column = divmod(index, columns)
+        x = left + column * (chart_width + gap_x)
+        y = top - (row + 1) * chart_height - row * gap_y
+        _pdf_compact_chart(
+            pdf,
+            metric,
+            dataset["days"],
+            dataset["goals"],
+            x,
+            y,
+            chart_width,
+            chart_height,
+        )
+    pdf.setFillColor(colors.HexColor("#64748b"))
+    pdf.setFont("Helvetica", 6.5)
+    pdf.drawString(left, 6 * mm, "Valores numéricos exibidos em cada ponto · linha colorida = realizado · linha tracejada = meta diária")
+    pdf.drawRightString(right, 6 * mm, f"Página {page_no}")
 
 
 class _ReportChartGrid(_REPORT_FLOWABLE_BASE):
@@ -2136,7 +2150,38 @@ def build_food_report_pdf(user_id, start, end):
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("A geração de PDF não está disponível. Atualize as dependências do serviço.")
     dataset = report_period_data(user_id, start, end)
-    return _build_continuous_report_pdf(dataset)
+    output = io.BytesIO()
+    pdf = pdf_canvas.Canvas(output, pagesize=landscape(A3), pageCompression=1)
+    page_no = 1
+
+    # Página 1: resumo diário e metas do período.
+    _pdf_one_page_report(pdf, dataset, page_no)
+
+    # Página 2: gráficos com os valores de cada dia.
+    pdf.showPage()
+    page_no += 1
+    _pdf_daily_charts_page(pdf, dataset, page_no)
+
+    # Página 3: acumulados do período com realizado e meta.
+    pdf.showPage()
+    page_no += 1
+    _pdf_accumulated_bars(pdf, dataset, page_no)
+
+    # Página 4: déficit/superávit diário com barras verdes e vermelhas.
+    pdf.showPage()
+    page_no += 1
+    _pdf_energy_balance_page(pdf, dataset, page_no)
+
+    # Páginas seguintes: calendário completo, com alimentos por dia e saldo semanal.
+    month_cursor = dataset["start"].replace(day=1)
+    while month_cursor <= dataset["end"]:
+        pdf.showPage()
+        page_no += 1
+        _pdf_month_calendar_page(pdf, dataset, month_cursor, page_no)
+        month_cursor = (month_cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+    pdf.save()
+    return output.getvalue()
 
 def has_usable_energy(record):
     try:
