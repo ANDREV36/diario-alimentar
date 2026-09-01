@@ -555,13 +555,6 @@ def init_db():
             VALUES(1,2300,180,220,70,30,2000,4000)
         """)
 
-    # CORREÇÃO TEMPORÁRIA DE GASTO ATIVO — remover após confirmar a correção no banco.
-    correction_user = c.execute("SELECT id FROM usuarios WHERE lower(email)=lower(?)", ("aqrv@hotmail.com",)).fetchone()
-    if correction_user:
-        correction_user_id = correction_user["id"]
-        _save_daily_active_energy(c, correction_user_id, "2026-08-24", 881.0)
-        _save_daily_active_energy(c, correction_user_id, "2026-08-26", 934.0)
-
     c.commit()
     c.close()
 def _hash_password(password):
