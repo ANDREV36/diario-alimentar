@@ -9,6 +9,7 @@ import psycopg
 from psycopg.rows import dict_row
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from xml.sax.saxutils import escape as xml_escape
 import os, time, logging
 import base64, binascii, hashlib, hmac, secrets, csv, io, re, math
 from threading import Lock
@@ -19,10 +20,13 @@ try:
     from reportlab.lib.units import mm
     from reportlab.pdfbase.pdfmetrics import stringWidth
     from reportlab.pdfgen import canvas as pdf_canvas
-    from reportlab.platypus import Table, TableStyle
+    from reportlab.platypus import Table, TableStyle, LongTable, Flowable, Paragraph, Spacer, SimpleDocTemplate, KeepTogether
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     REPORTLAB_AVAILABLE = True
 except ImportError:
     REPORTLAB_AVAILABLE = False
+
+_REPORT_FLOWABLE_BASE = Flowable if REPORTLAB_AVAILABLE else object
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -689,8 +693,8 @@ def report_period_data(user_id, start, end):
         raise ValueError("Datas inválidas para o relatório.")
     if d1 > d2:
         raise ValueError("A data inicial deve ser anterior à data final.")
-    if (d2 - d1).days > 89:
-        raise ValueError("O relatório permite no máximo 90 dias por vez.")
+    if (d2 - d1).days > 29:
+        raise ValueError("O relatório permite no máximo 30 dias por vez.")
     c = ddb()
     try:
         consumed = c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id", (user_id, start, end)).fetchall()
@@ -1830,22 +1834,309 @@ def _pdf_energy_balance_page(pdf, dataset):
     _pdf_footer(pdf, 2)
 
 
+class _ReportChartGrid(_REPORT_FLOWABLE_BASE):
+    """Grade de gráficos que nunca é desenhada parcialmente ou fora da página."""
+
+    def __init__(self, dataset, chart_height=118, columns=2):
+        if REPORTLAB_AVAILABLE:
+            super().__init__()
+        self.dataset = dataset
+        self.chart_height = chart_height
+        self.columns = columns
+        self.gap = 8
+        self.chart_width = 0
+        self.total_height = 0
+
+    def wrap(self, avail_width, avail_height):
+        self.chart_width = max(120, (avail_width - self.gap * (self.columns - 1)) / self.columns)
+        rows = math.ceil(len(REPORT_METRICS) / self.columns)
+        self.total_height = rows * self.chart_height + max(0, rows - 1) * self.gap
+        return avail_width, self.total_height
+
+    def draw(self):
+        for index, metric in enumerate(REPORT_METRICS):
+            row, col = divmod(index, self.columns)
+            x = col * (self.chart_width + self.gap)
+            y = self.total_height - (row + 1) * self.chart_height - row * self.gap
+            _pdf_compact_chart(
+                self.canv,
+                metric,
+                self.dataset["days"],
+                self.dataset["goals"],
+                x,
+                y,
+                self.chart_width,
+                self.chart_height,
+            )
+
+
+class _ReportAccumulatedBars(_REPORT_FLOWABLE_BASE):
+    """Gráfico horizontal de acumulados, dimensionado para qualquer página."""
+
+    def __init__(self, dataset, height=104):
+        if REPORTLAB_AVAILABLE:
+            super().__init__()
+        self.dataset = dataset
+        self.height = height
+        self.width = 0
+
+    def wrap(self, avail_width, avail_height):
+        self.width = avail_width
+        return avail_width, self.height
+
+    def draw(self):
+        pdf = self.canv
+        width = self.width
+        height = self.height
+        left, right = 4, width - 4
+        pdf.setFillColor(colors.HexColor("#f8fafc"))
+        pdf.roundRect(left, 0, right - left, height, 5, stroke=0, fill=1)
+        pdf.setStrokeColor(colors.HexColor("#dbeafe"))
+        pdf.roundRect(left, 0, right - left, height, 5, stroke=1, fill=0)
+        pdf.setFillColor(colors.HexColor("#0f172a"))
+        pdf.setFont("Helvetica-Bold", 8)
+        pdf.drawString(left + 7, height - 13, "ACUMULADOS DO PERÍODO")
+        pdf.setFont("Helvetica", 6.5)
+        pdf.setFillColor(colors.HexColor("#475569"))
+        pdf.drawString(left + 112, height - 13, "azul = realizado · verde = meta")
+
+        days = max(1, len(self.dataset.get("days", [])))
+        usable = right - left - 12
+        group_width = usable / max(1, len(REPORT_METRICS))
+        base = 24
+        max_h = height - 44
+        for index, (key, goal_key, label, unit, _) in enumerate(REPORT_METRICS):
+            actual = sum(float(day["values"].get(key, 0) or 0) for day in self.dataset["days"])
+            goal = float(self.dataset["goals"].get(goal_key, 0) or 0) * days
+            ratio = actual / goal * 100 if goal else 0
+            scale = max(130.0, ratio, 100.0)
+            x = left + 6 + index * group_width + group_width * 0.28
+            bar_w = max(5, group_width * 0.14)
+            actual_h = max_h * min(ratio, scale) / scale
+            goal_h = max_h * 100 / scale
+            pdf.setFillColor(colors.HexColor("#0284c7"))
+            pdf.rect(x, base, bar_w, actual_h, stroke=0, fill=1)
+            pdf.setFillColor(colors.HexColor("#16a34a"))
+            pdf.rect(x + bar_w + 2, base, bar_w, goal_h, stroke=0, fill=1)
+            pdf.setFillColor(colors.HexColor("#0f172a"))
+            pdf.setFont("Helvetica-Bold", 5.6)
+            pdf.drawCentredString(x + bar_w, base - 8, label)
+            pdf.setFont("Helvetica", 4.8)
+            pdf.setFillColor(colors.HexColor("#475569"))
+            pdf.drawCentredString(x + bar_w, base - 15, f"{_compact_number(actual, unit)}/{_compact_number(goal, unit)} · {ratio:.0f}%")
+
+
+def _report_paragraph(text, style):
+    return Paragraph(xml_escape(str(text or "")).replace("\n", "<br/>"), style)
+
+
+def _report_section(title, style):
+    return Paragraph(xml_escape(title), style)
+
+
+def _report_daily_table(dataset, styles, available_width):
+    header = ["Dia"] + [f"{metric[2]}\n{metric[3]}" for metric in REPORT_METRICS] + ["Média\nmeta"]
+    data = [[_report_paragraph(value, styles["table_header"]) for value in header]]
+    for day in dataset["days"]:
+        cells = [day["label"]]
+        percents = []
+        for key, goal_key, _, unit, _ in REPORT_METRICS:
+            actual = float(day["values"].get(key, 0) or 0)
+            goal = float(dataset["goals"].get(goal_key, 0) or 0)
+            cells.append(f"{_compact_number(actual, unit)}/{_compact_number(goal, unit)}")
+            if goal > 0:
+                percents.append(actual / goal * 100)
+        cells.append(f"{sum(percents) / len(percents):.0f}%" if percents else "—")
+        data.append([_report_paragraph(value, styles["table_cell"]) for value in cells])
+
+    total = ["TOTAL"]
+    all_pcts = []
+    period_days = max(1, len(dataset["days"]))
+    for key, goal_key, _, unit, _ in REPORT_METRICS:
+        actual = sum(float(day["values"].get(key, 0) or 0) for day in dataset["days"])
+        goal = float(dataset["goals"].get(goal_key, 0) or 0) * period_days
+        pct = actual / goal * 100 if goal else 0
+        total.append(f"{_compact_number(actual, unit)}/{_compact_number(goal, unit)} · {pct:.0f}%")
+        if goal:
+            all_pcts.append(pct)
+    total.append(f"{sum(all_pcts) / len(all_pcts):.0f}%" if all_pcts else "—")
+    data.append([_report_paragraph(value, styles["table_total"]) for value in total])
+
+    first_width = 16 * mm
+    last_width = 22 * mm
+    metric_width = (available_width - first_width - last_width) / len(REPORT_METRICS)
+    table = LongTable(
+        data,
+        colWidths=[first_width] + [metric_width] * len(REPORT_METRICS) + [last_width],
+        repeatRows=1,
+        splitByRow=1,
+        hAlign="LEFT",
+    )
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10243a")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#dbeafe")),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f8fafc")]),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def _report_energy_table(dataset, styles, available_width):
+    header = ["Dia", "Basal", "Ativo", "Consumido", "Saldo", "Status"]
+    data = [[_report_paragraph(value, styles["table_header"]) for value in header]]
+    for day in (dataset.get("energy") or {}).get("days", []):
+        saldo = float(day.get("saldo_kcal") or 0)
+        status = "Déficit" if saldo > 0 else "Superávit" if saldo < 0 else "Equilíbrio"
+        values = [
+            day.get("label", ""),
+            f"{_compact_number(day.get('basal_kcal'), 'kcal')} kcal",
+            f"{_compact_number(day.get('active_kcal'), 'kcal')} kcal",
+            f"{_compact_number(day.get('consumed_kcal'), 'kcal')} kcal",
+            f"{saldo:+,.0f} kcal".replace(",", "."),
+            status,
+        ]
+        data.append([_report_paragraph(value, styles["table_cell"]) for value in values])
+    widths = [18 * mm, 28 * mm, 28 * mm, 32 * mm, 28 * mm, available_width - 134 * mm]
+    table = LongTable(data, colWidths=widths, repeatRows=1, splitByRow=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f766e")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def _build_continuous_report_pdf(dataset):
+    """Gera um relatório corrido: os elementos entram em uma sequência de fluxo.
+
+    Tabelas longas repetem o cabeçalho ao mudar de página e os gráficos são
+    elementos indivisíveis, portanto nunca ficam parcialmente desenhados ou
+    posicionados fora da área imprimível.
+    """
+    output = io.BytesIO()
+    page_width, page_height = landscape(A3)
+    left_margin = 12 * mm
+    right_margin = 12 * mm
+    top_margin = 31 * mm
+    bottom_margin = 15 * mm
+    available_width = page_width - left_margin - right_margin
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="report_title", parent=styles["Heading1"], fontName="Helvetica-Bold",
+        fontSize=14, leading=17, textColor=colors.HexColor("#0f172a"), spaceAfter=3,
+    ))
+    styles.add(ParagraphStyle(
+        name="report_subtitle", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=8, leading=10, textColor=colors.HexColor("#475569"), spaceAfter=9,
+    ))
+    styles.add(ParagraphStyle(
+        name="report_section", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=10, leading=12, textColor=colors.HexColor("#10243a"), spaceBefore=8, spaceAfter=5,
+    ))
+    styles.add(ParagraphStyle(
+        name="table_header", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=6.5, leading=7.5, alignment=1, textColor=colors.white,
+    ))
+    styles.add(ParagraphStyle(
+        name="table_cell", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=6.2, leading=7.2, alignment=1, textColor=colors.HexColor("#334155"),
+    ))
+    styles.add(ParagraphStyle(
+        name="table_total", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=6.2, leading=7.2, alignment=1, textColor=colors.HexColor("#0f172a"),
+    ))
+
+    def draw_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(colors.HexColor("#0b1728"))
+        canvas.rect(0, page_height - 25 * mm, page_width, 25 * mm, stroke=0, fill=1)
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 15)
+        canvas.drawString(left_margin, page_height - 12 * mm, "RELATÓRIO DE ALIMENTAÇÃO")
+        canvas.setFillColor(colors.HexColor("#bfdbfe"))
+        canvas.setFont("Helvetica", 6.8)
+        canvas.drawString(
+            left_margin,
+            page_height - 18 * mm,
+            f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')} · relatório contínuo",
+        )
+        canvas.setStrokeColor(colors.HexColor("#d7e1ea"))
+        canvas.line(left_margin, 10 * mm, page_width - right_margin, 10 * mm)
+        canvas.setFillColor(colors.HexColor("#64748b"))
+        canvas.setFont("Helvetica", 6.5)
+        canvas.drawString(left_margin, 6 * mm, "Dados registrados no período selecionado · valores nutricionais estimados")
+        canvas.drawRightString(page_width - right_margin, 6 * mm, f"Página {doc.page}")
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=landscape(A3),
+        leftMargin=left_margin,
+        rightMargin=right_margin,
+        topMargin=top_margin,
+        bottomMargin=bottom_margin,
+        title="Relatório de alimentação",
+        author="Diário Alimentar",
+    )
+    goals = dataset.get("goals") or {}
+    total_values = {}
+    for key, _, _, _, _ in REPORT_METRICS:
+        total_values[key] = sum(float(day["values"].get(key, 0) or 0) for day in dataset["days"])
+    energy_totals = (dataset.get("energy") or {}).get("totals") or {}
+    story = [
+        _report_section("Resumo do período", styles["report_section"]),
+        _report_paragraph(
+            f"{len(dataset['days'])} dias analisados · consumo real registrado · metas acumuladas para o período.",
+            styles["report_subtitle"],
+        ),
+        _report_daily_table(dataset, styles, available_width),
+        Spacer(1, 7),
+        KeepTogether([
+            _report_section("Gráficos de evolução diária", styles["report_section"]),
+            _report_paragraph(
+                "Os gráficos abaixo acompanham os dias do período selecionado. O layout é contínuo e os blocos são deslocados integralmente quando não houver espaço suficiente na página.",
+                styles["report_subtitle"],
+            ),
+            _ReportChartGrid(dataset, chart_height=95, columns=2),
+        ]),
+        Spacer(1, 7),
+        _report_section("Acumulados do período", styles["report_section"]),
+        _ReportAccumulatedBars(dataset, height=104),
+        Spacer(1, 7),
+        _report_section("Balanço energético diário", styles["report_section"]),
+        _report_paragraph(
+            f"Basal acumulado: {_compact_number(energy_totals.get('basal_kcal'), 'kcal')} kcal · "
+            f"ativo: {_compact_number(energy_totals.get('active_kcal'), 'kcal')} kcal · "
+            f"consumido: {_compact_number(energy_totals.get('consumed_kcal'), 'kcal')} kcal · "
+            f"saldo: {float(energy_totals.get('saldo_kcal') or 0):+,.0f} kcal".replace(",", "."),
+            styles["report_subtitle"],
+        ),
+        _report_energy_table(dataset, styles, available_width),
+    ]
+    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
+    return output.getvalue()
+
+
 def build_food_report_pdf(user_id, start, end):
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("A geração de PDF não está disponível. Atualize as dependências do serviço.")
     dataset = report_period_data(user_id, start, end)
-    output = io.BytesIO(); pdf = pdf_canvas.Canvas(output, pagesize=landscape(A3), pageCompression=1)
-    page_no = 1
-    _pdf_one_page_report(pdf, dataset)
-    pdf.showPage(); page_no += 1
-    _pdf_energy_balance_page(pdf, dataset)
-    month_cursor = dataset["start"].replace(day=1)
-    while month_cursor <= dataset["end"]:
-        pdf.showPage(); page_no += 1
-        _pdf_month_calendar_page(pdf, dataset, month_cursor, page_no)
-        month_cursor = (month_cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
-    pdf.save()
-    return output.getvalue()
+    return _build_continuous_report_pdf(dataset)
 
 def has_usable_energy(record):
     try:
@@ -2169,7 +2460,7 @@ main{
 .goalMiniCard.limit i{background:linear-gradient(90deg,#fbbf24,#fb7185)}
 @media(max-width:700px){.goalCards{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
 @media(max-width:1000px){.quickStats{grid-template-columns:repeat(4,minmax(0,1fr))!important}}
-@media(max-width:760px){.finalDashboardGrid{grid-template-columns:1fr}.historyPane{border-right:0;border-bottom:1px solid rgba(255,255,255,.16)}.hydrationPane .waterVisual{min-height:168px}.hydrationPane .waterArtwork{width:116px;height:164px;flex-basis:116px}.hydrationPane .waterPercent{min-width:116px;font-size:31px}}
+@media(max-width:760px){.periodMobileNotice{display:block!important}.periodDesktopOnly{display:none!important}.finalDashboardGrid{grid-template-columns:1fr}.historyPane{border-right:0;border-bottom:1px solid rgba(255,255,255,.16)}.hydrationPane .waterVisual{min-height:168px}.hydrationPane .waterArtwork{width:116px;height:164px;flex-basis:116px}.hydrationPane .waterPercent{min-width:116px;font-size:31px}}
 @media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.quickStatHead small{font-size:13px!important}.waterVisual{min-height:170px}.waterArtwork{width:108px;height:154px;flex-basis:108px}.waterFigure{gap:12px}.waterPercent{min-width:95px;font-size:28px}.finalDashboardPane{padding:14px}.waterQuickButtons button{font-size:10px;min-height:29px}}
 </style></head><body>
 <div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V45 · Diário Alimentar · Segurança P0</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
@@ -2410,11 +2701,12 @@ main{
 
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin:10px 0">
       <button onclick="setPeriod(7)" style="padding:10px;border:0;border-radius:9px;background:#eef2f7">7 dias</button>
-      <button onclick="setPeriod(15)" style="padding:10px;border:0;border-radius:9px;background:#eef2f7">15 dias</button>
-      <button onclick="setPeriod(30)" style="padding:10px;border:0;border-radius:9px;background:#eef2f7">30 dias</button>
+      <button class="periodDesktopOnly" onclick="setPeriod(15)" style="padding:10px;border:0;border-radius:9px;background:#eef2f7">15 dias</button>
+      <button class="periodDesktopOnly" onclick="setPeriod(30)" style="padding:10px;border:0;border-radius:9px;background:#eef2f7">30 dias</button>
       <button onclick="loadPeriod()" style="padding:10px;border:0;border-radius:9px;background:#dbeafe;color:#10243a;font-weight:bold">Atualizar</button>
     </div>
     <button onclick="loadPeriod()" style="width:100%;padding:12px;border:0;border-radius:10px;background:#111827;color:#fff;font-weight:bold">ATUALIZAR PERÍODO</button>
+    <div class="periodMobileNotice" style="display:none;margin-top:8px;padding:8px 10px;border-radius:9px;background:#fef3c7;color:#92400e;font-size:11px">No celular, a visualização fica limitada aos últimos 9 dias. Para períodos maiores, use o botão de PDF.</div>
 
     <div id="periodInfo" style="margin-top:12px"></div>
     <div id="periodContent"></div>
@@ -3403,7 +3695,7 @@ async function downloadReport(){
   const start=document.getElementById("periodStart").value,end=document.getElementById("periodEnd").value,button=document.getElementById("downloadReportBtn");
   if(!start||!end||start>end){alert("Informe um período válido antes de gerar o relatório.");return}
   const days=Math.round((new Date(end+"T12:00:00")-new Date(start+"T12:00:00"))/86400000)+1;
-  if(days<1||days>90){alert("Escolha um período entre 1 e 90 dias.");return}
+  if(days<1||days>30){alert("Escolha um período entre 1 e 30 dias para o PDF.");return}
   try{
     if(button){button.disabled=true;button.textContent="GERANDO PDF..."}
     const response=await fetch("/api/report.pdf?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end),{credentials:"same-origin"});
@@ -3468,9 +3760,15 @@ function periodCard(key,label,icon,total,goal,unit,days,limit=false,start, end){
   </div>`;
 }
 async function loadPeriod(){
-  const s=document.getElementById("periodStart").value,e=document.getElementById("periodEnd").value;
+  let s=document.getElementById("periodStart").value,e=document.getElementById("periodEnd").value;
   if(!s||!e){alert("Informe as duas datas.");return;}
   if(s>e){alert("A data inicial não pode ser maior que a final.");return;}
+  const selectedDays=Math.round((new Date(e+"T12:00:00")-new Date(s+"T12:00:00"))/86400000)+1;
+  if(selectedDays>30){alert("O relatório permite no máximo 30 dias por vez.");return;}
+  if(window.matchMedia && window.matchMedia("(max-width:760px)").matches && selectedDays>9){
+    // Mantém os campos originais para o PDF; somente a consulta da tela é reduzida.
+    s=shiftDays(e,-8);
+  }
   try{
     const j=await api("/api/period?start="+encodeURIComponent(s)+"&end="+encodeURIComponent(e));
     const days=j.days;
@@ -3871,6 +4169,7 @@ class H(BaseHTTPRequestHandler):
             try:
                 d1=date.fromisoformat(start);d2=date.fromisoformat(end)
                 if d1>d2: raise ValueError("Período inválido")
+                if (d2-d1).days > 29: raise ValueError("O relatório permite no máximo 30 dias por vez.")
             except Exception as e:
                 self.js({"error":"Datas inválidas"},400);return
             c=ddb()
