@@ -79,6 +79,7 @@ def today_sp():
 
 MEALS = ["Café da manhã", "Almoço", "Lanche", "Jantar", "Ceia"]
 DEFAULT_GOALS = {"calorias_kcal":2300.0,"proteina_g":180.0,"carboidratos_g":220.0,"gorduras_g":70.0,"fibras_g":30.0,"sodio_mg":2000.0,"agua_ml":4000.0,"manual_override":False}
+KCAL_PER_KG_FAT = 7000.0
 
 def goal_dict(row):
     data = DEFAULT_GOALS.copy()
@@ -220,9 +221,9 @@ def calculate_profile_goals(idade, sexo, peso_kg, altura_cm, atividade, objetivo
         bmr = 10 * float(peso_kg) + 6.25 * float(altura_cm) - 5 * int(idade) + (5 if sexo == "M" else -161)
     kcal = bmr * multipliers[atividade]
     if objetivo == "perder":
-        kcal -= rate * 7700 / 7
+        kcal -= rate * KCAL_PER_KG_FAT / 7
     elif objetivo == "ganhar":
-        kcal += rate * 7700 / 7
+        kcal += rate * KCAL_PER_KG_FAT / 7
     kcal = max(1200, round(kcal))
     protein = round(float(peso_kg) * (2.0 if objetivo == "ganhar" else 1.8))
     fat = max(45, round(float(peso_kg) * 0.8))
@@ -425,6 +426,21 @@ def init_db():
             UNIQUE(usuario_id, data)
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS medicoes_corporais(
+            id BIGSERIAL PRIMARY KEY,
+            usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            data TEXT NOT NULL,
+            peso_kg REAL NOT NULL,
+            agua_kg REAL NOT NULL,
+            agua_estimada BOOLEAN NOT NULL DEFAULT FALSE,
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(usuario_id, data)
+        )
+    """)
+    c.execute("ALTER TABLE medicoes_corporais ADD COLUMN IF NOT EXISTS agua_estimada BOOLEAN NOT NULL DEFAULT FALSE")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_medicoes_corporais_usuario_data ON medicoes_corporais(usuario_id, data)")
     c.execute("""
         CREATE TABLE IF NOT EXISTS preferencias_usuario(
             usuario_id BIGINT PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
@@ -700,7 +716,9 @@ def report_period_data(user_id, start, end):
         consumed = c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id", (user_id, start, end)).fetchall()
         water_rows = c.execute("SELECT data,COALESCE(SUM(quantidade_ml),0) AS water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? GROUP BY data", (user_id, start, end)).fetchall()
         active_rows = c.execute("SELECT data,calorias_kcal,basal_kcal,consumido_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?", (user_id, start, end)).fetchall()
+        measurement_rows = c.execute("SELECT data,peso_kg,agua_kg,agua_estimada FROM medicoes_corporais WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data", (user_id, start, end)).fetchall()
         goals_row = c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?", (user_id,)).fetchone()
+
         profile = c.execute("SELECT nome,idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
     finally:
         c.close()
@@ -709,7 +727,9 @@ def report_period_data(user_id, start, end):
         by_day.setdefault(str(row["data"]), []).append(row)
     water_by_day = {str(row["data"]): float(row["water"] or 0) for row in water_rows}
     active_by_day = {str(row["data"]): dict(row) for row in active_rows}
+    body_by_day = {str(row["data"]): {"data": str(row["data"]), "peso_kg": float(row["peso_kg"]), "agua_kg": float(row["agua_kg"]), "agua_estimada": bool(row.get("agua_estimada"))} for row in measurement_rows}
     goals = goal_dict(goals_row)
+
     basal_fallback = _basal_from_profile_row(profile)
     if basal_fallback is None:
         basal_fallback = float(goals.get("calorias_kcal") or 0)
@@ -721,7 +741,11 @@ def report_period_data(user_id, start, end):
         nutrients = calc(by_day.get(day_key, []), user_id)
         nutrients["agua_ml"] = water_by_day.get(day_key, 0.0)
         foods = [{"nome": str(r.get("alimento_nome") or "Alimento"), "refeicao": str(r.get("refeicao") or ""), "quantidade_g": float(r.get("quantidade_g") or 0), "unidade": str(r.get("unidade") or "g")} for r in by_day.get(day_key, [])]
-        rows.append({"data": day_key, "label": cursor.strftime("%d/%m"), "values": nutrients, "foods": foods})
+        body_measurement = body_by_day.get(day_key)
+        if body_measurement:
+            body_measurement["massa_sem_agua_kg"] = round(body_measurement["peso_kg"] - body_measurement["agua_kg"], 3)
+        rows.append({"data": day_key, "label": cursor.strftime("%d/%m"), "values": nutrients, "foods": foods, "body_measurement": body_measurement})
+
         entry = active_by_day.get(day_key) or {}
         consumed_kcal = float(nutrients.get("energia_kcal", 0) or 0)
         basal_kcal = float(entry.get("basal_kcal") or basal_fallback or 0)
@@ -748,9 +772,12 @@ def report_period_data(user_id, start, end):
         })
         cursor += timedelta(days=1)
     energy_totals = {k: (float(round(v, 2)) if isinstance(v, float) else v) for k, v in energy_totals.items()}
-    energy_totals["estimated_fat_loss_kg"] = round(max(0.0, energy_totals["saldo_kcal"]) / 7000.0, 3)
+    energy_totals["estimated_fat_loss_kg"] = round(max(0.0, energy_totals["saldo_kcal"]) / KCAL_PER_KG_FAT, 3)
+
     return {
         "start": d1, "end": d2, "days": rows, "goals": goals,
+        "body_measurements": list(body_by_day.values()),
+
         "name": (profile["nome"] if profile and profile["nome"] else "Pessoa usuária"),
         "energy": {"days": energy_days, "totals": energy_totals},
     }
@@ -1848,6 +1875,131 @@ def _pdf_daily_charts_page(pdf, dataset, page_no):
     pdf.drawRightString(right, 6 * mm, f"Página {page_no}")
 
 
+def _pdf_body_composition_page(pdf, dataset, page_no):
+    """Gráfico de aferições: peso total, água medida/estimada e massa sem água."""
+    width, height = _pdf_header(
+        pdf,
+        "PESO, ÁGUA E MASSA SEM ÁGUA",
+        f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')} · dias com aferição pela manhã",
+        A3,
+    )
+    measurements = []
+    for item in dataset.get("body_measurements") or []:
+        try:
+            peso = float(item.get("peso_kg") or 0)
+            agua = float(item.get("agua_kg") or 0)
+        except Exception:
+            continue
+        if peso <= 0 or agua <= 0 or agua > peso:
+            continue
+        measurements.append({
+            "data": str(item.get("data") or ""),
+            "label": date.fromisoformat(str(item.get("data"))).strftime("%d/%m"),
+            "peso_kg": peso,
+            "agua_kg": agua,
+            "massa_sem_agua_kg": max(0.0, peso - agua),
+            "agua_estimada": bool(item.get("agua_estimada")),
+        })
+    measurements.sort(key=lambda item: item["data"])
+    left, right = 22 * mm, width - 22 * mm
+    bottom, top = 70 * mm, height - 62 * mm
+    chart_height = top - bottom
+    if not measurements:
+        pdf.setFillColor(colors.HexColor("#eff6ff"))
+        pdf.roundRect(left, height / 2 - 18 * mm, right - left, 36 * mm, 8, stroke=0, fill=1)
+        pdf.setFillColor(colors.HexColor("#0f172a"))
+        pdf.setFont("Helvetica-Bold", 15)
+        pdf.drawCentredString(width / 2, height / 2 + 4 * mm, "Nenhuma aferição corporal no período")
+        pdf.setFont("Helvetica", 10)
+        pdf.setFillColor(colors.HexColor("#475569"))
+        pdf.drawCentredString(width / 2, height / 2 - 5 * mm, "Registre o peso da manhã e, se disponível, a massa de água para visualizar a comparação.")
+        pdf.setFillColor(colors.HexColor("#64748b"))
+        pdf.setFont("Helvetica", 7)
+        pdf.drawString(left, 6 * mm, "A massa sem água é um indicador indireto e não substitui uma avaliação de composição corporal.")
+        pdf.drawRightString(right, 6 * mm, f"Página {page_no}")
+        return
+
+    max_y = max(100.0, max(item["peso_kg"] for item in measurements) * 1.08)
+    n = len(measurements)
+    group_width = (right - left) / n
+    bar_width = max(8 * mm, min(28 * mm, group_width * 0.54))
+    pdf.setStrokeColor(colors.HexColor("#cbd5e1"))
+    pdf.line(left, bottom, right, bottom)
+    for tick in range(0, 6):
+        value = max_y * tick / 5
+        y = bottom + chart_height * tick / 5
+        pdf.setStrokeColor(colors.HexColor("#e2e8f0"))
+        pdf.line(left, y, right, y)
+        pdf.setFillColor(colors.HexColor("#64748b"))
+        pdf.setFont("Helvetica", 6.5)
+        pdf.drawRightString(left - 4, y - 2, f"{value:.0f} kg")
+
+    for index, item in enumerate(measurements):
+        x = left + group_width * index + (group_width - bar_width) / 2
+        peso_h = chart_height * item["peso_kg"] / max_y
+        agua_h = chart_height * item["agua_kg"] / max_y
+        seco_h = chart_height * item["massa_sem_agua_kg"] / max_y
+        # Contorno verde identifica o peso corporal total.
+        pdf.setFillColor(colors.HexColor("#f0fdf4"))
+        pdf.setStrokeColor(colors.HexColor("#16a34a"))
+        pdf.setLineWidth(1.2)
+        pdf.roundRect(x, bottom, bar_width, peso_h, 3, stroke=1, fill=1)
+        # Azul identifica a água; amarelo mostra o restante sem água.
+        pdf.setFillColor(colors.HexColor("#38bdf8"))
+        pdf.setStrokeColor(colors.HexColor("#0284c7"))
+        pdf.rect(x, bottom, bar_width, agua_h, stroke=1, fill=1)
+        pdf.setFillColor(colors.HexColor("#facc15"))
+        pdf.setStrokeColor(colors.HexColor("#ca8a04"))
+        pdf.rect(x, bottom + agua_h, bar_width, seco_h, stroke=1, fill=1)
+        pdf.setFillColor(colors.HexColor("#15803d"))
+        pdf.setFont("Helvetica-Bold", 7)
+        pdf.drawCentredString(x + bar_width / 2, bottom + peso_h + 5, f"{item['peso_kg']:.1f} kg")
+        pdf.setFont("Helvetica-Bold", 6)
+        if agua_h > 18:
+            pdf.setFillColor(colors.HexColor("#075985"))
+            pdf.drawCentredString(x + bar_width / 2, bottom + agua_h / 2 - 2, f"{item['agua_kg']:.1f}")
+        if seco_h > 18:
+            pdf.setFillColor(colors.HexColor("#713f12"))
+            pdf.drawCentredString(x + bar_width / 2, bottom + agua_h + seco_h / 2 - 2, f"{item['massa_sem_agua_kg']:.1f}")
+        pdf.setFillColor(colors.HexColor("#334155"))
+        pdf.setFont("Helvetica", 7)
+        pdf.drawCentredString(x + bar_width / 2, bottom - 12, item["label"])
+        pdf.setFont("Helvetica", 5.8)
+        pdf.setFillColor(colors.HexColor("#64748b"))
+        pdf.drawCentredString(x + bar_width / 2, bottom - 20, "água estimada" if item["agua_estimada"] else "água medida")
+
+    legend_y = height - 49 * mm
+    pdf.setFillColor(colors.HexColor("#22c55e")); pdf.setStrokeColor(colors.HexColor("#16a34a")); pdf.rect(left, legend_y, 10, 7, stroke=1, fill=0)
+    pdf.setFillColor(colors.HexColor("#334155")); pdf.setFont("Helvetica", 7); pdf.drawString(left + 15, legend_y + 1, "Peso total")
+    pdf.setFillColor(colors.HexColor("#38bdf8")); pdf.setStrokeColor(colors.HexColor("#0284c7")); pdf.rect(left + 74, legend_y, 10, 7, stroke=1, fill=1)
+    pdf.setFillColor(colors.HexColor("#334155")); pdf.drawString(left + 89, legend_y + 1, "Massa de água")
+    pdf.setFillColor(colors.HexColor("#facc15")); pdf.setStrokeColor(colors.HexColor("#ca8a04")); pdf.rect(left + 174, legend_y, 10, 7, stroke=1, fill=1)
+    pdf.setFillColor(colors.HexColor("#334155")); pdf.drawString(left + 189, legend_y + 1, "Massa sem água / gordura estimada")
+
+    first, last = measurements[0], measurements[-1]
+    weight_reduction = first["peso_kg"] - last["peso_kg"]
+    water_reduction = first["agua_kg"] - last["agua_kg"]
+    yellow_reduction = first["massa_sem_agua_kg"] - last["massa_sem_agua_kg"]
+    energy_totals = (dataset.get("energy") or {}).get("totals") or {}
+    expected = float(energy_totals.get("estimated_fat_loss_kg") or 0)
+    pdf.setFillColor(colors.HexColor("#eff6ff"))
+    pdf.setStrokeColor(colors.HexColor("#bfdbfe"))
+    pdf.roundRect(left, 29 * mm, right - left, 25 * mm, 5, stroke=1, fill=1)
+    pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 8)
+    pdf.drawString(left + 8, 47 * mm, "COMPARAÇÃO DO PERÍODO")
+    pdf.setFont("Helvetica", 7); pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.drawString(left + 8, 41 * mm, f"Redução total: {weight_reduction:+.2f} kg   ·   água: {water_reduction:+.2f} kg   ·   trecho amarelo: {yellow_reduction:+.2f} kg")
+    pdf.setFillColor(colors.HexColor("#166534")); pdf.setFont("Helvetica-Bold", 7)
+    pdf.drawString(left + 8, 35 * mm, f"Déficit calórico equivalente: {expected:.2f} kg   ·   diferença para o trecho amarelo: {(yellow_reduction - expected):+.2f} kg")
+
+    pdf.setFillColor(colors.HexColor("#fffbeb")); pdf.setStrokeColor(colors.HexColor("#fde68a"))
+    pdf.roundRect(left, 14 * mm, right - left, 11 * mm, 4, stroke=1, fill=1)
+    pdf.setFillColor(colors.HexColor("#713f12")); pdf.setFont("Helvetica", 6.5)
+    pdf.drawString(left + 8, 20 * mm, "Proteína adequada e exercício físico ajudam a preservar massa magra. A bioimpedância é importante para avaliar a composição corporal.")
+    pdf.drawString(left + 8, 16 * mm, "Se a água não for informada, o valor será estimado e identificado; a massa sem água é um indicador indireto, não uma medição direta de gordura.")
+    _pdf_footer(pdf, page_no)
+
+
 class _ReportChartGrid(_REPORT_FLOWABLE_BASE):
     """Grade de gráficos que nunca é desenhada parcialmente ou fora da página."""
 
@@ -2162,12 +2314,17 @@ def build_food_report_pdf(user_id, start, end):
     page_no += 1
     _pdf_daily_charts_page(pdf, dataset, page_no)
 
-    # Página 3: acumulados do período com realizado e meta.
+    # Página 3: peso, água e massa sem água/gordura estimada.
+    pdf.showPage()
+    page_no += 1
+    _pdf_body_composition_page(pdf, dataset, page_no)
+
+    # Página 4: acumulados do período com realizado e meta.
     pdf.showPage()
     page_no += 1
     _pdf_accumulated_bars(pdf, dataset, page_no)
 
-    # Página 4: déficit/superávit diário com barras verdes e vermelhas.
+    # Página 5: déficit/superávit diário com barras verdes e vermelhas.
     pdf.showPage()
     page_no += 1
     _pdf_energy_balance_page(pdf, dataset, page_no)
@@ -2506,7 +2663,8 @@ main{
 @media(max-width:700px){.goalCards{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
 @media(max-width:1000px){.quickStats{grid-template-columns:repeat(4,minmax(0,1fr))!important}}
 @media(max-width:760px){.periodMobileNotice{display:block!important}.periodDesktopOnly{display:none!important}.finalDashboardGrid{grid-template-columns:1fr}.historyPane{border-right:0;border-bottom:1px solid rgba(255,255,255,.16)}.hydrationPane .waterVisual{min-height:168px}.hydrationPane .waterArtwork{width:116px;height:164px;flex-basis:116px}.hydrationPane .waterPercent{min-width:116px;font-size:31px}}
-@media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.quickStatHead small{font-size:13px!important}.waterVisual{min-height:170px}.waterArtwork{width:108px;height:154px;flex-basis:108px}.waterFigure{gap:12px}.waterPercent{min-width:95px;font-size:28px}.finalDashboardPane{padding:14px}.waterQuickButtons button{font-size:10px;min-height:29px}}
+@media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.quickStatHead small{font-size:13px!important}.waterVisual{min-height:170px}.waterArtwork{width:108px;height:154px;flex-basis:108px}.waterFigure{gap:12px}.waterPercent{min-width:95px;font-size:28px}.finalDashboardPane{padding:14px}.waterQuickButtons button{font-size:10px;min-height:29px}.bodyMeasurementFields{grid-template-columns:1fr!important}}
+
 </style></head><body>
 <div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V45 · Diário Alimentar · Segurança P0</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
 <main>
@@ -2536,6 +2694,21 @@ main{
 </section>
 
 <div class="card"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><h2 style="margin:0">Data e horário</h2><span id="currentDateTime" style="font-size:15px;font-weight:800;color:#fff;white-space:nowrap;padding:8px 12px;border:1px solid #4ade8055;border-radius:10px;background:#0f2a20"></span></div><div class="date" style="display:flex;align-items:center;gap:8px"><input id="day" type="date" style="flex:1"><button onclick="refresh()">OK</button></div></div>
+<div class="card" id="bodyMeasurementCard" style="border:1px solid #86efac55;background:linear-gradient(135deg,#10243a,#142f3a)">
+  <div class="sectionTitle"><div><span class="eyebrow">AFERIÇÃO DA MANHÃ</span><h2>⚖️ Peso e massa de água</h2></div></div>
+  <p style="margin:0 0 11px;color:#cbd5e1;font-size:13px;line-height:1.45">Registre o peso e, se tiver, a massa de água da bioimpedância para a data selecionada. A água é opcional; quando ficar em branco, será feita uma estimativa identificada no relatório.</p>
+  <div class="bodyMeasurementFields" style="display:grid;grid-template-columns:1fr 1fr;gap:9px">
+    <label style="font-size:12px;font-weight:bold">Peso da manhã (kg)
+      <input id="bodyWeightInput" type="number" min="20" max="400" step="0.1" inputmode="decimal" placeholder="Ex.: 88,7" style="width:100%;padding:11px;margin-top:5px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:white">
+    </label>
+    <label style="font-size:12px;font-weight:bold">Massa de água (kg) — opcional
+      <input id="bodyWaterInput" type="number" min="1" max="400" step="0.1" inputmode="decimal" placeholder="Ex.: 50,9" style="width:100%;padding:11px;margin-top:5px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:white">
+    </label>
+  </div>
+  <div id="bodyMeasurementStatus" style="min-height:18px;margin-top:9px;color:#bfdbfe;font-size:12px"></div>
+  <button onclick="saveBodyMeasurement()" style="width:100%;margin-top:4px;padding:11px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">SALVAR AFERIÇÃO DO DIA</button>
+</div>
+
 <div class="card" id="platePhotoCard" style="border:1px solid #4ade8055;background:linear-gradient(135deg,#10243a,#17304a)">
   <div class="sectionTitle"><div><span class="eyebrow">REGISTRO POR FOTO</span><h2>🍽️ Fotografar prato</h2></div></div>
   <p style="margin:0 0 11px;color:#cbd5e1;font-size:13px;line-height:1.4">Escolha uma imagem ou fotografe o prato. Você confere os alimentos e as quantidades antes de adicionar ao diário.</p>
@@ -2918,10 +3091,11 @@ function calculateProfileGoals(){
   const basalMethod=leanMass===null?'Mifflin-St Jeor':'Katch-McArdle pela massa magra';
   const tdee=bmr*mult;
 
-  // 7.700 kcal/kg é uma aproximação de planejamento energético.
+    // 7.000 kcal/kg é a referência adotada neste relatório.
+
   let kcal=tdee;
-  if(goal==='perder')kcal=tdee-(rate*7700/7);
-  if(goal==='ganhar')kcal=tdee+(rate*7700/7);
+  if(goal==='perder')kcal=tdee-(rate*BODY_KCAL_PER_KG/7);
+  if(goal==='ganhar')kcal=tdee+(rate*BODY_KCAL_PER_KG/7);
 
   // Limite mínimo apenas para evitar metas acidentalmente extremas.
   kcal=Math.max(1200,Math.round(kcal));
@@ -3588,10 +3762,41 @@ function renderGoalCards(j){
   const el=document.getElementById("goalCards");if(!el)return;
   el.innerHTML=data.map(([icon,label,value,target,unit,limit])=>{const p=pct(value,target);return `<button type="button" class="goalMiniCard ${limit?"limit":""}" onclick="openSummary()"><small>${icon} ${label}</small><b>${fmt(value)} / ${fmt(target)} ${unit}</b><i style="width:${p}%"></i><small>${fmt(p)}% da meta</small></button>`}).join("");
 }
+let bodyMeasurementLoadedDate="";
+function syncBodyMeasurementForm(measurement){
+  const weightInput=document.getElementById("bodyWeightInput"),waterInput=document.getElementById("bodyWaterInput"),status=document.getElementById("bodyMeasurementStatus"),currentDate=String(day.value||"");
+  if(!weightInput||!waterInput||!currentDate)return;
+  if(measurement){
+    weightInput.value=measurement.peso_kg??"";
+    waterInput.value=measurement.agua_kg??"";
+    if(status)status.textContent=measurement.agua_estimada?"Aferição carregada. A massa de água deste dia foi estimada.":"Aferição carregada. Água informada pela bioimpedância.";
+  }else if(bodyMeasurementLoadedDate!==currentDate){
+    weightInput.value="";
+    waterInput.value="";
+    if(status)status.textContent="";
+  }
+  bodyMeasurementLoadedDate=currentDate;
+}
+async function saveBodyMeasurement(){
+  const status=document.getElementById("bodyMeasurementStatus");
+  const weightRaw=String(document.getElementById("bodyWeightInput")?.value||"").trim();
+  const waterRaw=String(document.getElementById("bodyWaterInput")?.value||"").trim();
+  const weight=Number(weightRaw.replace(",","."));
+  if(!weightRaw||!Number.isFinite(weight)||weight<20||weight>400){if(status)status.textContent="Informe um peso entre 20 e 400 kg.";return;}
+  if(waterRaw){const water=Number(waterRaw.replace(",","."));if(!Number.isFinite(water)||water<=0||water>weight){if(status)status.textContent="A massa de água deve ser positiva e não pode ultrapassar o peso.";return;}}
+  try{
+    const result=await api("/api/body_measurement",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,peso_kg:weight,agua_kg:waterRaw})});
+    await refresh();
+    const saved=result.body_measurement||{};
+    if(status)status.textContent=saved.agua_estimada?`Aferição salva. Água estimada: ${fmt(saved.agua_kg)} kg.`:`Aferição salva. Água medida: ${fmt(saved.agua_kg)} kg.`;
+    if(document.getElementById("periodModal")?.style.display==="block")loadPeriod();
+  }catch(error){if(status)status.textContent=error.message||"Não foi possível salvar a aferição.";}
+}
 async function refresh(){
   try{
     const j=await api("/api/day?data="+day.value+"&refeicao="+encodeURIComponent(meal));
     window.lastDaySnapshot=j;
+    syncBodyMeasurementForm(j.body_measurement);
     const consumed=Array.isArray(j.items)?j.items:[];
     const goals=j.goals||{};
     items.innerHTML=consumed.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" "+esc(x.unidade||"g")+" · "+fmt(x.kcal)+" kcal</div></div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
@@ -3750,6 +3955,26 @@ async function downloadReport(){
   }catch(error){alert(error.message||"Não foi possível gerar o relatório PDF.")}
   finally{if(button){button.disabled=false;button.textContent="⬇️ BAIXAR RELATÓRIO PDF"}}
 }
+const BODY_KCAL_PER_KG=7000;
+function bodyCompositionChart(history){
+  const measurements=(history?.body_measurements||[]).map(x=>({
+    data:String(x.data||""),
+    label:String(x.data||"").slice(5).split("-").reverse().join("/"),
+    peso:Number(x.peso_kg||0),
+    agua:Number(x.agua_kg||0),
+    seco:Number(x.massa_sem_agua_kg ?? (Number(x.peso_kg||0)-Number(x.agua_kg||0))),
+    aguaEstimada:Boolean(x.agua_estimada)
+  })).filter(x=>x.peso>0&&x.agua>0&&x.agua<=x.peso).sort((a,b)=>a.data.localeCompare(b.data));
+  const note=`<div style="margin-top:8px;padding:10px 12px;border-radius:10px;background:#fffbeb;border:1px solid #facc1588;color:#713f12;font-size:11px;line-height:1.45"><b>Importante:</b> proteína adequada e exercício físico ajudam a preservar massa magra. A bioimpedância é importante para avaliar a composição corporal. Se a água não for informada, o valor será estimado e identificado; a massa sem água é um indicador indireto, não uma medição direta de gordura.</div>`;
+  if(!measurements.length)return `<h3 style="margin:14px 0 8px">⚖️ Peso, água e massa sem água</h3><div style="padding:16px;background:#172033;border-radius:12px;color:#cbd5e1;font-size:12px">Nenhuma aferição corporal encontrada neste período. Registre o peso da manhã no aplicativo para visualizar este gráfico.</div>${note}`;
+  const first=measurements[0],last=measurements[measurements.length-1];
+  const weightChange=first.peso-last.peso,waterChange=first.agua-last.agua,yellowChange=first.seco-last.seco;
+  const expected=Math.max(0,Number(history?.energy_totals?.saldo_kcal||0))/BODY_KCAL_PER_KG;
+  const maxWeight=Math.max(100,...measurements.map(x=>x.peso))*1.08;
+  const columns=Math.min(14,Math.max(1,measurements.length));
+  const bars=measurements.map(x=>{const totalPct=Math.max(7,Math.round(x.peso/maxWeight*100)),waterPct=Math.max(1,Math.min(100,x.agua/x.peso*100)),dryPct=100-waterPct;return `<div title="${esc(x.label)} · peso ${fmt(x.peso)} kg · água ${fmt(x.agua)} kg${x.aguaEstimada?" (estimada)":""} · sem água ${fmt(x.seco)} kg" style="display:flex;flex-direction:column;align-items:center;justify-content:end;min-width:0;gap:5px"><small style="font-size:10px;color:#86efac;white-space:nowrap">${fmt(x.peso)} kg</small><div style="height:165px;width:100%;display:flex;align-items:end"><div style="height:${totalPct}%;width:100%;position:relative;border:2px solid #22c55e;border-radius:6px 6px 2px 2px;overflow:hidden;background:#052e16"><div style="height:${waterPct}%;background:#38bdf8;color:#075985;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;min-height:10px">${waterPct>16?fmt(x.agua):""}</div><div style="height:${dryPct}%;background:#facc15;color:#713f12;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;min-height:8px">${dryPct>12?fmt(x.seco):""}</div></div></div><small style="font-size:10px;color:#cbd5e1;white-space:nowrap">${esc(x.label)}</small><small style="font-size:9px;color:${x.aguaEstimada?"#fbbf24":"#94a3b8"};white-space:nowrap">${x.aguaEstimada?"água est.":"água medida"}</small></div>`}).join("");
+  return `<h3 style="margin:14px 0 8px">⚖️ Peso, água e massa sem água</h3><div style="display:grid;grid-template-columns:repeat(${columns},minmax(30px,1fr));gap:6px;align-items:end;height:245px;padding:12px;background:#0f172a;border-radius:12px">${bars}</div><div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:10px;color:#cbd5e1"><span><i style="display:inline-block;width:10px;height:10px;background:#22c55e;border:2px solid #16a34a;border-radius:2px;vertical-align:-2px"></i> Peso</span><span><i style="display:inline-block;width:10px;height:10px;background:#38bdf8;border-radius:2px;vertical-align:-2px"></i> Água</span><span><i style="display:inline-block;width:10px;height:10px;background:#facc15;border-radius:2px;vertical-align:-2px"></i> Massa sem água / gordura estimada</span></div><div style="margin-top:8px;padding:10px 12px;background:#172033;border-radius:10px;color:#cbd5e1;font-size:11px;line-height:1.45"><b style="color:#86efac">Comparação:</b> redução total ${fmt(weightChange)} kg = água ${fmt(waterChange)} kg + trecho amarelo ${fmt(yellowChange)} kg.<br><b style="color:#86efac">Déficit calórico equivalente:</b> ${fmt(expected)} kg · diferença para o trecho amarelo: ${fmt(yellowChange-expected)} kg.<br><small>Os números são calculados entre a primeira e a última aferição disponível no período.</small></div>${note}`;
+}
 async function loadHistory(start,end){
   const box=document.getElementById("historyChart");if(!box)return;
   try{
@@ -3758,9 +3983,10 @@ async function loadHistory(start,end){
     const maxSaldo=Math.max(1,...j.days.map(x=>Math.abs(Number(x.saldo_kcal||0))));
     const head="<h3 style='margin:8px 0'>📈 Evolução diária</h3>";
     const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
+    const bodyChart=bodyCompositionChart(j);
     const energyTitle="<h3 style='margin:14px 0 8px'>⚖️ Saldo energético (basal + ativo - consumo)</h3>";
     const energyChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${deficit?"#86efac":"#fecdd3"}'>${fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
-    box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+energyTitle+energyChart;
+    box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart;
   }catch(e){box.innerHTML=""}
 }
 function energyDeficitCard(totals={}){
@@ -4111,9 +4337,10 @@ class H(BaseHTTPRequestHandler):
                 water_entries=c.execute("SELECT id,hora,quantidade_ml FROM hidratacao WHERE usuario_id=? AND data=? ORDER BY id DESC",(self.user["id"],d,)).fetchall()
                 g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
                 energy=_daily_energy_snapshot(c,self.user["id"],d)
+                measurement=c.execute("SELECT data,peso_kg,agua_kg,agua_estimada FROM medicoes_corporais WHERE usuario_id=? AND data=?",(self.user["id"],d)).fetchone()
             finally:
                 c.close()
-            self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"water_entries":[dict(x) for x in water_entries],"goals":goal_dict(g),"energy":energy});return
+            self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"water_entries":[dict(x) for x in water_entries],"goals":goal_dict(g),"energy":energy,"body_measurement":dict(measurement) if measurement else None});return
         if p.path.startswith("/api/food/"):
             try: food_id=int(p.path.rsplit("/",1)[1])
             except ValueError:
@@ -4175,6 +4402,7 @@ class H(BaseHTTPRequestHandler):
             rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
             waters=c.execute("SELECT data,COALESCE(SUM(quantidade_ml),0) AS water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=? GROUP BY data ORDER BY data",(self.user["id"],start,end)).fetchall()
             active_rows=c.execute("SELECT data,calorias_kcal,basal_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchall()
+            measurement_rows=c.execute("SELECT data,peso_kg,agua_kg,agua_estimada FROM medicoes_corporais WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data",(self.user["id"],start,end)).fetchall()
             profile=c.execute("SELECT idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
             goals_row=c.execute("SELECT calorias_kcal FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
           finally:
@@ -4183,6 +4411,7 @@ class H(BaseHTTPRequestHandler):
           for r in rows:
             by_day.setdefault(r["data"],[]).append(r)
           wmap={x["data"]:float(x["water"] or 0) for x in waters}
+          mmap={x["data"]:{"data":x["data"],"peso_kg":float(x["peso_kg"]),"agua_kg":float(x["agua_kg"]),"agua_estimada":bool(x.get("agua_estimada")),"massa_sem_agua_kg":round(float(x["peso_kg"])-float(x["agua_kg"]),3)} for x in measurement_rows}
           amap={x["data"]:dict(x) for x in active_rows}
           basal_fallback=_basal_from_profile_row(profile)
           if basal_fallback is None:
@@ -4223,11 +4452,13 @@ class H(BaseHTTPRequestHandler):
                 water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchone()["total_water"]
                 g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
                 active_rows=c.execute("SELECT data,calorias_kcal,basal_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchall()
+                measurement_rows=c.execute("SELECT data,peso_kg,agua_kg,agua_estimada FROM medicoes_corporais WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data",(self.user["id"],start,end)).fetchall()
                 profile=c.execute("SELECT idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
             finally:c.close()
             days=(d2-d1).days+1
             by_day={}
             for r in rows:by_day.setdefault(r["data"],[]).append(r)
+            mmap={x["data"]:{"data":x["data"],"peso_kg":float(x["peso_kg"]),"agua_kg":float(x["agua_kg"]),"agua_estimada":bool(x.get("agua_estimada")),"massa_sem_agua_kg":round(float(x["peso_kg"])-float(x["agua_kg"]),3)} for x in measurement_rows}
             amap={x["data"]:dict(x) for x in active_rows}
             basal_fallback=_basal_from_profile_row(profile)
             if basal_fallback is None: basal_fallback=float(goal_dict(g).get("calorias_kcal") or 0)
@@ -4244,12 +4475,14 @@ class H(BaseHTTPRequestHandler):
                 if status=="deficit": totals["deficit_days"]+=1
                 elif status=="superavit": totals["superavit_days"]+=1
                 totals["basal_kcal"]+=basal;totals["active_kcal"]+=active;totals["consumed_kcal"]+=consumed;totals["saldo_kcal"]+=saldo
-                energy_days.append({"data":ds,"label":cur.strftime("%d/%m"),"basal_kcal":round(basal,2),"active_kcal":round(active,2),"consumed_kcal":round(consumed,2),"saldo_kcal":round(saldo,2),"status":status,"has_active_input":ds in amap})
+                energy_days.append({"data":ds,"label":cur.strftime("%d/%m"),"basal_kcal":round(basal,2),"active_kcal":round(active,2),"consumed_kcal":round(consumed,2),"saldo_kcal":round(saldo,2),"status":status,"has_active_input":ds in amap,"body_measurement":mmap.get(ds)})
                 cur+=timedelta(days=1)
+            totals["estimated_fat_loss_kg"]=round(max(0.0,totals["saldo_kcal"])/KCAL_PER_KG_FAT,3)
             self.js({
                 "start":start,"end":end,"days":days,
                 "start_br":d1.strftime("%d/%m/%Y"),"end_br":d2.strftime("%d/%m/%Y"),
                 "daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":goal_dict(g),
+                "body_measurements":list(mmap.values()),
                 "energy":{"days":energy_days,"totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()}}
             })
             return
@@ -4503,6 +4736,48 @@ class H(BaseHTTPRequestHandler):
                 if ml<=0: raise ValueError("Quantidade de água inválida")
                 if ml>10000:raise ValueError("Quantidade de água muito alta para um único registro.")
                 c=ddb();c.execute("INSERT INTO hidratacao(usuario_id,data,hora,quantidade_ml) VALUES(?,?,?,?)",(self.user["id"],x.get("data",today_sp().isoformat()),now_sp().strftime("%H:%M"),ml));c.commit();self.js({"ok":True})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+        if self.path=="/api/body_measurement":
+            c=None
+            try:
+                x=self.body()
+                target_day=str(x.get("data") or today_sp().isoformat())
+                try:
+                    day_value=date.fromisoformat(target_day)
+                except Exception:
+                    raise ValueError("Data inválida.")
+                if day_value>today_sp():
+                    raise ValueError("A aferição não pode ser de uma data futura.")
+                peso=float(x.get("peso_kg",0))
+                if not math.isfinite(peso) or peso<20 or peso>400:
+                    raise ValueError("Peso inválido. Use um valor entre 20 e 400 kg.")
+                agua_raw=str(x.get("agua_kg") or "").strip()
+                estimada=False
+                if agua_raw:
+                    agua=float(agua_raw)
+                else:
+                    c=ddb()
+                    profile=c.execute("SELECT sexo FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
+                    sexo=str((profile or {}).get("sexo") or "").upper()
+                    fator=0.58 if sexo=="M" else 0.52 if sexo=="F" else 0.55
+                    agua=round(peso*fator,2)
+                    estimada=True
+                if not math.isfinite(agua) or agua<=0 or agua>peso:
+                    raise ValueError("Massa de água inválida. Informe um valor positivo até o peso corporal.")
+                if c is None:
+                    c=ddb()
+                row=c.execute("""INSERT INTO medicoes_corporais(usuario_id,data,peso_kg,agua_kg,agua_estimada,atualizado_em)
+                                VALUES(?,?,?,?,?,NOW())
+                                ON CONFLICT(usuario_id,data) DO UPDATE SET peso_kg=EXCLUDED.peso_kg,agua_kg=EXCLUDED.agua_kg,agua_estimada=EXCLUDED.agua_estimada,atualizado_em=NOW()
+                                RETURNING data,peso_kg,agua_kg,agua_estimada""",(self.user["id"],target_day,peso,agua,estimada)).fetchone()
+                c.commit()
+                result=dict(row);result["massa_sem_agua_kg"]=round(float(result["peso_kg"])-float(result["agua_kg"]),3);result["agua_estimada"]=estimada
+                self.js({"ok":True,"body_measurement":result})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
