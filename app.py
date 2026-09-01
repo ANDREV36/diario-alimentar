@@ -3800,16 +3800,21 @@ class H(BaseHTTPRequestHandler):
             try:
                 rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
             finally:c.close()
-            nc=ndb();pc=ddb();sources=[]
+            nc=ndb();pc=ddb();sources_by_food={}
             try:
                 for r in rows:
                     aid=int(r["alimento_id"]);f=pc.execute("SELECT * FROM alimentos_usuario WHERE id=? AND usuario_id=?",(-aid,self.user["id"])).fetchone() if aid<0 else nc.execute("SELECT * FROM alimentos WHERE id=?",(aid,)).fetchone()
                     if not f or nutrient not in f.keys() or f[nutrient] is None: continue
                     amount=float(f[nutrient])*float(r["quantidade_g"])/100.0
                     if abs(amount)<0.000001: continue
-                    sources.append({"nome":r["alimento_nome"],"quantidade_g":float(r["quantidade_g"]),"unidade":r.get("unidade","g"),"refeicao":r["refeicao"],"data":r["data"],"valor":amount})
+                    key=(aid,str(r["alimento_nome"]).strip().lower(),str(r.get("unidade","g")))
+                    if key not in sources_by_food:
+                        sources_by_food[key]={"nome":r["alimento_nome"],"quantidade_g":0.0,"unidade":r.get("unidade","g"),"refeicao":"Período","data":f"{start} a {end}","valor":0.0}
+                    sources_by_food[key]["quantidade_g"]+=float(r["quantidade_g"])
+                    sources_by_food[key]["valor"]+=amount
             finally:
                 nc.close();pc.close()
+            sources=list(sources_by_food.values())
             sources.sort(key=lambda x:x["valor"],reverse=True)
             self.js({"nutrient":nutrient,"total":sum(x["valor"] for x in sources),"sources":sources})
             return
