@@ -756,6 +756,7 @@ def report_period_data(user_id, start, end):
         basal_fallback = float(goals.get("calorias_kcal") or 0)
     energy_days = []
     energy_totals = {"basal_kcal": 0.0, "active_kcal": 0.0, "consumed_kcal": 0.0, "saldo_kcal": 0.0, "deficit_days": 0, "superavit_days": 0}
+    current_day = today_sp()
     rows, cursor = [], d1
     while cursor <= d2:
         day_key = cursor.isoformat()
@@ -772,15 +773,17 @@ def report_period_data(user_id, start, end):
         basal_kcal = float(entry.get("basal_kcal") or basal_fallback or 0)
         active_kcal = float(entry.get("calorias_kcal") or 0)
         saldo_kcal = basal_kcal + active_kcal - consumed_kcal
-        status = "deficit" if saldo_kcal > 0 else "superavit" if saldo_kcal < 0 else "equilibrio"
-        if status == "deficit":
-            energy_totals["deficit_days"] += 1
-        elif status == "superavit":
-          energy_totals["superavit_days"] += 1
-        energy_totals["basal_kcal"] += basal_kcal
-        energy_totals["active_kcal"] += active_kcal
-        energy_totals["consumed_kcal"] += consumed_kcal
-        energy_totals["saldo_kcal"] += saldo_kcal
+        is_current_day = cursor == current_day
+        status = "em andamento" if is_current_day else "deficit" if saldo_kcal > 0 else "superavit" if saldo_kcal < 0 else "equilibrio"
+        if not is_current_day:
+            if status == "deficit":
+                energy_totals["deficit_days"] += 1
+            elif status == "superavit":
+                energy_totals["superavit_days"] += 1
+            energy_totals["basal_kcal"] += basal_kcal
+            energy_totals["active_kcal"] += active_kcal
+            energy_totals["consumed_kcal"] += consumed_kcal
+            energy_totals["saldo_kcal"] += saldo_kcal
         energy_days.append({
             "data": day_key,
             "label": cursor.strftime("%d/%m"),
@@ -790,6 +793,7 @@ def report_period_data(user_id, start, end):
             "saldo_kcal": float(round(saldo_kcal, 2)),
             "status": status,
             "has_active_input": day_key in active_by_day,
+            "is_current_day": is_current_day,
         })
         cursor += timedelta(days=1)
     energy_totals = {k: (float(round(v, 2)) if isinstance(v, float) else v) for k, v in energy_totals.items()}
@@ -1145,8 +1149,9 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
             pdf.drawString(x + 3, cell_y + 9, f"Água: {water_ml / 1000:.2f} L")
             if energy:
                 daily_saldo = float(energy.get("saldo_kcal") or 0)
-                daily_status = "DÉFICIT" if daily_saldo > 0 else "SUPERÁVIT" if daily_saldo < 0 else "EQUILÍBRIO"
-                daily_color = "#166534" if daily_saldo > 0 else "#be123c" if daily_saldo < 0 else "#475569"
+                is_current_day = bool(energy.get("is_current_day"))
+                daily_status = "EM ANDAMENTO" if is_current_day else "DÉFICIT" if daily_saldo > 0 else "SUPERÁVIT" if daily_saldo < 0 else "EQUILÍBRIO"
+                daily_color = "#94a3b8" if is_current_day else "#166534" if daily_saldo > 0 else "#be123c" if daily_saldo < 0 else "#475569"
                 pdf.setFillColor(colors.HexColor(daily_color))
                 pdf.setFont("Helvetica-Bold", 5.1)
                 pdf.drawString(x + 3, cell_y + 3, f"Saldo: {daily_saldo:+.0f} kcal · {daily_status}")
@@ -1632,6 +1637,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
         value = float(
             item.get("saldo_kcal") or 0
         )
+        is_current_day = bool(item.get("is_current_day"))
 
         x = (
             chart_left
@@ -1662,7 +1668,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             y = mid_y
 
             pdf.setFillColor(
-                colors.HexColor("#16a34a")
+                colors.HexColor("#94a3b8" if is_current_day else "#16a34a")
             )
 
             pdf.roundRect(
@@ -1690,7 +1696,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             y = mid_y - bar_h
 
             pdf.setFillColor(
-                colors.HexColor("#dc2626")
+                colors.HexColor("#94a3b8" if is_current_day else "#dc2626")
             )
 
             pdf.roundRect(
@@ -1738,9 +1744,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
         pdf.setFillColor(colors.HexColor("#334155"))
         pdf.setFont("Helvetica-Bold", 8)
 
-        value_label = (
-            f"{value:,.0f}".replace(",", ".")
-        )
+        value_label = "EM ANDAMENTO" if is_current_day else f"{value:,.0f}".replace(",", ".")
 
         pdf.drawCentredString(
             x + bar_w / 2,
@@ -1851,7 +1855,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
     pdf.drawString(
         left,
         15 * mm,
-        "Saldo positivo representa déficit energético; saldo negativo representa superávit energético."
+        "Saldo positivo representa déficit energético; saldo negativo representa superávit energético. O dia atual aparece em cinza e não entra no déficit acumulado por ainda estar em andamento."
     )
 
     # ============================================================
@@ -2173,7 +2177,7 @@ def _report_energy_table(dataset, styles, available_width):
     data = [[_report_paragraph(value, styles["table_header"]) for value in header]]
     for day in (dataset.get("energy") or {}).get("days", []):
         saldo = float(day.get("saldo_kcal") or 0)
-        status = "Déficit" if saldo > 0 else "Superávit" if saldo < 0 else "Equilíbrio"
+        status = "Em andamento" if day.get("is_current_day") else "Déficit" if saldo > 0 else "Superávit" if saldo < 0 else "Equilíbrio"
         values = [
             day.get("label", ""),
             f"{_compact_number(day.get('basal_kcal'), 'kcal')} kcal",
@@ -4000,7 +4004,7 @@ async function loadHistory(start,end,periodBodyMeasurements=[]){
     const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     const bodyChart=bodyCompositionChart(j);
     const energyTitle="<h3 style='margin:14px 0 8px'>⚖️ Saldo energético (basal + ativo - consumo)</h3>";
-    const energyChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${deficit?"#86efac":"#fecdd3"}'>${fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
+    const energyChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const current=Boolean(x.is_current_day);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=current?"linear-gradient(#94a3b8,#64748b)":deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal${current?" · dia atual não incluído no déficit acumulado":""}' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${current?"#cbd5e1":deficit?"#86efac":"#fecdd3"}'>${current?"em andamento":fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart;
   }catch(e){box.innerHTML=""}
 }
@@ -4440,6 +4444,7 @@ class H(BaseHTTPRequestHandler):
           if basal_fallback is None:
             basal_fallback=float((goals_row or {}).get("calorias_kcal") or 0)
           totals={"basal_kcal":0.0,"active_kcal":0.0,"consumed_kcal":0.0,"saldo_kcal":0.0,"deficit_days":0,"superavit_days":0}
+          current_day=today_sp().isoformat()
           d1=date.fromisoformat(start);d2=date.fromisoformat(end);out=[];cur=d1
           while cur<=d2:
             ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"])
@@ -4447,16 +4452,18 @@ class H(BaseHTTPRequestHandler):
             active=float((amap.get(ds) or {}).get("calorias_kcal") or 0)
             basal=float((amap.get(ds) or {}).get("basal_kcal") or basal_fallback or 0)
             saldo=basal+active-consumed
-            status="deficit" if saldo>0 else "superavit" if saldo<0 else "equilibrio"
-            if status=="deficit":
-              totals["deficit_days"]+=1
-            elif status=="superavit":
-              totals["superavit_days"]+=1
-            totals["basal_kcal"]+=basal
-            totals["active_kcal"]+=active
-            totals["consumed_kcal"]+=consumed
-            totals["saldo_kcal"]+=saldo
-            out.append({"data":ds,"energia_kcal":t["energia_kcal"],"proteina_g":t["proteina_g"],"agua_ml":wmap.get(ds,0),"basal_kcal":round(basal,2),"active_kcal":round(active,2),"consumed_kcal":round(consumed,2),"saldo_kcal":round(saldo,2),"status":status,"has_active_input":ds in amap,"body_measurement":mmap.get(ds)})
+            is_current_day=ds==current_day
+            status="em andamento" if is_current_day else "deficit" if saldo>0 else "superavit" if saldo<0 else "equilibrio"
+            if not is_current_day:
+              if status=="deficit":
+                totals["deficit_days"]+=1
+              elif status=="superavit":
+                totals["superavit_days"]+=1
+              totals["basal_kcal"]+=basal
+              totals["active_kcal"]+=active
+              totals["consumed_kcal"]+=consumed
+              totals["saldo_kcal"]+=saldo
+            out.append({"data":ds,"energia_kcal":t["energia_kcal"],"proteina_g":t["proteina_g"],"agua_ml":wmap.get(ds,0),"basal_kcal":round(basal,2),"active_kcal":round(active,2),"consumed_kcal":round(consumed,2),"saldo_kcal":round(saldo,2),"status":status,"has_active_input":ds in amap,"is_current_day":is_current_day,"body_measurement":mmap.get(ds)})
             cur+=timedelta(days=1)
           totals["estimated_fat_loss_kg"]=round(max(0.0,totals["saldo_kcal"])/KCAL_PER_KG_FAT,3)
           self.js({"days":out,"energy_totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()},"body_measurements":list(mmap.values())});return
@@ -4492,6 +4499,7 @@ class H(BaseHTTPRequestHandler):
             if basal_fallback is None: basal_fallback=float(goal_dict(g).get("calorias_kcal") or 0)
             energy_days=[]
             totals={"basal_kcal":0.0,"active_kcal":0.0,"consumed_kcal":0.0,"saldo_kcal":0.0,"deficit_days":0,"superavit_days":0}
+            current_day=today_sp()
             cur=d1
             while cur<=d2:
                 ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"])
@@ -4499,11 +4507,13 @@ class H(BaseHTTPRequestHandler):
                 active=float((amap.get(ds) or {}).get("calorias_kcal") or 0)
                 basal=float((amap.get(ds) or {}).get("basal_kcal") or basal_fallback or 0)
                 saldo=basal+active-consumed
-                status="deficit" if saldo>0 else "superavit" if saldo<0 else "equilibrio"
-                if status=="deficit": totals["deficit_days"]+=1
-                elif status=="superavit": totals["superavit_days"]+=1
-                totals["basal_kcal"]+=basal;totals["active_kcal"]+=active;totals["consumed_kcal"]+=consumed;totals["saldo_kcal"]+=saldo
-                energy_days.append({"data":ds,"label":cur.strftime("%d/%m"),"basal_kcal":round(basal,2),"active_kcal":round(active,2),"consumed_kcal":round(consumed,2),"saldo_kcal":round(saldo,2),"status":status,"has_active_input":ds in amap,"body_measurement":mmap.get(ds)})
+                is_current_day=cur==current_day
+                status="em andamento" if is_current_day else "deficit" if saldo>0 else "superavit" if saldo<0 else "equilibrio"
+                if not is_current_day:
+                    if status=="deficit": totals["deficit_days"]+=1
+                    elif status=="superavit": totals["superavit_days"]+=1
+                    totals["basal_kcal"]+=basal;totals["active_kcal"]+=active;totals["consumed_kcal"]+=consumed;totals["saldo_kcal"]+=saldo
+                energy_days.append({"data":ds,"label":cur.strftime("%d/%m"),"basal_kcal":round(basal,2),"active_kcal":round(active,2),"consumed_kcal":round(consumed,2),"saldo_kcal":round(saldo,2),"status":status,"has_active_input":ds in amap,"is_current_day":is_current_day,"body_measurement":mmap.get(ds)})
                 cur+=timedelta(days=1)
             totals["estimated_fat_loss_kg"]=round(max(0.0,totals["saldo_kcal"])/KCAL_PER_KG_FAT,3)
             self.js({
