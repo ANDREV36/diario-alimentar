@@ -1784,6 +1784,54 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             )
 
     # ============================================================
+    # LINHA DE PESO (EIXO SECUNDÁRIO EM KG)
+    # ============================================================
+
+    body_by_day = {
+        str(item.get("data")): item
+        for item in (dataset.get("body_measurements") or [])
+        if float(item.get("peso_kg") or 0) > 0
+    }
+    weight_items = [body_by_day.get(str(item.get("data"))) for item in days]
+    weight_items = [item for item in weight_items if item]
+    if weight_items:
+        weight_values = [float(item.get("peso_kg") or 0) for item in weight_items]
+        weight_min = min(weight_values)
+        weight_max = max(weight_values)
+        weight_range = max(0.5, weight_max - weight_min)
+        weight_bottom = chart_bottom + 8 * mm
+        weight_top = chart_top - 10 * mm
+        weight_points = []
+        for item in days:
+            body = body_by_day.get(str(item.get("data")))
+            if not body:
+                continue
+            idx = days.index(item)
+            x = chart_left + (idx + 0.5) * step_x
+            value = float(body.get("peso_kg") or 0)
+            y = weight_bottom + ((value - weight_min) / weight_range) * (weight_top - weight_bottom)
+            weight_points.append((x, y, value))
+        pdf.setStrokeColor(colors.HexColor("#db2777"))
+        pdf.setLineWidth(2.0)
+        for first, second in zip(weight_points, weight_points[1:]):
+            pdf.line(first[0], first[1], second[0], second[1])
+        for x, y, value in weight_points:
+            pdf.setFillColor(colors.HexColor("#ec4899"))
+            pdf.circle(x, y, 2.2 * mm, stroke=0, fill=1)
+            pdf.setStrokeColor(colors.white)
+            pdf.setLineWidth(0.7)
+            pdf.circle(x, y, 2.2 * mm, stroke=1, fill=0)
+            pdf.setFillColor(colors.HexColor("#9d174d"))
+            pdf.setFont("Helvetica-Bold", 7)
+            pdf.drawCentredString(x, y + 4 * mm, f"{value:.1f} kg")
+        pdf.setFillColor(colors.HexColor("#be185d"))
+        pdf.setFont("Helvetica-Bold", 7)
+        pdf.drawRightString(chart_right, chart_top - 4 * mm, "PESO (kg)")
+        pdf.setFont("Helvetica", 6.5)
+        pdf.drawRightString(chart_right, weight_top, f"{weight_max:.1f} kg")
+        pdf.drawRightString(chart_right, weight_bottom - 2, f"{weight_min:.1f} kg")
+
+    # ============================================================
     # LEGENDA
     # ============================================================
 
@@ -1834,6 +1882,14 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
         legend_y,
         "Superávit calórico"
     )
+
+    # Peso
+    legend_x3 = left + 112 * mm
+    pdf.setFillColor(colors.HexColor("#ec4899"))
+    pdf.roundRect(legend_x3, legend_y, 7 * mm, 3.5 * mm, 1 * mm, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.setFont("Helvetica-Bold", 8.5)
+    pdf.drawString(legend_x3 + 10 * mm, legend_y, "Peso (linha, kg)")
 
     # Referência
     pdf.setFillColor(colors.HexColor("#64748b"))
@@ -4001,12 +4057,19 @@ async function loadHistory(start,end,periodBodyMeasurements=[]){
     if(!Array.isArray(j.body_measurements)||!j.body_measurements.length)j.body_measurements=Array.isArray(periodBodyMeasurements)?periodBodyMeasurements:[];
     const max=Math.max(1,...j.days.map(x=>Number(x.energia_kcal||0)));
     const maxSaldo=Math.max(1,...j.days.map(x=>Math.abs(Number(x.saldo_kcal||0))));
+    const weightMeasurements=(j.body_measurements||[]).map(x=>({data:String(x.data||""),peso:Number(x.peso_kg||0)})).filter(x=>x.peso>0).sort((a,b)=>a.data.localeCompare(b.data));
+    const weightByDay=new Map(j.days.map((x,index)=>[x.data,index]));
+    const weightMin=weightMeasurements.length?Math.min(...weightMeasurements.map(x=>x.peso)):0;
+    const weightMax=weightMeasurements.length?Math.max(...weightMeasurements.map(x=>x.peso)):0;
+    const weightRange=Math.max(0.5,weightMax-weightMin);
+    const weightPoints=weightMeasurements.map(x=>{const index=weightByDay.get(x.data);const px=((index+0.5)/Math.max(1,j.days.length))*100;const py=94-((x.peso-weightMin)/weightRange)*78;return {x,px,py}}).filter(x=>Number.isFinite(x.px)&&Number.isFinite(x.py));
+    const weightSvg=weightPoints.length?`<div style='position:absolute;left:12px;right:12px;top:30px;height:150px;z-index:3;pointer-events:none'><svg viewBox='0 0 100 100' preserveAspectRatio='none' style='width:100%;height:100%;overflow:visible'><polyline points='${weightPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#f472b6' stroke-width='1.5' vector-effect='non-scaling-stroke'/>${weightPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.8' fill='#f472b6' stroke='#fff' stroke-width='.7' vector-effect='non-scaling-stroke'/>`).join("")}</svg><span style='position:absolute;right:0;top:-18px;color:#f9a8d4;font-size:10px;font-weight:800'>Peso ${fmt(weightMax)}–${fmt(weightMin)} kg</span></div>`:"";
     const head="<h3 style='margin:8px 0'>📈 Evolução diária</h3>";
     const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     const bodyChart=bodyCompositionChart(j);
     const energyTitle="<h3 style='margin:14px 0 8px'>⚖️ Saldo energético (basal + ativo - consumo)</h3>";
-    const energyChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const current=Boolean(x.is_current_day);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=current?"linear-gradient(#94a3b8,#64748b)":deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal${current?" · dia atual não incluído no déficit acumulado":""}' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${current?"#cbd5e1":deficit?"#86efac":"#fecdd3"}'>${current?"em andamento":fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
-    box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart;
+    const energyChart=`<div style='position:relative;display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>${weightSvg}`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const current=Boolean(x.is_current_day);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=current?"linear-gradient(#94a3b8,#64748b)":deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal${current?" · dia atual não incluído no déficit acumulado":""}' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${current?"#cbd5e1":deficit?"#86efac":"#fecdd3"}'>${current?"em andamento":fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
+    box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart+"<small style='display:block;color:#f9a8d4;margin-top:5px'>Linha rosa: peso aferido (kg), usando escala própria. Os pontos aparecem somente nos dias com aferição.</small>";
   }catch(e){box.innerHTML=""}
 }
 function energyDeficitCard(totals={}){
