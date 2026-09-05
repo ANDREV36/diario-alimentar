@@ -692,7 +692,13 @@ def _food_energy_cache(rows, user_id):
                 food = pc.execute("SELECT energia_kcal FROM alimentos_usuario WHERE id=? AND usuario_id=?", (-aid, user_id)).fetchone()
             else:
                 food = nc.execute("SELECT energia_kcal FROM alimentos WHERE id=?", (aid,)).fetchone()
-            cache[aid] = float((food or {}).get("energia_kcal") or 0)
+            energy_value = 0
+            if food:
+                try:
+                    energy_value = food["energia_kcal"]
+                except (KeyError, IndexError, TypeError):
+                    energy_value = 0
+            cache[aid] = float(energy_value or 0)
     finally:
         nc.close()
         if pc:
