@@ -78,6 +78,21 @@ def today_sp():
 
 
 MEALS = ["Café da manhã", "Almoço", "Lanche", "Jantar", "Ceia"]
+
+def meal_for_time(moment=None):
+    """Classifica a inclusão pela hora local de São Paulo, sem depender do seletor da tela."""
+    moment = moment or now_sp()
+    minutes = moment.hour * 60 + moment.minute
+    if minutes == 0 or minutes >= 22 * 60:
+        return "Ceia"
+    if minutes < 12 * 60:
+        return "Café da manhã"
+    if minutes < 15 * 60:
+        return "Almoço"
+    if minutes < 18 * 60:
+        return "Lanche"
+    return "Jantar"
+
 DEFAULT_GOALS = {"calorias_kcal":2300.0,"proteina_g":180.0,"carboidratos_g":220.0,"gorduras_g":70.0,"fibras_g":30.0,"sodio_mg":2000.0,"agua_ml":4000.0,"manual_override":False}
 KCAL_PER_KG_FAT = 7000.0
 
@@ -3564,7 +3579,7 @@ async function confirmPlateItems(){
   if(!items.length){alert("Inclua ao menos um alimento.");return}
   if(items.some(x=>(x.alimento_id===null&&!x.nutrientes_estimados)||!x.alimento_nome||!(x.quantidade_g>0))){alert("Corrija os alimentos sem estimativa ou selecione-os na base antes de confirmar.");return}
   const btn=[...document.querySelectorAll("#plateReviewModal button")].find(x=>x.textContent.includes("CONFIRMAR"));if(btn){btn.disabled=true;btn.textContent="ADICIONANDO..."}
-  try{const result=await api("/api/consume_batch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,refeicao:plateState.meal||meal,items})});closePlateReview();const created=(result.created_foods||[]).length;document.getElementById("platePhotoStatus").textContent="Prato adicionado em "+(plateState.meal||meal)+(created?". "+created+" alimento(s) também foram salvos na sua base pessoal.":".");await refresh()}catch(e){alert("Não foi possível adicionar o prato: "+e.message);if(btn){btn.disabled=false;btn.textContent="✓ CONFIRMAR E ADICIONAR"}}
+  try{const result=await api("/api/consume_batch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:day.value,refeicao:plateState.meal||meal,items})});closePlateReview();const created=(result.created_foods||[]).length;const registeredMeal=result.refeicao||plateState.meal||meal;document.getElementById("platePhotoStatus").textContent="Prato adicionado em "+registeredMeal+(created?". "+created+" alimento(s) também foram salvos na sua base pessoal.":".");await refresh()}catch(e){alert("Não foi possível adicionar o prato: "+e.message);if(btn){btn.disabled=false;btn.textContent="✓ CONFIRMAR E ADICIONAR"}}
 }
 function chooseNutritionPhoto(file,origin){
   if(!file)return;
@@ -3963,7 +3978,7 @@ function drawEnergyBalance(energy){
   const color=deficit?"#22c55e":surplus?"#ef4444":"#94a3b8";
   const side=deficit?"right":"left";
   const previewField=canPreview?`<div style="margin:9px 0 8px;padding:9px;border-radius:10px;background:#0f172a;border:1px solid #334155"><label for="activePreviewInput" style="display:block;font-size:12px;color:#e2e8f0;font-weight:bold;margin-bottom:6px">Gasto ativo previsto para hoje</label><div style="display:flex;gap:7px;align-items:center"><input id="activePreviewInput" type="number" min="0" max="6000" step="1" value="${previewActive}" onkeydown="if(event.key==='Enter'){event.preventDefault();applyActivePreview('${date}')}" style="min-width:0;flex:1;padding:9px;border:1px solid #475569;border-radius:8px;background:#111827;color:#fff"><span style="font-size:12px;color:#cbd5e1">kcal</span><button type="button" onclick="applyActivePreview('${date}')" style="padding:9px 11px;border:0;border-radius:8px;background:#22c55e;color:#06210f;font-weight:bold">APLICAR</button></div><small style="display:block;color:#94a3b8!important;margin-top:6px">Estimativa temporária usada somente nesta balança. O valor real continuará sendo informado amanhã.</small></div>`:`<small style="display:block;color:#94a3b8!important;margin:7px 0">Gasto ativo registrado: ${fmt(actualActive)} kcal</small>`;
-  box.innerHTML=`<div class="metric" style="margin-top:10px;padding:12px;background:rgba(255,255,255,.07);border:1px solid #ffffff12;border-radius:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><small style="font-size:14px;color:#f8fafc!important;font-weight:bold">⚖️ Saldo energético</small><strong style="font-size:15px;color:${color}">${label}</strong></div>${previewField}<b style="display:block;font-size:22px;color:${color};margin:7px 0 3px">${fmt(saldo)} kcal</b><small style="display:block;color:#cbd5e1!important;font-size:12px;line-height:1.45">Basal ${fmt(basal)} + ${canPreview?'ativo previsto':'ativo'} ${fmt(active)} - consumido ${fmt(consumed)}</small><div style="position:relative;height:22px;margin:14px 2px 6px;background:#1e293b;border:1px solid #475569;border-radius:11px;overflow:hidden"><div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f8fafc;z-index:2"></div>${equilibrium?"":`<div style="position:absolute;top:4px;bottom:4px;${side}:50%;width:${magnitude/2}%;background:${color};border-radius:8px"></div>`}</div><div style="display:flex;justify-content:space-between;gap:4px;font-size:11px;color:#cbd5e1"><span style="color:#ef4444;font-weight:bold">Superávit (-)</span><span>0 kcal</span><span style="color:#22c55e;font-weight:bold">Déficit (+)</span></div></div>`;
+  box.innerHTML=`<div class="metric" style="margin-top:10px;padding:12px;background:rgba(255,255,255,.07);border:1px solid #ffffff12;border-radius:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><small style="font-size:14px;color:#f8fafc!important;font-weight:bold">⚖️ Saldo energético</small><strong style="font-size:15px;color:${color}">${label}</strong></div>${previewField}<b style="display:block;font-size:22px;color:${color};margin:7px 0 3px">${Math.round(saldo).toLocaleString("pt-BR")} kcal</b><small style="display:block;color:#cbd5e1!important;font-size:12px;line-height:1.45">Basal ${fmt(basal)} + ${canPreview?'ativo previsto':'ativo'} ${fmt(active)} - consumido ${fmt(consumed)}</small><div style="position:relative;height:22px;margin:14px 2px 6px;background:#1e293b;border:1px solid #475569;border-radius:11px;overflow:hidden"><div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f8fafc;z-index:2"></div>${equilibrium?"":`<div style="position:absolute;top:4px;bottom:4px;${side}:50%;width:${magnitude/2}%;background:${color};border-radius:8px"></div>`}</div><div style="display:flex;justify-content:space-between;gap:4px;font-size:11px;color:#cbd5e1"><span style="color:#ef4444;font-weight:bold">Superávit (-)</span><span>0 kcal</span><span style="color:#22c55e;font-weight:bold">Déficit (+)</span></div></div>`;
 }
 function toggleWaterRecords(){const box=document.getElementById("waterRecords"),btn=document.getElementById("waterRecordsToggle");if(!box||!btn)return;const open=box.style.display!=="none";box.style.display=open?"none":"block";btn.textContent=open?"VER REGISTROS ▼":"OCULTAR REGISTROS ▲";btn.setAttribute("aria-expanded",String(!open));}
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
@@ -4063,12 +4078,13 @@ async function loadHistory(start,end,periodBodyMeasurements=[]){
     const weightMax=weightMeasurements.length?Math.max(...weightMeasurements.map(x=>x.peso)):0;
     const weightRange=Math.max(0.5,weightMax-weightMin);
     const weightPoints=weightMeasurements.map(x=>{const index=weightByDay.get(x.data);const px=((index+0.5)/Math.max(1,j.days.length))*100;const py=94-((x.peso-weightMin)/weightRange)*78;return {x,px,py}}).filter(x=>Number.isFinite(x.px)&&Number.isFinite(x.py));
-    const weightSvg=weightPoints.length?`<div style='position:absolute;left:12px;right:12px;top:30px;height:150px;z-index:3;pointer-events:none'><svg viewBox='0 0 100 100' preserveAspectRatio='none' style='width:100%;height:100%;overflow:visible'><polyline points='${weightPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#f472b6' stroke-width='1.5' vector-effect='non-scaling-stroke'/>${weightPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.8' fill='#f472b6' stroke='#fff' stroke-width='.7' vector-effect='non-scaling-stroke'/>`).join("")}</svg><span style='position:absolute;right:0;top:-18px;color:#f9a8d4;font-size:10px;font-weight:800'>Peso ${fmt(weightMax)}–${fmt(weightMin)} kg</span></div>`:"";
+    const integerLabel=v=>Math.round(Number(v)||0).toLocaleString("pt-BR");
+    const weightSvg=weightPoints.length?`<div style='position:absolute;left:12px;right:12px;top:30px;height:150px;z-index:3;pointer-events:none'><svg viewBox='0 0 100 100' preserveAspectRatio='none' style='width:100%;height:100%;overflow:visible'><polyline points='${weightPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#f472b6' stroke-width='1.5' vector-effect='non-scaling-stroke'/>${weightPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.8' fill='#f472b6' stroke='#fff' stroke-width='.7' vector-effect='non-scaling-stroke'/><text x='${p.px}' y='${Math.max(7,p.py-4)}' text-anchor='middle' fill='#f9a8d4' font-size='3.2' font-weight='700'>${fmt(p.x.peso)} kg</text>`).join("")}</svg></div>`:"";
     const head="<h3 style='margin:8px 0'>📈 Evolução diária</h3>";
-    const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${fmt(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
+    const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${integerLabel(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     const bodyChart=bodyCompositionChart(j);
     const energyTitle="<h3 style='margin:14px 0 8px'>⚖️ Saldo energético (basal + ativo - consumo)</h3>";
-    const energyChart=`<div style='position:relative;display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>${weightSvg}`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const current=Boolean(x.is_current_day);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=current?"linear-gradient(#94a3b8,#64748b)":deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal${current?" · dia atual não incluído no déficit acumulado":""}' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${current?"#cbd5e1":deficit?"#86efac":"#fecdd3"}'>${current?"em andamento":fmt(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
+    const energyChart=`<div style='position:relative;display:grid;grid-template-columns:repeat(${Math.min(14,Math.max(1,j.days.length))},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>${weightSvg}`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const current=Boolean(x.is_current_day);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=current?"linear-gradient(#94a3b8,#64748b)":deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal${current?" · dia atual não incluído no déficit acumulado":""}' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${current?"#cbd5e1":deficit?"#86efac":"#fecdd3"}'>${current?"em andamento":integerLabel(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     box.innerHTML=head+kcalChart+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart+"<small style='display:block;color:#f9a8d4;margin-top:5px'>Linha rosa: peso aferido (kg), usando escala própria. Os pontos aparecem somente nos dias com aferição.</small>";
   }catch(e){box.innerHTML=""}
 }
@@ -5000,8 +5016,7 @@ class H(BaseHTTPRequestHandler):
         if self.path=="/api/consume_batch":
             c=None
             try:
-                x=self.body();meal_name=str(x.get("refeicao","")).strip();record_date=str(x.get("data",today_sp().isoformat()));items=x.get("items")
-                if meal_name not in MEALS: raise ValueError("Selecione uma refeição válida.")
+                x=self.body();meal_name=meal_for_time();record_date=str(x.get("data",today_sp().isoformat()));items=x.get("items")
                 try: date.fromisoformat(record_date)
                 except Exception: raise ValueError("Data inválida.")
                 if not isinstance(items,list) or not 1<=len(items)<=30: raise ValueError("Inclua entre 1 e 30 alimentos.")
@@ -5046,7 +5061,7 @@ class H(BaseHTTPRequestHandler):
                     valid.append((aid,name,weight))
                 for aid,name,weight in valid:
                     c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g) VALUES(?,?,?,?,?,?)",(self.user["id"],record_date,meal_name,aid,name,weight))
-                c.commit();self.js({"ok":True,"count":len(valid),"created_foods":created_foods})
+                c.commit();self.js({"ok":True,"count":len(valid),"created_foods":created_foods,"refeicao":meal_name})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
@@ -5055,10 +5070,10 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path!="/api/consume":self.send_error(404);return
         try:
-            x=self.body();w=float(x["quantidade_g"]);meal=str(x.get("refeicao","")).strip();aid=int(x["alimento_id"]);name=str(x.get("alimento_nome","")).strip();unidade=str(x.get("unidade","g")).lower()
+            x=self.body();w=float(x["quantidade_g"]);meal=meal_for_time();aid=int(x["alimento_id"]);name=str(x.get("alimento_nome","")).strip();unidade=str(x.get("unidade","g")).lower()
             if unidade not in ("g","ml"):raise ValueError("Unidade inválida.")
             if meal not in MEALS or not name or not math.isfinite(w) or not 0<w<=5000:raise ValueError("Refeição, alimento ou quantidade inválidos.")
-            c=ddb();row=c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?,?) RETURNING id",(self.user["id"],x["data"],meal,aid,name,w,unidade)).fetchone();c.commit();c.close();self.js({"ok":True,"id":row["id"]})
+            c=ddb();row=c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?,?) RETURNING id",(self.user["id"],x["data"],meal,aid,name,w,unidade)).fetchone();c.commit();c.close();self.js({"ok":True,"id":row["id"],"refeicao":meal})
         except Exception as e:self.js({"error":str(e)},400)
     def do_PUT(self):
         user=self.require_user()
