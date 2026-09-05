@@ -678,6 +678,28 @@ def _session_cookie(token, max_age=SESSION_DAYS*86400):
     secure = '; Secure' if IS_PRODUCTION else ''
     return f'{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'
 
+def _food_energy_cache(rows, user_id):
+    """Retorna kcal por 100 g/ml para os alimentos usados no período."""
+    cache = {}
+    nc = ndb()
+    pc = ddb() if user_id is not None else None
+    try:
+        for row in rows:
+            aid = int(row.get("alimento_id") or 0)
+            if aid in cache:
+                continue
+            if aid < 0 and pc:
+                food = pc.execute("SELECT energia_kcal FROM alimentos_usuario WHERE id=? AND usuario_id=?", (-aid, user_id)).fetchone()
+            else:
+                food = nc.execute("SELECT energia_kcal FROM alimentos WHERE id=?", (aid,)).fetchone()
+            cache[aid] = float((food or {}).get("energia_kcal") or 0)
+    finally:
+        nc.close()
+        if pc:
+            pc.close()
+    return cache
+
+
 def calc(rows,user_id=None):
     t={x[0]:0.0 for x in NUTS};nc=ndb();pc=None
     try:
@@ -756,6 +778,7 @@ def report_period_data(user_id, start, end):
     by_day = {}
     for row in consumed:
         by_day.setdefault(str(row["data"]), []).append(row)
+    food_energy_cache = _food_energy_cache(consumed, user_id)
     water_by_day = {str(row["data"]): float(row["water"] or 0) for row in water_rows}
     active_by_day = {str(row["data"]): dict(row) for row in active_rows}
     body_by_day = {}
@@ -777,7 +800,7 @@ def report_period_data(user_id, start, end):
         day_key = cursor.isoformat()
         nutrients = calc(by_day.get(day_key, []), user_id)
         nutrients["agua_ml"] = water_by_day.get(day_key, 0.0)
-        foods = [{"nome": str(r.get("alimento_nome") or "Alimento"), "refeicao": str(r.get("refeicao") or ""), "quantidade_g": float(r.get("quantidade_g") or 0), "unidade": str(r.get("unidade") or "g")} for r in by_day.get(day_key, [])]
+        foods = [{"nome": str(r.get("alimento_nome") or "Alimento"), "refeicao": str(r.get("refeicao") or ""), "quantidade_g": float(r.get("quantidade_g") or 0), "unidade": str(r.get("unidade") or "g"), "energia_kcal": round(food_energy_cache.get(int(r.get("alimento_id") or 0), 0.0) * float(r.get("quantidade_g") or 0) / 100.0, 2)} for r in by_day.get(day_key, [])]
         body_measurement = body_by_day.get(day_key)
         if body_measurement:
             body_measurement["massa_sem_agua_kg"] = round(body_measurement["peso_kg"] - body_measurement["agua_kg"], 3)
@@ -1001,6 +1024,32 @@ def _pdf_calendar_fit(text, font_name, font_size, max_width):
     return text.rstrip() + suffix
 
 
+def _calendar_food_groups(foods):
+    """Consolida o mesmo alimento no dia, somando quantidade e energia."""
+    groups = {}
+    meal_short = {"Café da manhã": "Café", "Almoço": "Alm", "Lanche": "L", "Jantar": "Jant", "Ceia": "Ceia"}
+    for food in foods or []:
+        name = " ".join(str(food.get("nome") or "Alimento").split())
+        unit = str(food.get("unidade") or "g")
+        key = (name.casefold(), unit.casefold())
+        if key not in groups:
+            groups[key] = {"chave": key, "nome": name, "unidade": unit, "quantidade_g": 0.0, "energia_kcal": 0.0, "refeicoes": []}
+        group = groups[key]
+        group["quantidade_g"] += float(food.get("quantidade_g") or 0)
+        group["energia_kcal"] += float(food.get("energia_kcal") or 0)
+        meal = str(food.get("refeicao") or "").strip()
+        if meal and meal not in group["refeicoes"]:
+            group["refeicoes"].append(meal)
+    result = []
+    for group in groups.values():
+        meals = "/".join(meal_short.get(item, item) for item in group["refeicoes"])
+        group["refeicao_label"] = meals
+        group["quantidade_g"] = round(group["quantidade_g"], 1)
+        group["energia_kcal"] = round(group["energia_kcal"], 1)
+        result.append(group)
+    return result
+
+
 def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
     """Desenha uma página A3 paisagem por mês, com uma linha para cada semana."""
     month_names = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
@@ -1135,27 +1184,42 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
             consumed_kcal = float(values.get("energia_kcal") or 0)
             water_ml = float(values.get("agua_ml") or 0)
             foods = (row or {}).get("foods", [])
+            food_groups = _calendar_food_groups(foods)
+            daily_goal_kcal = float((dataset.get("goals") or {}).get("calorias_kcal") or 0)
+            over_kcal = consumed_kcal - daily_goal_kcal if daily_goal_kcal > 0 else 0
+            highlight_keys = set()
+            if over_kcal > 0:
+                ranked_groups = sorted(food_groups, key=lambda item: float(item.get("energia_kcal") or 0), reverse=True)
+                for group in ranked_groups[:2]:
+                    if float(group.get("energia_kcal") or 0) > 0:
+                        highlight_keys.add(group["chave"])
             food_lines = []
             meal_short = {"Café da manhã": "Café", "Almoço": "Alm", "Lanche": "L", "Jantar": "Jant", "Ceia": "Ceia"}
             for food in foods:
-                meal = meal_short.get(food.get("refeicao", ""), food.get("refeicao", ""))
+                name = " ".join(str(food.get("nome") or "Alimento").split())
+                unit = str(food.get("unidade") or "g")
+                key = (name.casefold(), unit.casefold())
                 quantity = float(food.get("quantidade_g") or 0)
                 quantity_text = f"{quantity:.0f}" if quantity.is_integer() else f"{quantity:.1f}"
-                unit = str(food.get("unidade") or "g")
-                line = f"{meal}: {food.get('nome') or 'Alimento'} ({quantity_text} {unit})" if meal else f"{food.get('nome') or 'Alimento'} ({quantity_text} {unit})"
-                food_lines.append(line)
+                meal = meal_short.get(str(food.get("refeicao") or ""), str(food.get("refeicao") or ""))
+                line = f"{meal}: {name} ({quantity_text} {unit})" if meal else f"{name} ({quantity_text} {unit})"
+                food_lines.append({"text": line, "highlight": key in highlight_keys})
             if not food_lines:
-                food_lines = ["Sem consumo registrado"]
+                food_lines = [{"text": "Sem consumo registrado", "highlight": False}]
 
             week_cfg = week_data[week_index]
             food_font = week_cfg["food_font"]
             line_height = week_cfg["line_height"]
             # Não truncar: todos os alimentos do dia são desenhados.
-            pdf.setFillColor(colors.HexColor("#334155"))
             pdf.setFont("Helvetica", food_font)
             text_y = cell_y + row_height - 22
-            for line in food_lines:
-                pdf.drawString(x + 3, text_y, _pdf_calendar_fit(line, "Helvetica", food_font, day_width - 6))
+            for item in food_lines:
+                line = _pdf_calendar_fit(item["text"], "Helvetica", food_font, day_width - 6)
+                if item["highlight"]:
+                    pdf.setFillColor(colors.HexColor("#d9ff00"))
+                    pdf.roundRect(x + 1.5, text_y - 1.5, day_width - 3, line_height + 0.8, 1.2, stroke=0, fill=1)
+                pdf.setFillColor(colors.HexColor("#334155"))
+                pdf.drawString(x + 3, text_y, line)
                 text_y -= line_height
 
             pdf.setFillColor(colors.HexColor("#0f172a"))
@@ -4163,7 +4227,7 @@ async function loadPeriod(){
       periodCard("fibra_g","Fibras","🌱",j.daily.fibra_g,g.fibras_g,"g",days,false,j.start,j.end)+
       periodCard("sodio_mg","Sódio","🧂",j.daily.sodio_mg,g.sodio_mg,"mg",days,true,j.start,j.end)+
       periodCard("","Água","💧",j.water,g.agua_ml,"ml",days,false,j.start,j.end)+
-      (()=>{const e=j.energy||{},tot=e.totals||{},rows=e.days||[];const maxSaldo=Math.max(1,...rows.map(x=>Math.abs(Number(x.saldo_kcal||0))));return `<h3 style="margin:14px 0 8px">SALDO DIÁRIO — DÉFICIT</h3>${energyDeficitCard(tot)}<div class="periodGraphScroll"><div class="periodGraphCanvas" style="--period-days:${rows.length}"><div style="margin-top:9px;display:grid;grid-template-columns:repeat(${Math.max(1,rows.length)},minmax(26px,1fr));gap:6px;align-items:stretch;height:195px;padding:10px;background:#0f172a;border-radius:12px">${rows.map(x=>{const v=Number(x.saldo_kcal||0),deficit=v>0,p=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));return `<div title='${x.label}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${deficit?"#86efac":"#fecdd3"}'>${Math.round(v).toLocaleString("pt-BR")}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:130px;width:100%'><div style='width:100%;height:${p}%;min-height:5px;background:${deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)"};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${x.label}</small></div>`}).join("")}</div></div></div><div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:#cbd5e1"><span><i style="display:inline-block;width:11px;height:11px;background:#22c55e;border-radius:2px;vertical-align:-1px;margin-right:4px"></i>Saldo — déficit</span><span><i style="display:inline-block;width:11px;height:11px;background:#ef4444;border-radius:2px;vertical-align:-1px;margin-right:4px"></i>Superávit</span><span><i style="display:inline-block;width:11px;height:11px;background:#f472b6;border-radius:50%;vertical-align:-1px;margin-right:4px"></i>Peso</span></div><small style="display:block;color:#9fb0c4;margin-top:6px">Saldo diário: verde = déficit calórico positivo, vermelho = superávit negativo. Fórmula: basal + ativo - consumido.</small>`})()+
+      (()=>{const e=j.energy||{},tot=e.totals||{},rows=e.days||[];const maxSaldo=Math.max(1,...rows.map(x=>Math.abs(Number(x.saldo_kcal||0))));return `<h3 style="margin:14px 0 8px">SALDO DIÁRIO — DÉFICIT</h3>${energyDeficitCard(tot)}<div class="periodGraphScroll"><div class="periodGraphCanvas" style="--period-days:${rows.length}"><div style="margin-top:9px;display:grid;grid-template-columns:repeat(${Math.max(1,rows.length)},minmax(26px,1fr));gap:6px;align-items:stretch;height:195px;padding:10px;background:#0f172a;border-radius:12px">${rows.map(x=>{const v=Number(x.saldo_kcal||0),deficit=v>0,p=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));return `<div title='${x.label}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${deficit?"#86efac":"#fecdd3"}'>${Math.round(v).toLocaleString("pt-BR")}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:130px;width:100%'><div style='width:100%;height:${p}%;min-height:5px;background:${deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)"};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${x.label}</small></div>`}).join("")}</div></div></div><div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:#cbd5e1"><span><i style="display:inline-block;width:11px;height:11px;background:#22c55e;border-radius:2px;vertical-align:-1px;margin-right:4px"></i>Saldo — déficit</span><span><i style="display:inline-block;width:11px;height:11px;background:#ef4444;border-radius:2px;vertical-align:-1px;margin-right:4px"></i>Superávit</span></div><small style="display:block;color:#9fb0c4;margin-top:6px">Saldo diário: verde = déficit calórico positivo, vermelho = superávit negativo. Fórmula: basal + ativo - consumido.</small>`})()+
       `<details style="margin-top:12px"><summary style="font-weight:bold;cursor:pointer">🔬 Ver micronutrientes</summary>
         <div class="metrics" style="margin-top:8px">${[
           ["calcio_mg","Cálcio","mg"],["magnesio_mg","Magnésio","mg"],["manganes_mg","Manganês","mg"],
