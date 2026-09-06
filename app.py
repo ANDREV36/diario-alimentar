@@ -2136,23 +2136,30 @@ def _pdf_body_composition_page(pdf, dataset, page_no):
         pdf.setFillColor(colors.HexColor("#334155")); pdf.setFont("Helvetica", 7); pdf.drawString(left + offset + 15, legend_y + 1, label)
 
     first, last = measurements[0], measurements[-1]
-    weight_reduction = first["peso_kg"] - last["peso_kg"]
-    water_reduction = first["agua_kg"] - last["agua_kg"]
-    real_reduction = first["massa_sem_agua_kg"] - last["massa_sem_agua_kg"]
+    weight_change = last["peso_kg"] - first["peso_kg"]
+    water_change = last["agua_kg"] - first["agua_kg"]
+    real_change = weight_change - water_change
     energy_totals = (dataset.get("energy") or {}).get("totals") or {}
-    deficit_kcal = max(0.0, float(energy_totals.get("saldo_kcal") or 0))
-    expected = float(energy_totals.get("estimated_fat_loss_kg") or 0)
-    difference = real_reduction - expected
-    correspondence = real_reduction / expected * 100 if expected > 0 else None
-    coherence = "sem déficit líquido para comparar" if expected <= 0 else "resultado compatível com o déficit" if abs(difference) <= 0.2 else "diferença acima do limite de comparação" if real_reduction >= 0 else "redução real abaixo do equivalente do déficit"
+    energy_balance_kcal = float(energy_totals.get("saldo_kcal") or 0)
+    expected_change = -energy_balance_kcal / KCAL_PER_KG_FAT
+    difference = real_change - expected_change
+    correspondence = real_change / expected_change * 100 if abs(expected_change) > 0.0001 else None
+    if abs(expected_change) <= 0.0001:
+        coherence = "sem saldo energético líquido para comparar"
+    elif real_change * expected_change < 0:
+        coherence = "direção real diferente da prevista"
+    elif abs(difference) <= 0.2:
+        coherence = "resultado compatível com o saldo energético"
+    else:
+        coherence = "diferença acima do limite de comparação"
     pdf.setFillColor(colors.HexColor("#eff6ff")); pdf.setStrokeColor(colors.HexColor("#bfdbfe"))
     pdf.roundRect(left, 29 * mm, right - left, 25 * mm, 5, stroke=1, fill=1)
     pdf.setFillColor(colors.HexColor("#0f172a")); pdf.setFont("Helvetica-Bold", 8)
     pdf.drawString(left + 8, 47 * mm, "COMPARAÇÃO DO PERÍODO")
     pdf.setFont("Helvetica", 7); pdf.setFillColor(colors.HexColor("#334155"))
-    pdf.drawString(left + 8, 41 * mm, f"Déficit apurado: {deficit_kcal:.0f} kcal → equivalente a {expected:+.2f} kg   ·   redução real sem água: {real_reduction:+.2f} kg")
+    pdf.drawString(left + 8, 41 * mm, f"Saldo energético apurado: {energy_balance_kcal:+.0f} kcal → variação esperada: {expected_change:+.2f} kg   ·   variação real sem água: {real_change:+.2f} kg")
     pdf.setFillColor(colors.HexColor("#166534")); pdf.setFont("Helvetica-Bold", 7)
-    pdf.drawString(left + 8, 35 * mm, f"Diferença real − previsto: {difference:+.2f} kg   ·   correspondência: {('—' if correspondence is None else f'{correspondence:.0f}%')}   ·   {coherence}")
+    pdf.drawString(left + 8, 35 * mm, f"Diferença real − prevista: {difference:+.2f} kg   ·   correspondência: {('—' if correspondence is None else f'{correspondence:.0f}%')}   ·   {coherence}")
 
     pdf.setFillColor(colors.HexColor("#fffbeb")); pdf.setStrokeColor(colors.HexColor("#fde68a"))
     pdf.roundRect(left, 14 * mm, right - left, 11 * mm, 4, stroke=1, fill=1)
@@ -3359,6 +3366,7 @@ function updateCurrentDateTime(){
 updateCurrentDateTime();
 setInterval(updateCurrentDateTime,1000);
 function fmt(x){return Number(x||0).toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2})}
+function fmtSigned(x){const v=Number(x||0);return (v>0?"+":"")+fmt(v)}
 function escAttr(s){return String(s).replace(/&/g,'&amp;').replace(/\"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 let csrfToken="";
@@ -4131,18 +4139,18 @@ function bodyCompositionChart(history){
   const requestedEnd=String(history?.end||"");
   const first=measurements.find(x=>x.data===requestedStart)||measurements[0];
   const last=measurements.find(x=>x.data===requestedEnd)||measurements[measurements.length-1];
-  const weightChange=first.peso-last.peso,waterChange=first.agua-last.agua,realChange=first.seco-last.seco;
-  const deficitKcal=Math.max(0,Number(history?.energy_totals?.saldo_kcal||0));
-  const expected=deficitKcal/BODY_KCAL_PER_KG;
+  const weightChange=last.peso-first.peso,waterChange=last.agua-first.agua,realChange=weightChange-waterChange;
+  const saldoKcal=Number(history?.energy_totals?.saldo_kcal||0);
+  const expected=-saldoKcal/BODY_KCAL_PER_KG;
   const difference=realChange-expected;
-  const correspondence=expected>0?(realChange/expected*100):null;
-  const coherence=expected<=0?"sem déficit líquido para comparar":Math.abs(difference)<=0.2?"resultado compatível com o déficit":realChange>=0?"diferença acima do limite de comparação":"redução real abaixo do equivalente do déficit";
+  const correspondence=Math.abs(expected)>0.0001?(realChange/expected*100):null;
+  const coherence=Math.abs(expected)<=0.0001?"sem saldo energético líquido para comparar":realChange*expected<0?"direção real diferente da prevista":Math.abs(difference)<=0.2?"resultado compatível com o saldo energético":"diferença acima do limite de comparação";
   const visibleMeasurements=[first];
   if(last.data!==first.data)visibleMeasurements.push(last);
   const columns=Math.min(2,Math.max(1,visibleMeasurements.length));
   const seg=(pct,kg,bg,color)=>`<div style="height:${Math.max(0,pct)}%;background:${bg};color:${color};display:flex;align-items:center;justify-content:center;text-align:center;font-size:9px;line-height:1.05;font-weight:800;overflow:hidden">${pct>=8?`${fmt(pct)}%<br>${fmt(kg)} kg`:""}</div>`;
   const bars=visibleMeasurements.map(x=>`<div title="${esc(x.label)} · peso ${fmt(x.peso)} kg · água ${fmt(x.agua)} kg${x.aguaEstimada?" (estimada)":""} · massa sem água ${fmt(x.seco)} kg" style="display:flex;flex-direction:column;align-items:center;justify-content:end;min-width:0;gap:4px"><small style="font-size:10px;color:#86efac;white-space:nowrap;font-weight:800">${fmt(x.peso)} kg</small><div style="height:190px;width:100%;display:flex;align-items:stretch"><div style="height:100%;width:100%;display:flex;flex-direction:column;border:2px solid #22c55e;border-radius:6px;overflow:hidden;background:#052e16">${seg(x.secoPct,x.seco,"#facc15","#713f12")}${seg(x.aguaPct,x.agua,"#38bdf8","#075985")}</div></div><small style="font-size:9px;color:#cbd5e1;white-space:nowrap">${esc(x.label)}</small><small style="font-size:8px;color:${x.aguaEstimada?"#fbbf24":"#94a3b8"};white-space:nowrap">${x.aguaEstimada?"água estimada":"água medida"}</small></div>`).join("");
-  return `<h3 style="margin:14px 0 8px">⚖️ Composição corporal — início e fim, cada barra = 100% do peso</h3><div style="display:grid;grid-template-columns:repeat(${columns},minmax(34px,1fr));gap:6px;align-items:end;height:270px;padding:12px;background:#0f172a;border-radius:12px">${bars}</div><div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:10px;color:#cbd5e1"><span><i style="display:inline-block;width:10px;height:10px;background:#22c55e;border:2px solid #16a34a;border-radius:2px;vertical-align:-2px"></i> Peso total (100%)</span><span><i style="display:inline-block;width:10px;height:10px;background:#38bdf8;border-radius:2px;vertical-align:-2px"></i> Água</span><span><i style="display:inline-block;width:10px;height:10px;background:#facc15;border-radius:2px;vertical-align:-2px"></i> Massa sem água (gordura + massa magra)</span></div><div style="margin-top:8px;padding:10px 12px;background:#172033;border-radius:10px;color:#cbd5e1;font-size:11px;line-height:1.45"><b style="color:#86efac">Paralelo entre déficit e resultado real:</b><br>Déficit apurado: ${fmt(deficitKcal)} kcal → equivalente a <b>${fmt(expected)} kg</b>.<br>Redução real sem água: ${fmt(weightChange)} kg − ${fmt(waterChange)} kg = <b>${fmt(realChange)} kg</b>.<br>Diferença: <b>${fmt(difference)} kg</b> · correspondência: <b>${correspondence===null?"—":fmt(correspondence)+"%"}</b> · <b>${coherence}</b>.<br><small>O trecho amarelo reúne gordura e massa magra; a verificação mede a coerência do déficit com a redução do peso sem a variação de água.</small></div>${note}`;
+  return `<h3 style="margin:14px 0 8px">⚖️ Composição corporal — início e fim, cada barra = 100% do peso</h3><div style="display:grid;grid-template-columns:repeat(${columns},minmax(34px,1fr));gap:6px;align-items:end;height:270px;padding:12px;background:#0f172a;border-radius:12px">${bars}</div><div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:10px;color:#cbd5e1"><span><i style="display:inline-block;width:10px;height:10px;background:#22c55e;border:2px solid #16a34a;border-radius:2px;vertical-align:-2px"></i> Peso total (100%)</span><span><i style="display:inline-block;width:10px;height:10px;background:#38bdf8;border-radius:2px;vertical-align:-2px"></i> Água</span><span><i style="display:inline-block;width:10px;height:10px;background:#facc15;border-radius:2px;vertical-align:-2px"></i> Massa sem água (gordura + massa magra)</span></div><div style="margin-top:8px;padding:10px 12px;background:#172033;border-radius:10px;color:#cbd5e1;font-size:11px;line-height:1.45"><b style="color:#86efac">Paralelo entre déficit e resultado real:</b><br>Saldo energético apurado: ${fmtSigned(saldoKcal)} kcal → variação esperada: <b>${fmtSigned(expected)} kg</b>.<br>Variação real sem água: ${fmtSigned(weightChange)} kg − ${fmtSigned(waterChange)} kg = <b>${fmtSigned(realChange)} kg</b>.<br>Diferença real − prevista: <b>${fmtSigned(difference)} kg</b> · correspondência: <b>${correspondence===null?"—":fmtSigned(correspondence)+"%"}</b> · <b>${coherence}</b>.<br><small>O trecho amarelo reúne gordura e massa magra; a verificação mede a coerência do déficit com a redução do peso sem a variação de água.</small></div>${note}`;
 }
 async function loadHistory(start,end,periodBodyMeasurements=[]){
   const box=document.getElementById("historyChart");if(!box)return;
