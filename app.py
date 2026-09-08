@@ -725,6 +725,94 @@ def calc(rows,user_id=None):
         if pc:pc.close()
     return t
 
+
+RELEVANT_SELECTION_KEYS = (
+    ("sodio_mg", "SÓDIO"),
+    ("lipidios_g", "GORDURA"),
+    ("carboidrato_g", "CARBOIDRATO"),
+)
+RELEVANT_DISPLAY_KEYS = (
+    ("energia_kcal", "Kcal"),
+    ("proteina_g", "Prot."),
+    ("fibra_g", "Fibra"),
+    ("sodio_mg", "Sódio"),
+    ("lipidios_g", "Gord."),
+    ("carboidrato_g", "Carb."),
+)
+
+
+def relevant_nutrient_analysis(rows, user_id):
+    """Seleciona por sódio, gordura e carboidrato e contextualiza seis nutrientes."""
+    grouped = {}
+    totals = {key: 0.0 for key, _ in RELEVANT_DISPLAY_KEYS}
+    nc = ndb()
+    pc = ddb() if user_id is not None else None
+    try:
+        for row in rows or []:
+            aid = int(row.get("alimento_id") or 0)
+            if aid < 0 and pc:
+                food = pc.execute("SELECT * FROM alimentos_usuario WHERE id=? AND usuario_id=?", (-aid, user_id)).fetchone()
+            else:
+                food = nc.execute("SELECT * FROM alimentos WHERE id=?", (aid,)).fetchone()
+            if not food:
+                continue
+            name = " ".join(str(row.get("alimento_nome") or "Alimento").split())
+            unit = str(row.get("unidade") or "g").strip().lower() or "g"
+            group_key = (name.casefold(), unit)
+            item = grouped.setdefault(group_key, {
+                "nome": name,
+                "unidade": unit,
+                "quantidade_g": 0.0,
+                "valores": {key: 0.0 for key, _ in RELEVANT_DISPLAY_KEYS},
+            })
+            factor = float(row.get("quantidade_g") or 0) / 100.0
+            item["quantidade_g"] += float(row.get("quantidade_g") or 0)
+            for key, _ in RELEVANT_DISPLAY_KEYS:
+                try:
+                    value = float(food[key] or 0) * factor
+                except (KeyError, TypeError, ValueError):
+                    value = 0.0
+                item["valores"][key] += value
+                totals[key] += value
+    finally:
+        nc.close()
+        if pc:
+            pc.close()
+
+    all_items = []
+    for item in grouped.values():
+        item["quantidade_g"] = round(item["quantidade_g"], 1)
+        item["valores"] = {key: round(value, 2) for key, value in item["valores"].items()}
+        item["percentuais"] = {
+            key: round(item["valores"][key] / totals[key] * 100, 1) if totals[key] else 0.0
+            for key, _ in RELEVANT_DISPLAY_KEYS
+        }
+        all_items.append(item)
+
+    sections = []
+    for selection_key, label in RELEVANT_SELECTION_KEYS:
+        chosen = sorted(all_items, key=lambda item: item["valores"].get(selection_key, 0), reverse=True)[:3]
+        sections.append({
+            "key": selection_key,
+            "label": label,
+            "foods": [
+                {
+                    "nome": item["nome"],
+                    "unidade": item["unidade"],
+                    "quantidade_g": item["quantidade_g"],
+                    "valores": item["valores"],
+                    "percentuais": item["percentuais"],
+                }
+                for item in chosen
+            ],
+        })
+    return {
+        "totais": {key: round(value, 2) for key, value in totals.items()},
+        "nutrientes": [{"key": key, "label": label} for key, label in RELEVANT_DISPLAY_KEYS],
+        "secoes": sections,
+    }
+
+
 REPORT_METRICS = (
     ("energia_kcal", "calorias_kcal", "Calorias", "kcal", "#ef4444"),
     ("proteina_g", "proteina_g", "Proteína", "g", "#8b5cf6"),
@@ -2832,6 +2920,9 @@ main{
 @media(max-width:700px){.goalCards{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
 @media(max-width:1000px){.quickStats{grid-template-columns:repeat(4,minmax(0,1fr))!important}}
 .periodGraphScroll{width:100%;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;padding-bottom:5px}.periodGraphCanvas{width:100%;min-width:100%}
+.quickStat.relevant{font:inherit;color:#f8fafc;text-align:left;cursor:pointer;width:100%;appearance:none;-webkit-appearance:none}.quickStat.relevant:hover{border-color:#60a5fa;background:rgba(30,64,175,.28)!important}
+.relevantModalBox{max-width:760px;margin:20px auto;background:#071b2d;color:#f8fafc;border:2px solid #38bdf8;border-radius:18px;padding:16px;box-shadow:0 20px 70px rgba(2,132,199,.25)}
+.relevantIntro{font-size:12px;color:#bae6fd;margin:7px 0 13px;line-height:1.45}.relevantDates{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end}.relevantDates label{display:block;font-size:11px;font-weight:800;color:#cbd5e1}.relevantDates input{display:block;width:100%;margin-top:5px;padding:10px;border-radius:10px;background:#0b1220;color:#f8fafc;border:1px solid #475569;color-scheme:dark;box-sizing:border-box}.relevantDates button{min-height:40px;padding:10px 14px;border:0;border-radius:10px;background:#0ea5e9;color:#06223a;font-weight:900;cursor:pointer}.relevantStatus{min-height:20px;margin-top:9px;color:#fcd34d;font-size:12px}.relevantSection{margin-top:12px;padding:10px;border:1px solid #60a5fa55;border-radius:13px;background:#0b1f35;overflow-x:auto}.relevantSectionTitle{padding:8px 10px;border-radius:8px;color:#fff;font-size:12px;font-weight:900;text-transform:uppercase}.relevantTable{width:100%;min-width:610px;border-collapse:separate;border-spacing:0 4px;font-size:11px}.relevantTable th{padding:3px 6px;color:#94a3b8;text-align:right;white-space:nowrap;font-size:10px}.relevantTable th:first-child,.relevantTable td:first-child{text-align:left}.relevantTable td{padding:7px 6px;background:#102b45;color:#f8fafc;white-space:nowrap;text-align:right}.relevantTable td:first-child{border-radius:7px 0 0 7px;max-width:180px;overflow:hidden;text-overflow:ellipsis}.relevantTable td:last-child{border-radius:0 7px 7px 0}.relevantTable .pct-kcal{color:#e0f2fe}.relevantTable .pct-prot{color:#c4b5fd}.relevantTable .pct-fib{color:#86efac}.relevantTable .pct-sod{color:#7dd3fc}.relevantTable .pct-fat{color:#f9a8d4}.relevantTable .pct-carb{color:#fcd34d}.relevantNote{margin-top:12px;padding:10px;border-radius:10px;background:#102b45;color:#bae6fd;font-size:11px;line-height:1.45}@media(max-width:700px){.relevantDates{grid-template-columns:1fr 1fr}.relevantDates button{grid-column:1/-1;width:100%}.relevantModalBox{margin:8px auto;padding:13px}.relevantTable{min-width:610px}}
 @media(max-width:760px){.periodMobileNotice{display:block!important}.periodDesktopOnly{display:none!important}.finalDashboardGrid{grid-template-columns:1fr}.historyPane{border-right:0;border-bottom:1px solid rgba(255,255,255,.16)}.hydrationPane .waterVisual{min-height:168px}.hydrationPane .waterArtwork{width:116px;height:164px;flex-basis:116px}.hydrationPane .waterPercent{min-width:116px;font-size:31px}.bodyMeasurementFields{grid-template-columns:1fr!important}.periodGraphCanvas{width:max(100%,calc(var(--period-days,1) * 44px));min-width:max(100%,calc(var(--period-days,1) * 44px))}}
 @media(max-width:520px){.quickStats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.quickStat{padding:9px!important}.quickStat strong{font-size:12px!important}.quickStatHead small{font-size:13px!important}.waterVisual{min-height:170px}.waterArtwork{width:108px;height:154px;flex-basis:108px}.waterFigure{gap:12px}.waterPercent{min-width:95px;font-size:28px}.finalDashboardPane{padding:14px}.waterQuickButtons button{font-size:10px;min-height:29px}.bodyMeasurementFields{grid-template-columns:1fr!important}}
 
@@ -2855,6 +2946,7 @@ main{
     <div class="quickStat"><div class="quickStatHead"><span>🌱</span><small>Fibras</small></div><strong id="heroFiber">0 / —</strong><div class="quickMeter"><i id="heroFiberFill"></i></div></div>
     <div class="quickStat"><div class="quickStatHead"><span>🧂</span><small>Sódio</small></div><strong id="heroSodium">0 / —</strong><div class="quickMeter"><i id="heroSodiumFill"></i></div></div>
     <div class="quickStat water"><div class="quickStatHead"><span>💧</span><small>Água</small></div><strong id="heroWater">0 / —</strong><div class="quickMeter"><i id="heroWaterFill"></i></div></div>
+    <button class="quickStat relevant" type="button" onclick="openRelevantAnalysis()" aria-label="Abrir análise relevante por período"><div class="quickStatHead"><span>📊</span><small>Análise relevante</small></div><strong>Período · 6 nutrientes</strong><div class="quickMeter"><i style="width:100%;background:linear-gradient(90deg,#38bdf8,#60a5fa)"></i></div></button>
   </div>
 </section>
 
@@ -3104,6 +3196,24 @@ main{
       <button id="downloadReportBtn" onclick="downloadReport()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#0ea5e9;color:#06223a;font-weight:bold">⬇️ BAIXAR RELATÓRIO PDF</button>
       <button onclick="closePeriod()" style="flex:1;padding:12px;border:1px solid #475569;border-radius:10px;background:#1e293b;color:#f8fafc">← VOLTAR AO APLICATIVO</button>
     </div>
+  </div>
+</div>
+
+<div id="relevantModal" style="display:none;position:fixed;inset:0;background:#000b;z-index:66;overflow:auto;padding:18px">
+  <div class="relevantModalBox">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <h2 style="margin:0">📊 Análise relevante por período</h2>
+      <button onclick="closeRelevantAnalysis()" style="border:1px solid #7dd3fc66;background:#123047;color:#e0f2fe;border-radius:10px;padding:8px 12px;font-size:18px">✕</button>
+    </div>
+    <div class="relevantIntro">Escolha um período. A seleção dos alimentos é feita somente por sódio, gordura e carboidrato; os demais nutrientes mostram o contexto de cada alimento.</div>
+    <div class="relevantDates">
+      <label>Data inicial<input id="relevantStart" type="date"></label>
+      <label>Data final<input id="relevantEnd" type="date"></label>
+      <button onclick="loadRelevantAnalysis()">ANALISAR PERÍODO</button>
+    </div>
+    <div id="relevantStatus" class="relevantStatus"></div>
+    <div id="relevantContent"></div>
+    <div class="relevantNote">Não é recomendação automática de corte. Compare pontos de atenção e benefícios no conjunto do alimento.</div>
   </div>
 </div>
 
@@ -4217,6 +4327,32 @@ function periodCard(key,label,icon,total,goal,unit,days,limit=false,start, end){
     <small>${fmt(pct)}% da meta do período · média ${fmt(avg)} ${unit}/dia<br>${text}</small>
   </div>`;
 }
+function relevantPct(value){return Number(value||0).toLocaleString("pt-BR",{minimumFractionDigits:1,maximumFractionDigits:1})+"%"}
+function relevantSectionHtml(section){
+  const color={SÓDIO:"#14b8a6",GORDURA:"#ec4899",CARBOIDRATO:"#f59e0b"}[section.label]||"#38bdf8";
+  const foods=Array.isArray(section.foods)?section.foods:[];
+  const headers=[["energia_kcal","Kcal","pct-kcal"],["proteina_g","Prot.","pct-prot"],["fibra_g","Fibra","pct-fib"],["sodio_mg","Sódio","pct-sod"],["lipidios_g","Gord.","pct-fat"],["carboidrato_g","Carb.","pct-carb"]];
+  return `<section class="relevantSection"><div class="relevantSectionTitle" style="background:${color}">3 MAIORES CONTRIBUINTES DE ${esc(section.label)}</div><table class="relevantTable"><thead><tr><th>Alimento</th>${headers.map(h=>`<th>${h[1]}</th>`).join("")}</tr></thead><tbody>${foods.map(food=>{const p=food.percentuais||{};return `<tr><td title="${escAttr(food.nome||"Alimento")}">${esc(food.nome||"Alimento")}</td>${headers.map(h=>`<td class="${h[2]}">${relevantPct(p[h[0]])}</td>`).join("")}</tr>`}).join("")||`<tr><td colspan="7" style="text-align:left;color:#94a3b8">Nenhum alimento registrado neste período.</td></tr>`}</tbody></table></section>`;
+}
+function openRelevantAnalysis(){
+  const modal=document.getElementById("relevantModal");if(!modal)return;
+  const end=document.getElementById("day")?.value||new Date().toISOString().slice(0,10);
+  const d=new Date(end+"T12:00:00");d.setDate(d.getDate()-6);
+  const start=d.toISOString().slice(0,10);
+  document.getElementById("relevantStart").value=start;document.getElementById("relevantEnd").value=end;
+  document.getElementById("relevantStatus").textContent="";document.getElementById("relevantContent").innerHTML="";
+  modal.style.display="block";
+}
+function closeRelevantAnalysis(){const modal=document.getElementById("relevantModal");if(modal)modal.style.display="none"}
+async function loadRelevantAnalysis(){
+  const start=document.getElementById("relevantStart").value,end=document.getElementById("relevantEnd").value,status=document.getElementById("relevantStatus"),content=document.getElementById("relevantContent");
+  if(!start||!end){status.textContent="Informe as duas datas.";return}
+  if(start>end){status.textContent="A data inicial não pode ser maior que a final.";return}
+  const selected=Math.round((new Date(end+"T12:00:00")-new Date(start+"T12:00:00"))/86400000)+1;
+  if(selected>30){status.textContent="A análise permite no máximo 30 dias por vez.";return}
+  status.textContent="Analisando o período...";content.innerHTML="";
+  try{const result=await api(`/api/relevant-analysis?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);content.innerHTML=(result.secoes||[]).map(relevantSectionHtml).join("");status.textContent=`${result.start_br||start} a ${result.end_br||end} · alimentos iguais somados somente no cálculo do ranking.`}catch(error){status.textContent="Não foi possível analisar o período: "+error.message}
+}
 async function loadPeriod(){
   let s=document.getElementById("periodStart").value,e=document.getElementById("periodEnd").value;
   if(!s||!e){alert("Informe as duas datas.");return;}
@@ -4582,7 +4718,25 @@ class H(BaseHTTPRequestHandler):
             self.js({"nutrient":nutrient,"total":sum(x["valor"] for x in sources),"sources":sources})
             return
 
+        if p.path=="/api/relevant-analysis":
+          q=parse_qs(p.query)
+          start=q.get("start",[""])[0];end=q.get("end",[""])[0]
+          try:
+            d1=date.fromisoformat(start);d2=date.fromisoformat(end)
+            if d1>d2 or (d2-d1).days>29: raise ValueError("Período inválido")
+          except Exception:
+            self.js({"error":"Informe um período válido de até 30 dias."},400);return
+          c=ddb()
+          try:
+            rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
+          finally:
+            c.close()
+          analysis=relevant_nutrient_analysis(rows,self.user["id"])
+          analysis.update({"start":start,"end":end,"start_br":d1.strftime("%d/%m/%Y"),"end_br":d2.strftime("%d/%m/%Y")})
+          self.js(analysis);return
+
         if p.path=="/api/history":
+
           q=parse_qs(p.query);start=q.get("start",[today_sp().isoformat()])[0];end=q.get("end",[start])[0]
           c=ddb()
           try:
