@@ -706,23 +706,53 @@ def _food_energy_cache(rows, user_id):
     return cache
 
 
-def calc(rows,user_id=None):
-    t={x[0]:0.0 for x in NUTS};nc=ndb();pc=None
+def _food_nutrient_cache(rows, user_id=None):
+    """Carrega uma única vez os alimentos usados em uma requisição de período."""
+    cache = {}
+    nc = ndb()
+    pc = ddb() if user_id is not None else None
     try:
-        if user_id is not None: pc=ddb()
-        for r in rows:
-            aid=int(r["alimento_id"])
-            if aid<0 and pc:
+        for row in rows or []:
+            aid = int(row.get("alimento_id") or 0)
+            if aid in cache:
+                continue
+            if aid < 0 and pc:
+                food = pc.execute("SELECT * FROM alimentos_usuario WHERE id=? AND usuario_id=?", (-aid, user_id)).fetchone()
+            else:
+                food = nc.execute("SELECT * FROM alimentos WHERE id=?", (aid,)).fetchone()
+            cache[aid] = food
+    finally:
+        nc.close()
+        if pc:
+            pc.close()
+    return cache
+
+
+def calc(rows,user_id=None,food_cache=None):
+    t={x[0]:0.0 for x in NUTS}
+    nc=pc=None
+    if food_cache is None:
+        nc=ndb()
+        pc=ddb() if user_id is not None else None
+    try:
+        for r in rows or []:
+            aid=int(r.get("alimento_id") or 0)
+            if food_cache is not None:
+                f=food_cache.get(aid)
+            elif aid<0 and pc:
                 f=pc.execute("SELECT * FROM alimentos_usuario WHERE id=? AND usuario_id=?",(-aid,user_id)).fetchone()
             else:
                 f=nc.execute("SELECT * FROM alimentos WHERE id=?",(aid,)).fetchone()
             if not f:continue
-            z=float(r["quantidade_g"])/100
+            z=float(r.get("quantidade_g") or 0)/100
             for k,_,_ in NUTS:
-                if k in f.keys() and f[k] is not None:t[k]+=float(f[k])*z
+                value=f.get(k) if isinstance(f,dict) else f[k] if k in f.keys() else None
+                if value is not None:t[k]+=float(value)*z
     finally:
-        nc.close()
-        if pc:pc.close()
+        if nc:
+            nc.close()
+        if pc:
+            pc.close()
     return t
 
 
@@ -872,7 +902,8 @@ def report_period_data(user_id, start, end):
     by_day = {}
     for row in consumed:
         by_day.setdefault(str(row["data"]), []).append(row)
-    food_energy_cache = _food_energy_cache(consumed, user_id)
+    food_nutrient_cache = _food_nutrient_cache(consumed, user_id)
+    food_energy_cache = {aid: float((food.get("energia_kcal") if isinstance(food, dict) else food["energia_kcal"]) or 0) for aid, food in food_nutrient_cache.items() if food}
     water_by_day = {str(row["data"]): float(row["water"] or 0) for row in water_rows}
     active_by_day = {str(row["data"]): dict(row) for row in active_rows}
     body_by_day = {}
@@ -892,7 +923,7 @@ def report_period_data(user_id, start, end):
     rows, cursor = [], d1
     while cursor <= d2:
         day_key = cursor.isoformat()
-        nutrients = calc(by_day.get(day_key, []), user_id)
+        nutrients = calc(by_day.get(day_key, []), user_id, food_nutrient_cache)
         nutrients["agua_ml"] = water_by_day.get(day_key, 0.0)
         foods = [{"nome": str(r.get("alimento_nome") or "Alimento"), "refeicao": str(r.get("refeicao") or ""), "quantidade_g": float(r.get("quantidade_g") or 0), "unidade": str(r.get("unidade") or "g"), "energia_kcal": round(food_energy_cache.get(int(r.get("alimento_id") or 0), 0.0) * float(r.get("quantidade_g") or 0) / 100.0, 2)} for r in by_day.get(day_key, [])]
         body_measurement = body_by_day.get(day_key)
@@ -4262,10 +4293,13 @@ function bodyCompositionChart(history){
   const bars=visibleMeasurements.map(x=>`<div title="${esc(x.label)} · peso ${fmt(x.peso)} kg · água ${fmt(x.agua)} kg${x.aguaEstimada?" (estimada)":""} · massa sem água ${fmt(x.seco)} kg" style="display:flex;flex-direction:column;align-items:center;justify-content:end;min-width:0;gap:4px"><small style="font-size:10px;color:#86efac;white-space:nowrap;font-weight:800">${fmt(x.peso)} kg</small><div style="height:190px;width:100%;display:flex;align-items:stretch"><div style="height:100%;width:100%;display:flex;flex-direction:column;border:2px solid #22c55e;border-radius:6px;overflow:hidden;background:#052e16">${seg(x.secoPct,x.seco,"#facc15","#713f12")}${seg(x.aguaPct,x.agua,"#38bdf8","#075985")}</div></div><small style="font-size:9px;color:#cbd5e1;white-space:nowrap">${esc(x.label)}</small><small style="font-size:8px;color:${x.aguaEstimada?"#fbbf24":"#94a3b8"};white-space:nowrap">${x.aguaEstimada?"água estimada":"água medida"}</small></div>`).join("");
   return `<h3 style="margin:14px 0 8px">⚖️ Composição corporal — início e fim, cada barra = 100% do peso</h3><div style="display:grid;grid-template-columns:repeat(${columns},minmax(34px,1fr));gap:6px;align-items:end;height:270px;padding:12px;background:#0f172a;border-radius:12px">${bars}</div><div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:10px;color:#cbd5e1"><span><i style="display:inline-block;width:10px;height:10px;background:#22c55e;border:2px solid #16a34a;border-radius:2px;vertical-align:-2px"></i> Peso total (100%)</span><span><i style="display:inline-block;width:10px;height:10px;background:#38bdf8;border-radius:2px;vertical-align:-2px"></i> Água</span><span><i style="display:inline-block;width:10px;height:10px;background:#facc15;border-radius:2px;vertical-align:-2px"></i> Massa sem água (gordura + massa magra)</span></div><div style="margin-top:8px;padding:10px 12px;background:#172033;border-radius:10px;color:#cbd5e1;font-size:11px;line-height:1.45"><b style="color:#86efac">Paralelo entre déficit e resultado real:</b><br>Saldo energético apurado: ${fmtSigned(saldoKcal)} kcal → variação esperada: <b>${fmtSigned(expected)} kg</b>.<br>Variação real sem água: ${fmtSigned(weightChange)} kg − ${fmtSigned(waterChange)} kg = <b>${fmtSigned(realChange)} kg</b>.<br>Diferença real − prevista: <b>${fmtSigned(difference)} kg</b> · correspondência: <b>${correspondence===null?"—":fmtSigned(correspondence)+"%"}</b> · <b>${coherence}</b>.<br><small>O trecho amarelo reúne gordura e massa magra; a verificação mede a coerência do déficit com a redução do peso sem a variação de água.</small></div>${note}`;
 }
-async function loadHistory(start,end,periodBodyMeasurements=[]){
+let periodRequestSeq=0;
+let periodAbortController=null;
+async function loadHistory(start,end,periodBodyMeasurements=[],requestSeq=periodRequestSeq,signal=null,preloaded=null){
   const box=document.getElementById("historyChart");if(!box)return;
   try{
-    const j=await api("/api/history?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end));
+    const j=preloaded||await api("/api/history?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end),signal?{signal}:{});
+    if(requestSeq!==periodRequestSeq)return;
     j.start=start;j.end=end;
     if(!Array.isArray(j.body_measurements)||!j.body_measurements.length)j.body_measurements=Array.isArray(periodBodyMeasurements)?periodBodyMeasurements:[];
     const max=Math.max(1,...j.days.map(x=>Number(x.energia_kcal||0)));
@@ -4284,7 +4318,11 @@ async function loadHistory(start,end,periodBodyMeasurements=[]){
     const energyTitle="<h3 style='margin:14px 0 8px'>SALDO ENERGÉTICO (BASAL + ATIVO − CONSUMO) × PESO</h3>";
     const energyChart=periodGraphScroll(`<div style='position:relative;display:grid;grid-template-columns:repeat(${Math.max(1,j.days.length)},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>${weightSvg}`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const current=Boolean(x.is_current_day);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=current?"linear-gradient(#94a3b8,#64748b)":deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal${current?" · dia atual não incluído no déficit acumulado":""}' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${current?"#cbd5e1":deficit?"#86efac":"#fecdd3"}'>${current?"em andamento":integerLabel(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>",j.days.length);
     box.innerHTML=head+periodGraphScroll(kcalChart,j.days.length)+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart+"<div style='display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:#cbd5e1'><span><i style='display:inline-block;width:11px;height:11px;background:#22c55e;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Saldo — déficit</span><span><i style='display:inline-block;width:11px;height:11px;background:#ef4444;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Superávit</span><span><i style='display:inline-block;width:11px;height:11px;background:#f472b6;border-radius:50%;vertical-align:-1px;margin-right:4px'></i>Peso</span></div><small style='display:block;color:#f9a8d4;margin-top:5px'>Linha rosa: peso aferido (kg), usando escala própria. Os pontos aparecem somente nos dias com aferição.</small>";
-  }catch(e){box.innerHTML=""}
+    }catch(e){
+    if(e&&e.name==="AbortError")return;
+    if(requestSeq!==periodRequestSeq)return;
+    box.innerHTML="<div style='padding:10px;color:#b91c1c;background:#fee2e2;border-radius:10px'>Não foi possível atualizar os gráficos deste período.</div>";
+  }
 }
 function energyDeficitCard(totals={}){
   const targetKcal=7000;
@@ -4359,8 +4397,16 @@ async function loadPeriod(){
   if(s>e){alert("A data inicial não pode ser maior que a final.");return;}
   const selectedDays=Math.round((new Date(e+"T12:00:00")-new Date(s+"T12:00:00"))/86400000)+1;
   if(selectedDays>30){alert("O relatório permite no máximo 30 dias por vez.");return;}
+  const requestSeq=++periodRequestSeq;
+  if(periodAbortController)periodAbortController.abort();
+  const controller=new AbortController();
+  periodAbortController=controller;
+  document.getElementById("periodInfo").innerHTML="<div style='padding:10px;background:#f8fafc;border-radius:10px;font-size:13px'>Carregando o período...</div>";
+  document.getElementById("periodContent").innerHTML="";
+  document.getElementById("historyChart").innerHTML="";
   try{
-    const j=await api("/api/period?start="+encodeURIComponent(s)+"&end="+encodeURIComponent(e));
+    const j=await api("/api/period?start="+encodeURIComponent(s)+"&end="+encodeURIComponent(e),{signal:controller.signal});
+    if(requestSeq!==periodRequestSeq)return;
     const days=j.days;
     document.getElementById("periodInfo").innerHTML=
       `<div style="padding:10px;background:#f8fafc;border-radius:10px;font-size:13px">
@@ -4387,8 +4433,15 @@ async function loadPeriod(){
           ["piridoxina_mg","B6","mg"],["colesterol_mg","Colesterol","mg"]
         ].map(x=>`<div class="metric period-nutrient-source" data-nutrient="${x[0]}" data-start="${j.start}" data-end="${j.end}"><small>${x[1]} ⓘ</small><b>${fmt(j.daily[x[0]])} ${x[2]}</b><small>Média: ${fmt(Number(j.daily[x[0]]||0)/days)} ${x[2]}/dia</small></div>`).join("")}</div>
       </details>`;
-    loadHistory(s,e,j.body_measurements||[]);
-  }catch(err){alert("Não foi possível carregar o período: "+err.message);}
+    const historyPayload={days:(j.energy?.days||[]).map((x,index)=>{const values=(j.days?.[index]?.values)||{};return {...x,energia_kcal:Number(values.energia_kcal||0),proteina_g:Number(values.proteina_g||0),agua_ml:Number(values.agua_ml||0)};}),body_measurements:j.body_measurements||[]};
+    loadHistory(s,e,j.body_measurements||[],requestSeq,controller.signal,historyPayload);
+  }catch(err){
+    if(err&&err.name==="AbortError")return;
+    if(requestSeq!==periodRequestSeq)return;
+    alert("Não foi possível carregar o período: "+err.message);
+  }finally{
+    if(requestSeq===periodRequestSeq)periodAbortController=null;
+  }
 }
 
 function draw(el,t){
@@ -4751,6 +4804,8 @@ class H(BaseHTTPRequestHandler):
           by_day={}
           for r in rows:
             by_day.setdefault(r["data"],[]).append(r)
+          food_nutrient_cache = _food_nutrient_cache(rows, self.user["id"])
+
           wmap={x["data"]:float(x["water"] or 0) for x in waters}
           mmap={}
           for x in measurement_rows:
@@ -4765,7 +4820,7 @@ class H(BaseHTTPRequestHandler):
           current_day=today_sp().isoformat()
           d1=date.fromisoformat(start);d2=date.fromisoformat(end);out=[];cur=d1
           while cur<=d2:
-            ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"])
+            ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"],food_nutrient_cache)
             consumed=float(t["energia_kcal"] or 0)
             active=float((amap.get(ds) or {}).get("calorias_kcal") or 0)
             basal=float((amap.get(ds) or {}).get("basal_kcal") or basal_fallback or 0)
@@ -4807,6 +4862,7 @@ class H(BaseHTTPRequestHandler):
             days=(d2-d1).days+1
             by_day={}
             for r in rows:by_day.setdefault(r["data"],[]).append(r)
+            food_nutrient_cache = _food_nutrient_cache(rows, self.user["id"])
             mmap={}
             for x in measurement_rows:
                 composition=_body_measurement_values(x.get("peso_kg"),x.get("agua_kg"),bool(x.get("agua_estimada")))
@@ -4820,7 +4876,7 @@ class H(BaseHTTPRequestHandler):
             current_day=today_sp()
             cur=d1
             while cur<=d2:
-                ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"])
+                ds=cur.isoformat();t=calc(by_day.get(ds,[]),self.user["id"],food_nutrient_cache)
                 consumed=float(t.get("energia_kcal",0) or 0)
                 active=float((amap.get(ds) or {}).get("calorias_kcal") or 0)
                 basal=float((amap.get(ds) or {}).get("basal_kcal") or basal_fallback or 0)
@@ -4837,7 +4893,7 @@ class H(BaseHTTPRequestHandler):
             self.js({
                 "start":start,"end":end,"days":days,
                 "start_br":d1.strftime("%d/%m/%Y"),"end_br":d2.strftime("%d/%m/%Y"),
-                "daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":goal_dict(g),
+                "daily":calc(rows,self.user["id"],food_nutrient_cache),"water":float(water or 0),"goals":goal_dict(g),
                 "body_measurements":list(mmap.values()),
                 "energy":{"days":energy_days,"totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()}}
             })
