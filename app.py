@@ -4433,7 +4433,7 @@ async function loadPeriod(){
           ["piridoxina_mg","B6","mg"],["colesterol_mg","Colesterol","mg"]
         ].map(x=>`<div class="metric period-nutrient-source" data-nutrient="${x[0]}" data-start="${j.start}" data-end="${j.end}"><small>${x[1]} ⓘ</small><b>${fmt(j.daily[x[0]])} ${x[2]}</b><small>Média: ${fmt(Number(j.daily[x[0]]||0)/days)} ${x[2]}/dia</small></div>`).join("")}</div>
       </details>`;
-    const historyPayload={days:(j.energy?.days||[]).map(x=>({...x,energia_kcal:Number(x.consumed_kcal||0),proteina_g:Number(x.proteina_g||0),agua_ml:Number(x.agua_ml||0)})),body_measurements:j.body_measurements||[]};
+    const historyPayload={days:(j.energy?.days||[]).map(x=>({...x,energia_kcal:Number(x.consumed_kcal||0),proteina_g:Number(x.proteina_g||0),agua_ml:Number(x.agua_ml||0)})),energy_totals:j.energy?.totals||{},body_measurements:j.body_measurements||[]};
     loadHistory(s,e,j.body_measurements||[],requestSeq,controller.signal,historyPayload);
   }catch(err){
     if(err&&err.name==="AbortError")return;
