@@ -3557,7 +3557,7 @@ async function ensureYesterdayActivePrompt(){
   try{
     const j=await api("/api/active_yesterday");
     const y=j?.yesterday||{};
-    if(y.has_active_input)return;
+    if(y.has_active_input&&Number(y.active_kcal||0)>0)return;
     const msg=[
       "Informe o gasto ativo de ontem (kcal).",
       "",
@@ -3565,12 +3565,22 @@ async function ensureYesterdayActivePrompt(){
       "Basal identificado: "+fmt(y.basal_kcal||0)+" kcal",
       "Consumido ontem: "+fmt(y.consumed_kcal||0)+" kcal",
       "",
+      "Se não souber agora, cancele e informe depois.",
+      "Se informar 0, será pedida uma confirmação adicional.",
+      "",
       "Exemplo: 420"
-    ].join("");
-    const raw=prompt(msg,"0");
-    if(raw===null)return;
+    ].join("\n");
+    const raw=prompt(msg,"");
+    if(raw===null||String(raw).trim()===""){
+      activeDailyPromptShown=false;
+      return;
+    }
     const active=Number(String(raw).replace(",","."));
-    if(!Number.isFinite(active)||active<0||active>6000){alert("Valor inválido. Use um gasto ativo entre 0 e 6.000 kcal.");return}
+    if(!Number.isFinite(active)||active<0||active>6000){alert("Valor inválido. Use um gasto ativo entre 0 e 6.000 kcal.");activeDailyPromptShown=false;return}
+    if(active===0&&!confirm("Você informou 0 kcal de gasto ativo ontem. Confirme somente se realmente não houve gasto ativo.\n\nO aplicativo continuará pedindo confirmação quando o valor permanecer zero.")){
+      activeDailyPromptShown=false;
+      return;
+    }
     const saved=await api("/api/active_yesterday",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:y.data||yesterdayIso(),active_kcal:active})});
     const snap=saved?.yesterday||{};
     localStorage.removeItem(activePreviewStorageKey(snap.data||y.data||yesterdayIso()));
@@ -3579,6 +3589,33 @@ async function ensureYesterdayActivePrompt(){
   }catch(error){
     console.error("gasto ativo de ontem:",error);
   }
+}
+function normalizeActiveDateInput(raw){
+  const value=String(raw||"").trim();
+  if(/^\d{2}\/\d{2}\/\d{4}$/.test(value)){
+    const [dayPart,monthPart,yearPart]=value.split("/");
+    return `${yearPart}-${monthPart}-${dayPart}`;
+  }
+  if(/^\d{4}-\d{2}-\d{2}$/.test(value))return value;
+  return "";
+}
+async function editActiveEnergy(){
+  const dateRaw=prompt("Informe a data que deseja corrigir.\nUse AAAA-MM-DD ou DD/MM/AAAA.",yesterdayIso());
+  if(dateRaw===null)return;
+  const targetDate=normalizeActiveDateInput(dateRaw);
+  if(!targetDate){alert("Data inválida. Use AAAA-MM-DD ou DD/MM/AAAA.");return;}
+  const valueRaw=prompt("Informe o gasto energético ativo dessa data, em kcal.\nUse um valor entre 0 e 6.000.","");
+  if(valueRaw===null||String(valueRaw).trim()==="")return;
+  const active=Number(String(valueRaw).replace(",","."));
+  if(!Number.isFinite(active)||active<0||active>6000){alert("Valor inválido. Use um gasto ativo entre 0 e 6.000 kcal.");return;}
+  if(active===0&&!confirm("Você informou 0 kcal. Confirme somente se realmente não houve gasto ativo nessa data."))return;
+  try{
+    const saved=await api("/api/active_energy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:targetDate,active_kcal:active})});
+    const snap=saved?.day||{};
+    localStorage.removeItem(activePreviewStorageKey(targetDate));
+    alert("Gasto corrigido em "+activeHistoryLabel(targetDate)+": basal "+fmt(snap.basal_kcal||0)+" + ativo "+fmt(snap.active_kcal||0)+" - consumo "+fmt(snap.consumed_kcal||0)+" = saldo "+fmt(snap.saldo_kcal||0)+" kcal.");
+    await refresh();
+  }catch(error){alert(error.message||"Não foi possível corrigir o gasto ativo.");}
 }
 async function ensureWeeklyActiveHistory(){
   if(activeHistoryPromptShown)return;
@@ -3625,6 +3662,7 @@ async function saveActiveHistory(event){
     status.textContent="Não foi possível montar os sete dias. Atualize a página e tente novamente.";
     return;
   }
+  if(items.some(item=>item.active_kcal===0)&&!confirm("Há um ou mais dias com 0 kcal de gasto ativo. Confirme somente se esses dias realmente não tiveram gasto ativo."))return;
   button.disabled=true;
   button.textContent="Salvando...";
   status.textContent="";
@@ -4226,7 +4264,7 @@ function drawEnergyBalance(energy){
   const color=deficit?"#22c55e":surplus?"#ef4444":"#94a3b8";
   const side=deficit?"right":"left";
   const previewField=canPreview?`<div style="margin:9px 0 8px;padding:9px;border-radius:10px;background:#0f172a;border:1px solid #334155"><label for="activePreviewInput" style="display:block;font-size:12px;color:#e2e8f0;font-weight:bold;margin-bottom:6px">Gasto ativo previsto para hoje</label><div style="display:flex;gap:7px;align-items:center"><input id="activePreviewInput" type="number" min="0" max="6000" step="1" value="${previewActive}" onkeydown="if(event.key==='Enter'){event.preventDefault();applyActivePreview('${date}')}" style="min-width:0;flex:1;padding:9px;border:1px solid #475569;border-radius:8px;background:#111827;color:#fff"><span style="font-size:12px;color:#cbd5e1">kcal</span><button type="button" onclick="applyActivePreview('${date}')" style="padding:9px 11px;border:0;border-radius:8px;background:#22c55e;color:#06210f;font-weight:bold">APLICAR</button></div><small style="display:block;color:#94a3b8!important;margin-top:6px">Estimativa temporária usada somente nesta balança. O valor real continuará sendo informado amanhã.</small></div>`:`<small style="display:block;color:#94a3b8!important;margin:7px 0">Gasto ativo registrado: ${fmt(actualActive)} kcal</small>`;
-  box.innerHTML=`<div class="metric" style="margin-top:10px;padding:12px;background:rgba(255,255,255,.07);border:1px solid #ffffff12;border-radius:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><small style="font-size:14px;color:#f8fafc!important;font-weight:bold">⚖️ Saldo energético</small><strong style="font-size:15px;color:${color}">${label}</strong></div>${previewField}<b style="display:block;font-size:22px;color:${color};margin:7px 0 3px">${Math.round(saldo).toLocaleString("pt-BR")} kcal</b><small style="display:block;color:#cbd5e1!important;font-size:12px;line-height:1.45">Basal ${fmt(basal)} + ${canPreview?'ativo previsto':'ativo'} ${fmt(active)} - consumido ${fmt(consumed)}</small><div style="position:relative;height:22px;margin:14px 2px 6px;background:#1e293b;border:1px solid #475569;border-radius:11px;overflow:hidden"><div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f8fafc;z-index:2"></div>${equilibrium?"":`<div style="position:absolute;top:4px;bottom:4px;${side}:50%;width:${magnitude/2}%;background:${color};border-radius:8px"></div>`}</div><div style="display:flex;justify-content:space-between;gap:4px;font-size:11px;color:#cbd5e1"><span style="color:#ef4444;font-weight:bold">Superávit (-)</span><span>0 kcal</span><span style="color:#22c55e;font-weight:bold">Déficit (+)</span></div></div>`;
+  box.innerHTML=`<div class="metric" style="margin-top:10px;padding:12px;background:rgba(255,255,255,.07);border:1px solid #ffffff12;border-radius:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><small style="font-size:14px;color:#f8fafc!important;font-weight:bold">⚖️ Saldo energético</small><strong style="font-size:15px;color:${color}">${label}</strong></div>${previewField}<b style="display:block;font-size:22px;color:${color};margin:7px 0 3px">${Math.round(saldo).toLocaleString("pt-BR")} kcal</b><small style="display:block;color:#cbd5e1!important;font-size:12px;line-height:1.45">Basal ${fmt(basal)} + ${canPreview?'ativo previsto':'ativo'} ${fmt(active)} - consumido ${fmt(consumed)}</small><div style="position:relative;height:22px;margin:14px 2px 6px;background:#1e293b;border:1px solid #475569;border-radius:11px;overflow:hidden"><div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f8fafc;z-index:2"></div>${equilibrium?"":`<div style="position:absolute;top:4px;bottom:4px;${side}:50%;width:${magnitude/2}%;background:${color};border-radius:8px"></div>`}</div><div style="display:flex;justify-content:space-between;gap:4px;font-size:11px;color:#cbd5e1"><span style="color:#ef4444;font-weight:bold">Superávit (-)</span><span>0 kcal</span><span style="color:#22c55e;font-weight:bold">Déficit (+)</span></div><button type="button" onclick="editActiveEnergy()" style="width:100%;margin-top:12px;padding:10px 12px;border:1px solid #38bdf866;border-radius:9px;background:#0f2a45;color:#bae6fd;font-weight:bold">CORRIGIR GASTO ATIVO DE OUTRA DATA</button></div>`;
 }
 function toggleWaterRecords(){const box=document.getElementById("waterRecords"),btn=document.getElementById("waterRecordsToggle");if(!box||!btn)return;const open=box.style.display!=="none";box.style.display=open?"none":"block";btn.textContent=open?"VER REGISTROS ▼":"OCULTAR REGISTROS ▲";btn.setAttribute("aria-expanded",String(!open));}
 async function deleteWater(id){if(!confirm("Excluir este registro de água?"))return;try{await api("/api/water/"+id,{method:"DELETE"});await refresh();}catch(e){alert(e.message)}}
@@ -5245,6 +5283,30 @@ class H(BaseHTTPRequestHandler):
                 c.commit()
                 result=dict(row);result["massa_sem_agua_kg"]=round(float(result["peso_kg"])-float(result["agua_kg"]),3);result["agua_estimada"]=agua_estimada
                 self.js({"ok":True,"body_measurement":result})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+        if self.path=="/api/active_energy":
+            c=None
+            try:
+                payload=self.body()
+                target_day=str(payload.get("data") or "")
+                try:
+                    parsed=date.fromisoformat(target_day)
+                except Exception:
+                    raise ValueError("Data inválida. Use o formato AAAA-MM-DD.")
+                if parsed>today_sp():
+                    raise ValueError("O gasto ativo não pode ser registrado para uma data futura.")
+                active=float(payload.get("active_kcal"))
+                if not math.isfinite(active) or active<0 or active>6000:
+                    raise ValueError("Gasto ativo inválido. Use valores entre 0 e 6000 kcal.")
+                c=ddb()
+                snapshot=_save_daily_active_energy(c,self.user["id"],target_day,active)
+                c.commit()
+                self.js({"ok":True,"day":snapshot})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
