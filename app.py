@@ -3161,6 +3161,92 @@ main{height:auto!important;min-height:calc(100vh - 70px)!important;overflow:visi
 #professionalPlanCard .professionalDayContent strong:first-child{margin-top:0}
 @media(max-width:1000px){#professionalPlanCard .professionalDayGrid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:700px){#professionalPlanCard .professionalDayGrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}#professionalPlanCard .professionalDayBox summary{padding:10px;font-size:11px}}
+
+/* Acompanhamento profissional: mesmo box externo e mesma grade dos indicadores superiores. */
+#professionalPlanCard{
+  display:block;
+  margin-bottom:14px;
+  padding:14px!important;
+  background:rgba(7,22,38,.68)!important;
+  border:1px solid rgba(255,255,255,.18)!important;
+  border-radius:24px!important;
+  box-shadow:0 16px 42px rgba(0,0,0,.22)!important;
+  backdrop-filter:blur(1px)!important;
+}
+#professionalPlanCard .professionalPlanHeader{
+  padding:0!important;
+  border:0!important;
+  border-radius:0!important;
+  background:transparent!important;
+  box-shadow:none!important;
+}
+#professionalPlanCard #professionalPlanBody{margin-top:14px!important}
+#professionalPlanCard .professionalDayGrid{
+  display:grid;
+  grid-template-columns:repeat(7,minmax(0,1fr));
+  gap:8px;
+  margin-top:0;
+}
+#professionalPlanCard .professionalDayBox{
+  display:block;
+  min-width:0;
+  min-height:0;
+  border:1px solid rgba(255,255,255,.08)!important;
+  border-radius:15px!important;
+  background:rgba(14,32,52,.72)!important;
+  box-shadow:none!important;
+  overflow:hidden;
+}
+#professionalPlanCard .professionalDayBox summary{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:6px;
+  min-height:0;
+  padding:10px!important;
+  cursor:pointer;
+  color:#fff!important;
+  font-size:11px;
+  font-weight:800;
+  list-style:none;
+}
+#professionalPlanCard .professionalDayBox summary::-webkit-details-marker{display:none}
+#professionalPlanCard .professionalDayBox summary::after{content:'+';color:#7dd3fc;font-size:16px;line-height:1}
+#professionalPlanCard .professionalDayBox[open] summary::after{content:'−'}
+#professionalPlanCard .professionalDayContent{padding:0 10px 10px!important;color:#e2e8f0;font-size:12px;line-height:1.45}
+#professionalPlanCard .professionalDayContent strong{display:block;margin-top:8px;margin-bottom:3px;color:#7dd3fc;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+#professionalPlanCard .professionalDayContent strong:first-child{margin-top:0}
+@media(max-width:1000px){#professionalPlanCard .professionalDayGrid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:850px){#professionalPlanCard .professionalDayGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:520px){#professionalPlanCard{padding:10px!important;border-radius:20px!important}#professionalPlanCard .professionalDayGrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}
+
+/* Detalhes do acompanhamento: um box interno ocupa toda a área translúcida. */
+#professionalPlanCard .professionalDayBox{
+  appearance:none;
+  -webkit-appearance:none;
+  width:100%;
+  margin:0;
+  text-align:left;
+  font-family:inherit;
+  line-height:1.2;
+  padding:10px!important;
+  font-size:11px;
+  font-weight:800;
+  background:rgba(14,32,52,.72)!important;
+  color:#fff!important;
+}
+#professionalPlanCard .professionalDayBox:hover{background:rgba(20,48,76,.9)!important;border-color:rgba(125,211,252,.55)!important}
+#professionalPlanCard .professionalDayLabel{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#professionalPlanCard .professionalBoxArrow{color:#7dd3fc;font-size:18px;font-weight:400;line-height:1}
+#professionalPlanCard .professionalDetailView{width:100%;min-height:210px}
+#professionalPlanCard .professionalDetailBox{width:100%;min-height:210px;padding:16px;border:1px solid rgba(255,255,255,.1);border-radius:15px;background:rgba(14,32,52,.9);box-shadow:0 8px 22px rgba(0,0,0,.18);color:#e2e8f0}
+#professionalPlanCard .professionalDetailTitle{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px;color:#bae6fd;font-size:15px;font-weight:900}
+#professionalPlanCard .professionalDetailText{white-space:pre-wrap;color:#f1f5f9;font-size:13px;line-height:1.55}
+#professionalPlanCard .professionalDetailSection{margin-top:14px;padding-top:11px;border-top:1px solid rgba(255,255,255,.1)}
+#professionalPlanCard .professionalDetailSection:first-of-type{margin-top:0;padding-top:0;border-top:0}
+#professionalPlanCard .professionalDetailSection strong{display:block;margin-bottom:5px;color:#7dd3fc;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+#professionalPlanCard .professionalBackButton{display:block;width:100%;margin-top:18px;padding:10px;border:1px solid rgba(125,211,252,.35);border-radius:10px;background:rgba(7,22,38,.7);color:#bae6fd;font-family:inherit;font-weight:900;cursor:pointer}
+#professionalPlanCard .professionalBackButton:hover{background:rgba(30,64,175,.35)}
 </style></head><body>
 <div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V45 · Diário Alimentar · Segurança P0</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button id="masterPanelBtn" class="profileBtn" style="display:none" onclick="location.href='/admin'">⚙️ Painel master</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
 <div id="viewModeBanner" style="display:none;max-width:1180px;margin:10px auto 0;padding:10px 13px;border:1px solid #fbbf2466;border-radius:12px;background:#422006;color:#fef3c7;font-size:12px;align-items:center;justify-content:space-between;gap:10px"><span id="viewModeText"></span><button onclick="stopNutritionistView()" style="padding:8px 10px;border:1px solid #fcd34d66;border-radius:8px;background:#78350f;color:#fff;font-weight:bold">VOLTAR AO PAINEL</button></div>
@@ -3186,7 +3272,7 @@ main{height:auto!important;min-height:calc(100vh - 70px)!important;overflow:visi
   </div>
 </section>
 
-<style>#professionalPlanCard.professionalNew{animation:professionalPulse 1.05s ease-in-out infinite}@keyframes professionalPulse{0%,100%{box-shadow:0 0 0 rgba(56,189,248,0);border-color:#38bdf866}50%{box-shadow:0 0 18px rgba(56,189,248,.7);border-color:#7dd3fc}}</style><section class="card" id="professionalPlanCard" style="display:none;border:1px solid #38bdf866;background:linear-gradient(135deg,#0d2136,#102f4a)"><div class="professionalPlanHeader" style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><span class="eyebrow">ACOMPANHAMENTO PROFISSIONAL</span><h2 style="margin:4px 0">🩺 Orientações do nutricionista</h2><div id="professionalPlanNotice" style="color:#bae6fd;font-size:12px"></div></div><button id="professionalPlanToggle" class="miniSummaryBtn" onclick="toggleProfessionalPlan()">VER ORIENTAÇÕES</button></div><div id="professionalPlanBody" style="display:none;margin-top:12px"><div id="professionalDays" class="professionalDayGrid"></div><div id="professionalNotes" style="margin-top:12px"></div><button id="professionalMarkRead" style="display:none;width:100%;margin-top:12px;padding:10px;border:1px solid #38bdf866;border-radius:10px;background:#0f2a45;color:#bae6fd;font-weight:bold" onclick="markProfessionalPlanRead()">MARCAR COMO LIDO</button></div></section>
+<style>#professionalPlanCard.professionalNew{animation:professionalPulse 1.05s ease-in-out infinite}@keyframes professionalPulse{0%,100%{box-shadow:0 0 0 rgba(56,189,248,0);border-color:#38bdf866}50%{box-shadow:0 0 18px rgba(56,189,248,.7);border-color:#7dd3fc}}</style><section class="card" id="professionalPlanCard" style="display:none;border:1px solid #38bdf866;background:linear-gradient(135deg,#0d2136,#102f4a)"><div class="professionalPlanHeader" style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><span class="eyebrow">ACOMPANHAMENTO PROFISSIONAL</span><h2 style="margin:4px 0">🩺 Orientações do nutricionista</h2><div id="professionalPlanNotice" style="color:#bae6fd;font-size:12px"></div></div><button id="professionalPlanToggle" class="miniSummaryBtn" onclick="toggleProfessionalPlan()">VER ORIENTAÇÕES</button></div><div id="professionalPlanBody" style="display:none;margin-top:12px"><div id="professionalDays" class="professionalDayGrid"></div><div id="professionalDetailView" class="professionalDetailView" style="display:none"></div><button id="professionalMarkRead" style="display:none;width:100%;margin-top:12px;padding:10px;border:1px solid #38bdf866;border-radius:10px;background:#0f2a45;color:#bae6fd;font-weight:bold" onclick="markProfessionalPlanRead()">MARCAR COMO LIDO</button></div></section>
 <section class="mealPanel card" id="mealSelector" style="display:none">
   <div class="sectionTitle"><div><span class="eyebrow">REGISTRO RÁPIDO</span><h2>🍽️ O que você vai registrar?</h2></div></div>
   <div id="meals" class="meals"></div>
@@ -3879,7 +3965,7 @@ async function saveActiveHistory(event){
 }
 function renderViewMode(user){const banner=document.getElementById("viewModeBanner"),text=document.getElementById("viewModeText");if(!banner)return;if(user?.em_visualizacao){banner.style.display="flex";text.textContent="Visualizando o diário de "+(user.email||"cliente")+" como nutricionista."}else{banner.style.display="none"}}
 async function stopNutritionistView(){try{await api("/api/nutritionist/stop-view",{method:"POST",headers:{"Content-Type":"application/json"}})}finally{location.href="/nutritionist"}}
-let professionalPlanOpen=false;const professionalWeekDays=[['segunda','Segunda-feira'],['terca','Terça-feira'],['quarta','Quarta-feira'],['quinta','Quinta-feira'],['sexta','Sexta-feira'],['sabado','Sábado'],['domingo','Domingo']];const professionalGoalFields=[];function toggleProfessionalPlan(){const body=document.getElementById('professionalPlanBody'),button=document.getElementById('professionalPlanToggle');if(!body)return;professionalPlanOpen=body.style.display==='none';body.style.display=professionalPlanOpen?'block':'none';if(button)button.textContent=professionalPlanOpen?'OCULTAR ORIENTAÇÕES':'VER ORIENTAÇÕES'}async function loadProfessionalPlan(){try{const j=await api('/api/professional-plan');const card=document.getElementById('professionalPlanCard');if(!card)return;if(!j.nutricionista){card.style.display='none';return}const hasDays=Object.values(j.days||{}).some(v=>{const item=v||{};return String(typeof item==='object'?(item.dieta||''):item).trim()||String(typeof item==='object'?(item.mensagem||''):'').trim()});card.style.display='block';card.classList.toggle('professionalNew',Boolean(j.has_new));const professionalName=j.nutricionista?.nome||j.nutricionista?.email||'';document.getElementById('professionalPlanNotice').textContent=j.has_new?'Há uma nova orientação'+(professionalName?' de '+professionalName:'')+'.':(j.updated_at?'Orientações disponíveis'+(professionalName?' de '+professionalName:'')+'.':'Aguardando a prescrição de '+(professionalName||'seu nutricionista')+'.');document.getElementById('professionalDays').innerHTML=professionalWeekDays.map(([key,label])=>{const item=j.days?.[key]||{},diet=typeof item==='object'?(item.dieta||''):item,message=typeof item==='object'?(item.mensagem||''):'';return '<details class=\"professionalDayBox\"><summary>'+label+'</summary><div class=\"professionalDayContent\">'+(diet?'<strong>Dieta do dia</strong><div style=\"white-space:pre-wrap\">'+esc(diet)+'</div>':'<span style=\"color:#94a3b8\">Nenhuma dieta prescrita para este dia.</span>')+(message?'<strong>Mensagem do dia</strong><div style=\"white-space:pre-wrap\">'+esc(message)+'</div>':'')+'</div></details>'}).join('')||'<div style=\"color:#cbd5e1;font-size:12px\">Nenhuma orientação diária preenchida.</div>';document.getElementById('professionalNotes').innerHTML=(j.notes||[]).length?'<div style="padding:10px;border-radius:10px;background:#102b45;border:1px solid #ffffff12"><b style="color:#bae6fd">Recados</b>'+j.notes.map(n=>'<div style="padding:8px 0;border-bottom:1px solid #ffffff15;white-space:pre-wrap;color:#e2e8f0;font-size:12px">'+esc(n.recado)+'<small style="display:block;color:#94a3b8;margin-top:4px">'+fmt(n.criado_em)+'</small></div>').join('')+'</div>':'';const readButton=document.getElementById('professionalMarkRead');if(readButton)readButton.style.display=!j.can_manage&&j.has_new?'block':'none';if(j.has_new&&!professionalPlanOpen)toggleProfessionalPlan()}catch(e){const card=document.getElementById('professionalPlanCard');if(card)card.style.display='none'}}async function markProfessionalPlanRead(){try{await api('/api/professional-plan/read',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken}});await loadProfessionalPlan()}catch(e){alert(e.message)}}function showApp(user,csrf=""){if(user?.papel==="nutricionista"&&!user?.em_visualizacao){location.href="/nutritionist";return}csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";const masterPanelBtn=document.getElementById("masterPanelBtn");if(masterPanelBtn)masterPanelBtn.style.display=user?.papel==="admin"&&!user?.em_visualizacao?"inline-block":"none";renderViewMode(user);mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh(),loadProfessionalPlan()]).catch(e=>console.error("carregamento inicial:",e))}
+let professionalPlanOpen=false,professionalPlanData=null;const professionalWeekDays=[['segunda','Segunda-feira'],['terca','Terça-feira'],['quarta','Quarta-feira'],['quinta','Quinta-feira'],['sexta','Sexta-feira'],['sabado','Sábado'],['domingo','Domingo']];function professionalDayData(key){const item=professionalPlanData?.days?.[key]||{};return{dieta:typeof item==='object'?(item.dieta||''):item,mensagem:typeof item==='object'?(item.mensagem||''):''}}function closeProfessionalDetail(){const detail=document.getElementById('professionalDetailView'),days=document.getElementById('professionalDays');if(detail){detail.style.display='none';detail.innerHTML=''}if(days)days.style.display='grid'}function toggleProfessionalPlan(){const body=document.getElementById('professionalPlanBody'),button=document.getElementById('professionalPlanToggle');if(!body)return;professionalPlanOpen=body.style.display==='none';if(!professionalPlanOpen)closeProfessionalDetail();body.style.display=professionalPlanOpen?'block':'none';if(button)button.textContent=professionalPlanOpen?'OCULTAR ORIENTAÇÕES':'VER ORIENTAÇÕES'}function openProfessionalDay(key){const pair=professionalWeekDays.find(([k])=>k===key)||[key,key],item=professionalDayData(key),detail=document.getElementById('professionalDetailView'),days=document.getElementById('professionalDays');if(!detail||!days)return;detail.innerHTML='<div class="professionalDetailBox"><div class="professionalDetailTitle"><span>'+pair[1]+'</span><span>📅</span></div><div class="professionalDetailSection"><strong>Dieta do dia</strong><div class="professionalDetailText">'+(item.dieta?esc(item.dieta):'Nenhuma dieta prescrita para este dia.')+'</div></div>'+(item.mensagem?'<div class="professionalDetailSection"><strong>Mensagem do dia</strong><div class="professionalDetailText">'+esc(item.mensagem)+'</div></div>':'')+'<button type="button" class="professionalBackButton" onclick="closeProfessionalDetail()">← VOLTAR</button></div>';days.style.display='none';detail.style.display='block'}function openProfessionalMessages(){const detail=document.getElementById('professionalDetailView'),days=document.getElementById('professionalDays');if(!detail||!days)return;const dayMessages=professionalWeekDays.map(([key,label])=>{const item=professionalDayData(key);return item.mensagem?'<div class="professionalDetailSection"><strong>'+label+'</strong><div class="professionalDetailText">'+esc(item.mensagem)+'</div></div>':''}).join(''),notes=(professionalPlanData?.notes||[]).map(n=>'<div class="professionalDetailSection"><strong>Recado</strong><div class="professionalDetailText">'+esc(n.recado)+'<small style="display:block;color:#94a3b8;margin-top:5px">'+fmt(n.criado_em)+'</small></div></div>').join('');detail.innerHTML='<div class="professionalDetailBox"><div class="professionalDetailTitle"><span>Mensagens</span><span>💬</span></div>'+(dayMessages||notes?dayMessages+notes:'<div class="professionalDetailText">Nenhuma mensagem disponível.</div>')+'<button type="button" class="professionalBackButton" onclick="closeProfessionalDetail()">← VOLTAR</button></div>';days.style.display='none';detail.style.display='block'}async function loadProfessionalPlan(){try{const j=await api('/api/professional-plan');professionalPlanData=j;const card=document.getElementById('professionalPlanCard');if(!card)return;if(!j.nutricionista){card.style.display='none';return}card.style.display='block';card.classList.toggle('professionalNew',Boolean(j.has_new));const professionalName=j.nutricionista?.nome||j.nutricionista?.email||'';document.getElementById('professionalPlanNotice').textContent=j.has_new?'Há uma nova orientação'+(professionalName?' de '+professionalName:'')+'.':(j.updated_at?'Orientações disponíveis'+(professionalName?' de '+professionalName:'')+'.':'Aguardando a prescrição de '+(professionalName||'seu nutricionista')+'.');document.getElementById('professionalDays').innerHTML=professionalWeekDays.map(([key,label])=>'<button type="button" class="professionalDayBox" onclick="openProfessionalDay(\''+key+'\')"><span class="professionalDayLabel">'+label+'</span><span class="professionalBoxArrow">›</span></button>').join('')+'<button type="button" class="professionalDayBox" onclick="openProfessionalMessages()"><span class="professionalDayLabel">Mensagens</span><span class="professionalBoxArrow">›</span></button>';closeProfessionalDetail();const readButton=document.getElementById('professionalMarkRead');if(readButton)readButton.style.display=!j.can_manage&&j.has_new?'block':'none';if(j.has_new&&!professionalPlanOpen)toggleProfessionalPlan()}catch(e){const card=document.getElementById('professionalPlanCard');if(card)card.style.display='none'}}async function markProfessionalPlanRead(){try{await api('/api/professional-plan/read',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken}});await loadProfessionalPlan()}catch(e){alert(e.message)}}function showApp(user,csrf=""){if(user?.papel==="nutricionista"&&!user?.em_visualizacao){location.href="/nutritionist";return}csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";const masterPanelBtn=document.getElementById("masterPanelBtn");if(masterPanelBtn)masterPanelBtn.style.display=user?.papel==="admin"&&!user?.em_visualizacao?"inline-block":"none";renderViewMode(user);mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh(),loadProfessionalPlan()]).catch(e=>console.error("carregamento inicial:",e))}
 setInterval(()=>{if(currentUserId)api("/api/heartbeat",{headers:{"X-CSRF-Token":csrfToken}}).catch(()=>{})},30000);
 async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
