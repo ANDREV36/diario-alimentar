@@ -455,6 +455,39 @@ def init_db():
         )
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS prescricoes_nutricionais(
+            cliente_id BIGINT PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
+            nutricionista_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            segunda TEXT NOT NULL DEFAULT '',
+            terca TEXT NOT NULL DEFAULT '',
+            quarta TEXT NOT NULL DEFAULT '',
+            quinta TEXT NOT NULL DEFAULT '',
+            sexta TEXT NOT NULL DEFAULT '',
+            sabado TEXT NOT NULL DEFAULT '',
+            domingo TEXT NOT NULL DEFAULT '',
+            calorias_kcal REAL,
+            proteina_g REAL,
+            carboidratos_g REAL,
+            gorduras_g REAL,
+            sodio_mg REAL,
+            fibras_g REAL,
+            agua_ml REAL,
+            atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            ultima_leitura_cliente TIMESTAMPTZ
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS recados_nutricionais(
+            id BIGSERIAL PRIMARY KEY,
+            cliente_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            nutricionista_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            recado TEXT NOT NULL,
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            lido_em TIMESTAMPTZ
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_recados_nutricionais_cliente ON recados_nutricionais(cliente_id, criado_em DESC)")
+    c.execute("""
         CREATE TABLE IF NOT EXISTS gasto_ativo_diario(
             id BIGSERIAL PRIMARY KEY,
             usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
@@ -733,6 +766,49 @@ def _require_nutritionist(handler):
     handler.actor = actor
     handler.user = actor
     return actor
+
+
+def _nutritionist_view_write_blocked(handler):
+    actor = _current_actor(handler)
+    if actor and actor.get("papel") == "nutricionista" and _view_cookie_target(handler):
+        handler.js({"error":"Não foi possível alterar o diário enquanto ele está sendo visualizado pelo nutricionista."},403)
+        return True
+    return False
+
+
+def _professional_target(handler, requested_id=None):
+    actor = _current_actor(handler)
+    if not actor:
+        return None, None, False
+    if actor.get("papel") == "cliente":
+        return actor, int(actor["id"]), False
+    if actor.get("papel") != "nutricionista":
+        return actor, None, False
+    target_id = requested_id or _view_cookie_target(handler)
+    if not target_id:
+        return actor, None, True
+    c = ddb()
+    try:
+        row = c.execute("SELECT id,email,papel,ativo,bloqueado,nutricionista_id FROM usuarios WHERE id=? AND papel='cliente' AND nutricionista_id=?", (int(target_id), actor["id"])).fetchone()
+    finally:
+        c.close()
+    return actor, (int(target_id) if row and bool(row.get("ativo", True)) and not row.get("bloqueado") else None), True
+
+
+def _professional_number(value, label):
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        number = float(str(value).replace(",", "."))
+    except Exception:
+        raise ValueError(f"{label} inválida.")
+    if not math.isfinite(number) or number < 0 or number > 100000:
+        raise ValueError(f"{label} inválida.")
+    return number
+
+
+def _professional_text(value, limit=1200):
+    return str(value or "").strip()[:limit]
 
 
 def _current_user(handler):
@@ -3092,6 +3168,7 @@ main{height:auto!important;min-height:calc(100vh - 70px)!important;overflow:visi
   </div>
 </section>
 
+<style>#professionalPlanCard.professionalNew{animation:professionalPulse 1.05s ease-in-out infinite}@keyframes professionalPulse{0%,100%{box-shadow:0 0 0 rgba(56,189,248,0);border-color:#38bdf866}50%{box-shadow:0 0 18px rgba(56,189,248,.7);border-color:#7dd3fc}}</style><section class="card" id="professionalPlanCard" style="display:none;border:1px solid #38bdf866;background:linear-gradient(135deg,#0d2136,#102f4a)"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><span class="eyebrow">ACOMPANHAMENTO PROFISSIONAL</span><h2 style="margin:4px 0">🩺 Orientações do nutricionista</h2><div id="professionalPlanNotice" style="color:#bae6fd;font-size:12px"></div></div><button id="professionalPlanToggle" class="miniSummaryBtn" onclick="toggleProfessionalPlan()">VER ORIENTAÇÕES</button></div><div id="professionalPlanBody" style="display:none;margin-top:12px"><div id="professionalDays"></div><div id="professionalGoals" style="margin-top:12px"></div><div id="professionalNotes" style="margin-top:12px"></div><button id="professionalMarkRead" style="display:none;width:100%;margin-top:12px;padding:10px;border:1px solid #38bdf866;border-radius:10px;background:#0f2a45;color:#bae6fd;font-weight:bold" onclick="markProfessionalPlanRead()">MARCAR COMO LIDO</button></div></section>
 <section class="mealPanel card">
   <div class="sectionTitle"><div><span class="eyebrow">REGISTRO RÁPIDO</span><h2>🍽️ O que você vai registrar?</h2></div></div>
   <div id="meals" class="meals"></div>
@@ -3784,7 +3861,7 @@ async function saveActiveHistory(event){
 }
 function renderViewMode(user){const banner=document.getElementById("viewModeBanner"),text=document.getElementById("viewModeText");if(!banner)return;if(user?.em_visualizacao){banner.style.display="flex";text.textContent="Visualizando o diário de "+(user.email||"cliente")+" como nutricionista."}else{banner.style.display="none"}}
 async function stopNutritionistView(){try{await api("/api/nutritionist/stop-view",{method:"POST",headers:{"Content-Type":"application/json"}})}finally{location.href="/nutritionist"}}
-function showApp(user,csrf=""){if(user?.papel==="nutricionista"&&!user?.em_visualizacao){location.href="/nutritionist";return}csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";const masterPanelBtn=document.getElementById("masterPanelBtn");if(masterPanelBtn)masterPanelBtn.style.display=user?.papel==="admin"&&!user?.em_visualizacao?"inline-block":"none";renderViewMode(user);mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).catch(e=>console.error("carregamento inicial:",e))}
+let professionalPlanOpen=false;const professionalWeekDays=[['segunda','Segunda-feira'],['terca','Terça-feira'],['quarta','Quarta-feira'],['quinta','Quinta-feira'],['sexta','Sexta-feira'],['sabado','Sábado'],['domingo','Domingo']];const professionalGoalFields=[['calorias_kcal','Calorias','kcal'],['proteina_g','Proteínas','g'],['carboidratos_g','Carboidratos','g'],['gorduras_g','Gorduras','g'],['sodio_mg','Sódio','mg'],['fibras_g','Fibras','g'],['agua_ml','Água','ml']];function toggleProfessionalPlan(){const body=document.getElementById('professionalPlanBody'),button=document.getElementById('professionalPlanToggle');if(!body)return;professionalPlanOpen=body.style.display==='none';body.style.display=professionalPlanOpen?'block':'none';if(button)button.textContent=professionalPlanOpen?'OCULTAR ORIENTAÇÕES':'VER ORIENTAÇÕES'}async function loadProfessionalPlan(){try{const j=await api('/api/professional-plan');const card=document.getElementById('professionalPlanCard');if(!card)return;const hasDays=Object.values(j.days||{}).some(v=>String(v||'').trim());const hasGoals=Object.values(j.goals||{}).some(v=>v!==null&&v!==undefined&&String(v)!=='');if(!hasDays&&!hasGoals&&!(j.notes||[]).length){card.style.display='none';return}card.style.display='block';card.classList.toggle('professionalNew',Boolean(j.has_new));const professionalName=j.nutricionista?.nome||j.nutricionista?.email||'';document.getElementById('professionalPlanNotice').textContent=j.has_new?'Há uma nova orientação'+(professionalName?' de '+professionalName:'')+'.':(j.updated_at?'Orientações disponíveis'+(professionalName?' de '+professionalName:'')+'.':'');document.getElementById('professionalDays').innerHTML=professionalWeekDays.filter(([key])=>String(j.days?.[key]||'').trim()).map(([key,label])=>'<div style="padding:10px;margin-bottom:7px;border-radius:10px;background:#102b45;border:1px solid #ffffff12"><b style="color:#bae6fd">'+label+'</b><div style="white-space:pre-wrap;margin-top:5px;color:#e2e8f0;font-size:13px;line-height:1.45">'+esc(j.days[key])+'</div></div>').join('')||'<div style="color:#cbd5e1;font-size:12px">Nenhuma orientação diária preenchida.</div>';document.getElementById('professionalGoals').innerHTML=hasGoals?'<div style="padding:10px;border-radius:10px;background:#102b45;border:1px solid #ffffff12"><b style="color:#bae6fd">Metas prescritas</b><div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px">'+professionalGoalFields.filter(([key])=>j.goals?.[key]!==null&&j.goals?.[key]!==undefined&&String(j.goals[key])!=='').map(([key,label,unit])=>'<span style="font-size:12px;color:#e2e8f0">'+label+': <b>'+fmt(j.goals[key])+' '+unit+'</b></span>').join('')+'</div></div>':'';document.getElementById('professionalNotes').innerHTML=(j.notes||[]).length?'<div style="padding:10px;border-radius:10px;background:#102b45;border:1px solid #ffffff12"><b style="color:#bae6fd">Recados</b>'+j.notes.map(n=>'<div style="padding:8px 0;border-bottom:1px solid #ffffff15;white-space:pre-wrap;color:#e2e8f0;font-size:12px">'+esc(n.recado)+'<small style="display:block;color:#94a3b8;margin-top:4px">'+fmt(n.criado_em)+'</small></div>').join('')+'</div>':'';const readButton=document.getElementById('professionalMarkRead');if(readButton)readButton.style.display=!j.can_manage&&j.has_new?'block':'none';if(j.has_new&&!professionalPlanOpen)toggleProfessionalPlan()}catch(e){const card=document.getElementById('professionalPlanCard');if(card)card.style.display='none'}}async function markProfessionalPlanRead(){try{await api('/api/professional-plan/read',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken}});await loadProfessionalPlan()}catch(e){alert(e.message)}}function showApp(user,csrf=""){if(user?.papel==="nutricionista"&&!user?.em_visualizacao){location.href="/nutritionist";return}csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";const masterPanelBtn=document.getElementById("masterPanelBtn");if(masterPanelBtn)masterPanelBtn.style.display=user?.papel==="admin"&&!user?.em_visualizacao?"inline-block":"none";renderViewMode(user);mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh(),loadProfessionalPlan()]).catch(e=>console.error("carregamento inicial:",e))}
 setInterval(()=>{if(currentUserId)api("/api/heartbeat",{headers:{"X-CSRF-Token":csrfToken}}).catch(()=>{})},30000);
 async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
@@ -4681,8 +4758,10 @@ async function api(u,o={}){const r=await fetch(u,o);const j=await r.json();if(!r
 
 NUTRI_HTML = r"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>Painel do nutricionista · Diário Alimentar</title><style>
 *{box-sizing:border-box}html,body{width:100%;height:100%;overflow:hidden;overscroll-behavior:none;touch-action:pan-y}body{font-family:Arial,sans-serif;margin:0;background:#07111f;color:#e5eef8;overflow:hidden;position:fixed;inset:0;touch-action:pan-y}main{width:100vw;max-width:none;height:100dvh;overflow-y:auto;overflow-x:hidden;margin:0;padding:22px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:15px;margin-bottom:18px}.muted{color:#94a3b8;font-size:12px}.panel{background:#0b1728;border:1px solid #ffffff20;border-radius:16px;padding:16px;margin-top:14px;box-shadow:0 14px 34px #0004}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.card{background:#10243a;border:1px solid #ffffff18;border-radius:12px;padding:13px}.card b{display:block;font-size:26px;margin-top:5px}.actions,.formrow{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:9px;padding:10px 12px;cursor:pointer;font-weight:bold;background:#2563eb;color:#fff}button.secondary{background:#1e293b;border:1px solid #475569}button.green{background:#16a34a}button.red{background:#991b1b}button:disabled{opacity:.55;cursor:wait}input{padding:10px;border:1px solid #ffffff25;border-radius:9px;background:#16263a;color:#fff;min-width:0}.formrow label{display:flex;flex-direction:column;gap:5px;color:#cbd5e1;font-size:11px;font-weight:bold;flex:1;min-width:190px}.status{min-height:19px;color:#fcd34d;font-size:12px;margin-top:8px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{padding:10px 8px;border-bottom:1px solid #ffffff12;text-align:left;font-size:12px;vertical-align:middle}th{color:#94a3b8;font-size:10px;text-transform:uppercase}td small{display:block;color:#94a3b8;margin-top:3px}.empty{padding:14px;border:1px dashed #475569;border-radius:10px;color:#cbd5e1;margin-top:10px}@media(max-width:700px){main{padding:14px 10px}.top{flex-direction:column}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{padding:13px}table{display:block;overflow-x:auto;white-space:nowrap}}
-</style></head><body><main><div class="top"><div><div class="muted">DIÁRIO ALIMENTAR · ACOMPANHAMENTO PROFISSIONAL</div><h1 style="margin:5px 0">🩺 Painel do nutricionista</h1><div id="nutriName" class="muted">Carregando...</div></div><div class="actions"><button class="secondary" onclick="load()">Atualizar</button><button class="secondary" onclick="logout()">Sair</button></div></div><section class="cards"><div class="card">Clientes ativos<b id="active">—</b></div><div class="card">Clientes inativos<b id="inactive">—</b></div><div class="card">Total acompanhado<b id="total">—</b></div></section><section class="panel"><h2 style="margin:0 0 5px">Adicionar cliente</h2><div class="muted">O cliente criado aqui ficará vinculado somente a este nutricionista.</div><div class="formrow" style="margin-top:12px"><label>Nome<input id="newName" placeholder="Nome completo"></label><label>E-mail<input id="newEmail" type="email" placeholder="email@exemplo.com"></label><label>Senha inicial<input id="newPassword" type="password" minlength="8" placeholder="Mínimo de 8 caracteres"></label><button style="align-self:end" onclick="createClient()">CRIAR CLIENTE</button></div><div id="createStatus" class="status"></div></section><section class="panel"><h2 style="margin:0">Meus clientes</h2><div class="muted" style="margin-top:5px">Ao abrir um cliente, você verá a mesma visão do diário dele. A edição de dieta e metas será acrescentada na próxima etapa.</div><table><thead><tr><th>Cliente</th><th>Cadastro</th><th>Estado</th><th>Ações</th></tr></thead><tbody id="clients"><tr><td colspan="4">Carregando...</td></tr></tbody></table></section></main><script>
-async function api(u,o={}){const r=await fetch(u,o);const j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}async function csrf(){const j=await api('/api/me');return j.csrf||''}function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}function fmt(d){return d?new Date(d).toLocaleString('pt-BR'):'—'}async function createClient(){const status=document.getElementById('createStatus');status.textContent='Criando...';try{const j=await api('/api/nutritionist/create-client',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({nome:document.getElementById('newName').value,email:document.getElementById('newEmail').value,password:document.getElementById('newPassword').value})});status.textContent='Cliente criado: '+j.user.email+'.';document.getElementById('newPassword').value='';load()}catch(e){status.textContent=e.message}}async function toggle(id,active){try{await api('/api/nutritionist/client-active',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({user_id:id,ativo:active})});load()}catch(e){alert(e.message)}}async function openClient(id){try{await api('/api/nutritionist/view-client',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({user_id:id})});location.href='/'}catch(e){alert(e.message)}}async function logout(){try{await api('/api/auth/logout',{method:'POST',headers:{'X-CSRF-Token':await csrf()}})}finally{location.href='/'}}async function load(){try{const j=await api('/api/nutritionist/clients');document.getElementById('nutriName').textContent='Responsável: '+(j.nutricionista.nome||j.nutricionista.email);document.getElementById('active').textContent=j.summary.ativos;document.getElementById('inactive').textContent=j.summary.inativos;document.getElementById('total').textContent=j.summary.total;document.getElementById('clients').innerHTML=j.clients.length?j.clients.map(c=>{const active=Boolean(c.ativo)&&!c.bloqueado;return '<tr><td><b>'+esc(c.nome||'Sem nome')+'</b><small>'+esc(c.email)+'</small></td><td>'+fmt(c.criado_em)+'</td><td>'+(active?'ATIVO':'INATIVO')+'</td><td><div class="actions"><button onclick="openClient('+c.id+')">ABRIR DIÁRIO</button><button class="'+(active?'red':'green')+'" onclick="toggle('+c.id+','+(!active)+')">'+(active?'INATIVAR':'REATIVAR')+'</button></div></td></tr>'}).join(''):'<tr><td colspan="4"><div class="empty">Nenhum cliente cadastrado ainda.</div></td></tr>'}catch(e){document.getElementById('clients').innerHTML='<tr><td colspan="4">'+esc(e.message)+'</td></tr>'}}load();</script><script>
+
+.stage2Editor{display:none;margin-top:14px;border-color:#38bdf866;background:linear-gradient(135deg,#0e2036,#102b45)}.stage2Editor h3{margin:0 0 6px}.dietDays{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}.dietDays label,.goalGrid label{display:flex;flex-direction:column;gap:5px;color:#cbd5e1;font-size:11px;font-weight:bold}.dietDays textarea{width:100%;min-height:110px;resize:vertical;padding:8px 10px;border:1px solid #7dd3fc55;border-radius:9px;background-color:#071827;background-image:repeating-linear-gradient(to bottom,transparent 0,transparent 25px,#234563 26px);background-size:100% 26px;color:#fff;font:inherit;line-height:26px}.goalGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}.goalGrid input{width:100%}.noteComposer{display:flex;gap:8px;align-items:flex-end;margin-top:12px}.noteComposer textarea{flex:1;min-height:74px;resize:vertical;padding:10px;border:1px solid #ffffff25;border-radius:9px;background:#071827;color:#fff;font:inherit}.noteItem{padding:9px 0;border-bottom:1px solid #ffffff15;color:#e2e8f0;font-size:12px;line-height:1.4}.noteItem small{display:block;color:#94a3b8;margin-top:4px}@media(max-width:700px){.dietDays{grid-template-columns:1fr}.goalGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.noteComposer{flex-direction:column;align-items:stretch}}
+</style></head><body><main><div class="top"><div><div class="muted">DIÁRIO ALIMENTAR · ACOMPANHAMENTO PROFISSIONAL</div><h1 style="margin:5px 0">🩺 Painel do nutricionista</h1><div id="nutriName" class="muted">Carregando...</div></div><div class="actions"><button class="secondary" onclick="load()">Atualizar</button><button class="secondary" onclick="logout()">Sair</button></div></div><section class="cards"><div class="card">Clientes ativos<b id="active">—</b></div><div class="card">Clientes inativos<b id="inactive">—</b></div><div class="card">Total acompanhado<b id="total">—</b></div></section><section class="panel"><h2 style="margin:0 0 5px">Adicionar cliente</h2><div class="muted">O cliente criado aqui ficará vinculado somente a este nutricionista.</div><div class="formrow" style="margin-top:12px"><label>Nome<input id="newName" placeholder="Nome completo"></label><label>E-mail<input id="newEmail" type="email" placeholder="email@exemplo.com"></label><label>Senha inicial<input id="newPassword" type="password" minlength="8" placeholder="Mínimo de 8 caracteres"></label><button style="align-self:end" onclick="createClient()">CRIAR CLIENTE</button></div><div id="createStatus" class="status"></div></section><section class="panel"><h2 style="margin:0">Meus clientes</h2><div class="muted" style="margin-top:5px">Ao abrir um cliente, você verá a mesma visão do diário dele. A edição de dieta e metas será acrescentada na próxima etapa.</div><table><thead><tr><th>Cliente</th><th>Cadastro</th><th>Estado</th><th>Ações</th></tr></thead><tbody id="clients"><tr><td colspan="4">Carregando...</td></tr></tbody></table></section><section class="panel stage2Editor" id="clientEditor"><div class="top" style="margin-bottom:8px"><div><div class="muted">PRESCRIÇÃO INDIVIDUAL</div><h2 id="editorTitle" style="margin:4px 0">Dieta do cliente</h2><div class="muted">Escreva a orientação de cada dia. O cliente verá este quadro no próprio Diário.</div></div><button class="secondary" onclick="closeManager()">FECHAR</button></div><div id="editorDays" class="dietDays"></div><h3 style="margin:16px 0 0">Metas prescritas</h3><div class="muted">Deixe em branco quando quiser manter a meta atual do Diário.</div><div id="goalGrid" class="goalGrid"></div><div class="actions" style="margin-top:12px"><button onclick="savePlan()">SALVAR DIETA E METAS</button></div><div id="editorStatus" class="status"></div><h3 style="margin:18px 0 0">Recados para o cliente</h3><div id="notesList"></div><div class="noteComposer"><textarea id="newNote" placeholder="Escreva um recado, observação ou orientação..."></textarea><button onclick="addNote()">ENVIAR RECADO</button></div></section></main><script>
+async function api(u,o={}){const r=await fetch(u,o);const j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}async function csrf(){const j=await api('/api/me');return j.csrf||''}function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}function fmt(d){return d?new Date(d).toLocaleString('pt-BR'):'—'}async function createClient(){const status=document.getElementById('createStatus');status.textContent='Criando...';try{const j=await api('/api/nutritionist/create-client',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({nome:document.getElementById('newName').value,email:document.getElementById('newEmail').value,password:document.getElementById('newPassword').value})});status.textContent='Cliente criado: '+j.user.email+'.';document.getElementById('newPassword').value='';load()}catch(e){status.textContent=e.message}}async function toggle(id,active){try{await api('/api/nutritionist/client-active',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({user_id:id,ativo:active})});load()}catch(e){alert(e.message)}}async function openClient(id){try{await api('/api/nutritionist/view-client',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({user_id:id})});location.href='/'}catch(e){alert(e.message)}}async function logout(){try{await api('/api/auth/logout',{method:'POST',headers:{'X-CSRF-Token':await csrf()}})}finally{location.href='/'}}const weekDays=[['segunda','Segunda-feira'],['terca','Terça-feira'],['quarta','Quarta-feira'],['quinta','Quinta-feira'],['sexta','Sexta-feira'],['sabado','Sábado'],['domingo','Domingo']];const goalFields=[['calorias_kcal','Calorias','kcal'],['proteina_g','Proteínas','g'],['carboidratos_g','Carboidratos','g'],['gorduras_g','Gorduras','g'],['sodio_mg','Sódio','mg'],['fibras_g','Fibras','g'],['agua_ml','Água','ml']];let selectedClientId=null;function buildEditorDays(days={}){document.getElementById('editorDays').innerHTML=weekDays.map(([key,label])=>'<label>'+label+'<textarea id="diet_'+key+'" placeholder="Descreva a dieta e orientações deste dia...">'+esc(days[key]||'')+'</textarea></label>').join('')}function buildGoalGrid(goals={}){document.getElementById('goalGrid').innerHTML=goalFields.map(([key,label,unit])=>'<label>'+label+' ('+unit+')<input id="goal_'+key+'" type="number" min="0" step="0.1" value="'+(goals[key]??'')+'" placeholder="Meta atual"></label>').join('')}function renderNotes(notes=[]){document.getElementById('notesList').innerHTML=notes.length?notes.map(n=>'<div class="noteItem">'+esc(n.recado)+'<small>'+fmt(n.criado_em)+(n.lido_em?' · lido pelo cliente':' · ainda não lido')+'</small></div>').join(''):'<div class="empty">Nenhum recado enviado para este cliente.</div>'}async function openManager(id,name){selectedClientId=Number(id);const editor=document.getElementById('clientEditor'),status=document.getElementById('editorStatus');editor.style.display='block';document.getElementById('editorTitle').textContent='Dieta · '+(name||'cliente');status.textContent='Carregando...';editor.scrollIntoView({behavior:'smooth',block:'start'});try{const j=await api('/api/professional-plan?client_id='+encodeURIComponent(id));buildEditorDays(j.days);buildGoalGrid(j.goals);renderNotes(j.notes);status.textContent=j.updated_at?'Última alteração: '+fmt(j.updated_at):'Ainda não há dieta prescrita.';document.getElementById('newNote').value=''}catch(e){status.textContent=e.message}}function closeManager(){selectedClientId=null;document.getElementById('clientEditor').style.display='none'}async function savePlan(){if(!selectedClientId)return;const days={};weekDays.forEach(([key])=>days[key]=document.getElementById('diet_'+key).value);const metas={};goalFields.forEach(([key])=>metas[key]=document.getElementById('goal_'+key).value);const status=document.getElementById('editorStatus');status.textContent='Salvando...';try{await api('/api/nutritionist/client-plan',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({client_id:selectedClientId,dias,metas})});status.textContent='Dieta e metas salvas. O cliente verá a atualização ao abrir o Diário.'}catch(e){status.textContent=e.message}}async function addNote(){if(!selectedClientId)return;const input=document.getElementById('newNote'),recado=input.value.trim(),status=document.getElementById('editorStatus');if(!recado){status.textContent='Escreva um recado antes de enviar.';return}status.textContent='Enviando recado...';try{await api('/api/nutritionist/client-note',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({client_id:selectedClientId,recado})});input.value='';await openManager(selectedClientId,document.getElementById('editorTitle').textContent.replace(/^Dieta · /,''));status.textContent='Recado enviado.'}catch(e){status.textContent=e.message}}async function load(){try{const j=await api('/api/nutritionist/clients');document.getElementById('nutriName').textContent='Responsável: '+(j.nutricionista.nome||j.nutricionista.email);document.getElementById('active').textContent=j.summary.ativos;document.getElementById('inactive').textContent=j.summary.inativos;document.getElementById('total').textContent=j.summary.total;document.getElementById('clients').innerHTML=j.clients.length?j.clients.map(c=>{const active=Boolean(c.ativo)&&!c.bloqueado;return '<tr><td><b>'+esc(c.nome||'Sem nome')+'</b><small>'+esc(c.email)+'</small></td><td>'+fmt(c.criado_em)+'</td><td>'+(active?'ATIVO':'INATIVO')+'</td><td><div class="actions"><button onclick="openManager('+c.id+','+JSON.stringify(c.nome||c.email)+')">DIETA / METAS</button><button onclick="openClient('+c.id+')">ABRIR DIÁRIO</button><button class="'+(active?'red':'green')+'" onclick="toggle('+c.id+','+(!active)+')">'+(active?'INATIVAR':'REATIVAR')+'</button></div></td></tr>'}).join(''):'<tr><td colspan="4"><div class="empty">Nenhum cliente cadastrado ainda.</div></td></tr>'}catch(e){document.getElementById('clients').innerHTML='<tr><td colspan="4">'+esc(e.message)+'</td></tr>'}}load();</script><script>
 /* Painéis profissionais: sem zoom por pinça, duplo toque, roda ou teclado. */
 (()=>{
   const stopZoom=e=>{if(e.touches&&e.touches.length>1)e.preventDefault()};
@@ -4866,6 +4945,27 @@ class H(BaseHTTPRequestHandler):
             finally:c.close()
             clients=[dict(r) for r in rows]
             self.js({"nutricionista":dict(user),"clients":clients,"summary":{"total":len(clients),"ativos":sum(1 for x in clients if bool(x.get("ativo",True)) and not x.get("bloqueado")),"inativos":sum(1 for x in clients if not bool(x.get("ativo",True)) or x.get("bloqueado"))}});return
+        if p.path=="/api/professional-plan":
+            requested=parse_qs(p.query).get("client_id",[None])[0]
+            try:
+                requested_id=int(requested) if requested else None
+            except Exception:
+                requested_id=None
+            actor,target_id,can_manage=_professional_target(self,requested_id)
+            if not actor:
+                self.js({"error":"Autenticação necessária"},401);return
+            if not target_id:
+                self.js({"error":"Cliente não encontrado ou acesso não autorizado."},403);return
+            c=ddb()
+            try:
+                plan=c.execute("SELECT * FROM prescricoes_nutricionais WHERE cliente_id=?",(target_id,)).fetchone()
+                notes=c.execute("SELECT id,recado,criado_em,lido_em FROM recados_nutricionais WHERE cliente_id=? ORDER BY criado_em DESC LIMIT 30",(target_id,)).fetchall()
+                nutri_info=c.execute("SELECT u.email,COALESCE(p.nome,u.email) AS nome FROM usuarios u LEFT JOIN perfis p ON p.usuario_id=u.id WHERE u.id=COALESCE((SELECT nutricionista_id FROM prescricoes_nutricionais WHERE cliente_id=?),(SELECT nutricionista_id FROM recados_nutricionais WHERE cliente_id=? ORDER BY criado_em DESC LIMIT 1))",(target_id,target_id)).fetchone()
+                new_row=c.execute("SELECT EXISTS(SELECT 1 FROM (SELECT criado_em AS alterado_em FROM recados_nutricionais WHERE cliente_id=? UNION ALL SELECT atualizado_em AS alterado_em FROM prescricoes_nutricionais WHERE cliente_id=?) alteracoes WHERE alterado_em>COALESCE((SELECT ultima_leitura_cliente FROM prescricoes_nutricionais WHERE cliente_id=?),TIMESTAMPTZ 'epoch')) AS novo",(target_id,target_id,target_id)).fetchone()
+            finally:c.close()
+            days={k:(plan.get(k) if plan else "") for k in ("segunda","terca","quarta","quinta","sexta","sabado","domingo")}
+            goals={k:(plan.get(k) if plan else None) for k in ("calorias_kcal","proteina_g","carboidratos_g","gorduras_g","sodio_mg","fibras_g","agua_ml")}
+            self.js({"client_id":target_id,"can_manage":bool(can_manage),"nutricionista":dict(nutri_info) if nutri_info else None,"days":days,"goals":goals,"notes":[dict(n) for n in notes],"updated_at":plan.get("atualizado_em") if plan else None,"has_new":bool((new_row or {}).get("novo"))});return
         if p.path=="/api/me":
             user=_current_user(self)
             if user:self.js({"authenticated":True,"user":user,"csrf":self.csrf_token()})
@@ -5259,6 +5359,61 @@ class H(BaseHTTPRequestHandler):
             finally:c.close()
             self.js({"ok":True},headers={"Set-Cookie":_session_cookie("",0)});return
 
+        if self.path=="/api/nutritionist/client-plan":
+            nutri=_require_nutritionist(self)
+            if not nutri:return
+            if not self.verify_csrf():return
+            c=None
+            try:
+                x=self.body();target_id=int(x.get("client_id"));actor,target_id,_=_professional_target(self,target_id)
+                if not actor or actor.get("papel")!="nutricionista" or not target_id:raise ValueError("Cliente não encontrado na sua carteira.")
+                days={k:_professional_text(x.get("dias",{}).get(k,""),1600) for k in ("segunda","terca","quarta","quinta","sexta","sabado","domingo")}
+                goals={k:_professional_number(x.get("metas",{}).get(k),k) for k in ("calorias_kcal","proteina_g","carboidratos_g","gorduras_g","sodio_mg","fibras_g","agua_ml")}
+                c=ddb();c.execute("""INSERT INTO prescricoes_nutricionais(cliente_id,nutricionista_id,segunda,terca,quarta,quinta,sexta,sabado,domingo,calorias_kcal,proteina_g,carboidratos_g,gorduras_g,sodio_mg,fibras_g,agua_ml,atualizado_em)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+                    ON CONFLICT(cliente_id) DO UPDATE SET nutricionista_id=EXCLUDED.nutricionista_id,segunda=EXCLUDED.segunda,terca=EXCLUDED.terca,quarta=EXCLUDED.quarta,quinta=EXCLUDED.quinta,sexta=EXCLUDED.sexta,sabado=EXCLUDED.sabado,domingo=EXCLUDED.domingo,calorias_kcal=EXCLUDED.calorias_kcal,proteina_g=EXCLUDED.proteina_g,carboidratos_g=EXCLUDED.carboidratos_g,gorduras_g=EXCLUDED.gorduras_g,sodio_mg=EXCLUDED.sodio_mg,fibras_g=EXCLUDED.fibras_g,agua_ml=EXCLUDED.agua_ml,atualizado_em=NOW()""",(target_id,nutri["id"],days["segunda"],days["terca"],days["quarta"],days["quinta"],days["sexta"],days["sabado"],days["domingo"],goals["calorias_kcal"],goals["proteina_g"],goals["carboidratos_g"],goals["gorduras_g"],goals["sodio_mg"],goals["fibras_g"],goals["agua_ml"]))
+                goal_updates={k:v for k,v in goals.items() if v is not None}
+                if goal_updates:
+                    sets=", ".join(f"{k}=?" for k in goal_updates)
+                    c.execute("UPDATE metas_usuario SET "+sets+",atualizado_em=NOW() WHERE usuario_id=?",[*goal_updates.values(),target_id])
+                c.commit();self.js({"ok":True})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+
+        if self.path=="/api/nutritionist/client-note":
+            nutri=_require_nutritionist(self)
+            if not nutri:return
+            if not self.verify_csrf():return
+            c=None
+            try:
+                x=self.body();target_id=int(x.get("client_id"));recado=_professional_text(x.get("recado"),2000)
+                if not recado:raise ValueError("Escreva um recado antes de salvar.")
+                actor,target_id,_=_professional_target(self,target_id)
+                if not actor or actor.get("papel")!="nutricionista" or not target_id:raise ValueError("Cliente não encontrado na sua carteira.")
+                c=ddb();c.execute("INSERT INTO recados_nutricionais(cliente_id,nutricionista_id,recado) VALUES(?,?,?)",(target_id,nutri["id"],recado));c.commit();self.js({"ok":True})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+
+        if self.path=="/api/professional-plan/read":
+            actor=_current_actor(self)
+            if not actor or actor.get("papel")!="cliente":
+                self.js({"error":"Apenas o cliente pode marcar a orientação como lida."},403);return
+            if not self.verify_csrf():return
+            c=ddb()
+            try:
+                c.execute("UPDATE prescricoes_nutricionais SET ultima_leitura_cliente=NOW() WHERE cliente_id=?",(actor["id"],))
+                c.execute("UPDATE recados_nutricionais SET lido_em=NOW() WHERE cliente_id=? AND lido_em IS NULL",(actor["id"],));c.commit()
+            finally:c.close()
+            self.js({"ok":True});return
+
         if self.path=="/api/nutritionist/stop-view":
             actor=_current_actor(self)
             if not actor or actor.get("papel")!="nutricionista":
@@ -5367,6 +5522,7 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:self.js({"error":str(e)},400)
             return
 
+        if _nutritionist_view_write_blocked(self):return
         user=self.require_user()
         if not user:return
         if not self.verify_csrf(): return
@@ -5751,6 +5907,7 @@ class H(BaseHTTPRequestHandler):
             c=ddb();row=c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?,?) RETURNING id",(self.user["id"],x["data"],meal,aid,name,w,unidade)).fetchone();c.commit();c.close();self.js({"ok":True,"id":row["id"],"refeicao":meal})
         except Exception as e:self.js({"error":str(e)},400)
     def do_PUT(self):
+        if _nutritionist_view_write_blocked(self):return
         user=self.require_user()
         if not user:return
         if not self.verify_csrf(): return
@@ -5770,6 +5927,7 @@ class H(BaseHTTPRequestHandler):
             c=ddb();c.execute("UPDATE consumo SET quantidade_g=?,unidade=?,refeicao=? WHERE id=? AND usuario_id=?",(w,unidade,x["refeicao"],i,self.user["id"]));c.commit();c.close();self.js({"ok":True})
         except Exception as e:self.js({"error":str(e)},400)
     def do_DELETE(self):
+        if _nutritionist_view_write_blocked(self):return
         user=self.require_user()
         if not user:return
         if not self.verify_csrf(): return
