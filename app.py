@@ -83,6 +83,8 @@ MAX_IMAGE_BODY = 8 * 1024 * 1024
 MAX_IMAGE_DECODED = 5 * 1024 * 1024
 RATE_LOCK = Lock()
 RATE_BUCKETS = {}
+USER_RECORDS_LOCK = Lock()
+USER_RECORDS_READY = set()
 LOG = logging.getLogger("diario_alimentar")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -140,9 +142,9 @@ def _basal_from_profile_row(profile_row):
   except Exception:
     return None
 
-def _daily_energy_snapshot(c, user_id, day_iso):
+def _daily_energy_snapshot(c, user_id, day_iso, food_cache=None):
   rows = c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=? ORDER BY id", (user_id, day_iso)).fetchall()
-  consumed_kcal = float(calc(rows, user_id).get("energia_kcal", 0) or 0)
+  consumed_kcal = float(calc(rows, user_id, food_cache).get("energia_kcal", 0) or 0)
   profile_row = c.execute("SELECT idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
   goals_row = c.execute("SELECT calorias_kcal FROM metas_usuario WHERE usuario_id=?", (user_id,)).fetchone()
   active_row = c.execute("SELECT calorias_kcal,basal_kcal,consumido_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data=?", (user_id, day_iso)).fetchone()
@@ -837,12 +839,17 @@ def _current_user(handler):
             finally:
                 c.close()
 
-    c = ddb()
-    try:
-        _ensure_user_records(c, user["id"])
-        c.commit()
-    finally:
-        c.close()
+    uid = int(user["id"])
+    if uid not in USER_RECORDS_READY:
+        with USER_RECORDS_LOCK:
+            if uid not in USER_RECORDS_READY:
+                c = ddb()
+                try:
+                    _ensure_user_records(c, uid)
+                    c.commit()
+                    USER_RECORDS_READY.add(uid)
+                finally:
+                    c.close()
     return user
 
 def _session_cookie(token, max_age=SESSION_DAYS*86400):
@@ -4881,6 +4888,7 @@ async function api(u,o={}){const r=await fetch(u,o);const j=await r.json();if(!r
 
 
 class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     def end_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
@@ -4947,12 +4955,6 @@ class H(BaseHTTPRequestHandler):
         if not user:
             self.js({"error":"Autenticação necessária"},401)
             return None
-        c=ddb()
-        try:
-            _ensure_user_records(c,user["id"])
-            c.commit()
-        finally:
-            c.close()
         self.user=user
         return user
     def do_HEAD(self):
@@ -5010,7 +5012,7 @@ class H(BaseHTTPRequestHandler):
         if p.path=="/":
             b=HTML.encode();self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");self.send_header("Pragma","no-cache");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
         if p.path=="/health":
-            self.send_response(200);self.send_header("Content-Type","text/plain; charset=utf-8");self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(APP_VERSION.encode("utf-8"));return
+            health_body=APP_VERSION.encode("utf-8");self.send_response(200);self.send_header("Content-Type","text/plain; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(health_body)));self.end_headers();self.wfile.write(health_body);return
         if p.path=="/admin":
             user=_require_admin(self)
             if not user:return
@@ -5161,21 +5163,19 @@ class H(BaseHTTPRequestHandler):
             q=parse_qs(p.query);d=q.get("data",[today_sp().isoformat()])[0];m=q.get("refeicao",[MEALS[0]])[0];c=ddb()
             try:rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=? ORDER BY id",(self.user["id"],d,)).fetchall()
             finally:c.close()
-            nc=ndb();pc=ddb();items=[]
-            try:
-                for x in rows:
-                    aid=int(x["alimento_id"])
-                    f=pc.execute("SELECT energia_kcal FROM alimentos_usuario WHERE id=? AND usuario_id=?",(-aid,self.user["id"])).fetchone() if aid<0 else nc.execute("SELECT energia_kcal FROM alimentos WHERE id=?",(aid,)).fetchone()
-                    z=x["quantidade_g"]/100
-                    items.append({"id":x["id"],"refeicao":x["refeicao"],"alimento_nome":x["alimento_nome"],"quantidade_g":x["quantidade_g"],"unidade":x.get("unidade","g"),"kcal":(f["energia_kcal"] or 0)*z if f else 0})
-            finally:
-                nc.close();pc.close()
+            food_nutrient_cache = _food_nutrient_cache(rows, self.user["id"])
+            items=[]
+            for x in rows:
+                aid=int(x["alimento_id"])
+                f=food_nutrient_cache.get(aid)
+                z=x["quantidade_g"]/100
+                items.append({"id":x["id"],"refeicao":x["refeicao"],"alimento_nome":x["alimento_nome"],"quantidade_g":x["quantidade_g"],"unidade":x.get("unidade","g"),"kcal":(f["energia_kcal"] or 0)*z if f else 0})
             c=ddb()
             try:
                 water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"]
                 water_entries=c.execute("SELECT id,hora,quantidade_ml FROM hidratacao WHERE usuario_id=? AND data=? ORDER BY id DESC",(self.user["id"],d,)).fetchall()
                 g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
-                energy=_daily_energy_snapshot(c,self.user["id"],d)
+                energy=_daily_energy_snapshot(c,self.user["id"],d,food_nutrient_cache)
                 measurement=c.execute("SELECT data,peso_kg,agua_kg,agua_estimada FROM medicoes_corporais WHERE usuario_id=? AND data=?",(self.user["id"],d)).fetchone()
             finally:
                 c.close()
@@ -5183,7 +5183,7 @@ class H(BaseHTTPRequestHandler):
             if measurement:
                 body_measurement=_body_measurement_values(measurement.get("peso_kg"),measurement.get("agua_kg"),bool(measurement.get("agua_estimada")))
                 if body_measurement:body_measurement["data"]=str(measurement.get("data") or d)
-            self.js({"items":items,"daily":calc(rows,self.user["id"]),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"]),"water":float(water or 0),"water_entries":[dict(x) for x in water_entries],"goals":goal_dict(g),"energy":energy,"body_measurement":body_measurement});return
+            self.js({"items":items,"daily":calc(rows,self.user["id"],food_nutrient_cache),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"],food_nutrient_cache),"water":float(water or 0),"water_entries":[dict(x) for x in water_entries],"goals":goal_dict(g),"energy":energy,"body_measurement":body_measurement});return
         if p.path.startswith("/api/food/"):
             try: food_id=int(p.path.rsplit("/",1)[1])
             except ValueError:
