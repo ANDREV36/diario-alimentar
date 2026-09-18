@@ -65,6 +65,7 @@ HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 5000))
 SESSION_COOKIE = "diario_session"
 CSRF_COOKIE = "diario_csrf"
+VIEW_COOKIE = "diario_nutri_view"
 SESSION_DAYS = 30
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "").strip().lower()
 IS_PRODUCTION = ENVIRONMENT == "production" or bool(os.environ.get("RENDER"))
@@ -74,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V66 · Painel administrativo + usuários online + bloqueio + métricas"
+APP_VERSION = "V67 · Perfis master, nutricionista e cliente"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -391,11 +392,18 @@ def init_db():
             criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
-    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS papel TEXT NOT NULL DEFAULT 'user'")
+    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS papel TEXT NOT NULL DEFAULT 'cliente'")
     c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS bloqueado BOOLEAN NOT NULL DEFAULT FALSE")
+    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS ativo BOOLEAN NOT NULL DEFAULT TRUE")
+    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS nutricionista_id BIGINT")
+    c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS origem TEXT NOT NULL DEFAULT 'direto'")
     c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS ultimo_acesso TIMESTAMPTZ")
     c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS ultima_atividade TIMESTAMPTZ")
     c.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS segundos_uso BIGINT NOT NULL DEFAULT 0")
+    c.execute("UPDATE usuarios SET papel='cliente' WHERE papel='user' OR papel IS NULL OR papel=''")
+    c.execute("UPDATE usuarios SET origem='direto' WHERE origem IS NULL OR origem=''")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_papel ON usuarios(papel)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_nutricionista ON usuarios(nutricionista_id)")
     c.execute("""
         CREATE TABLE IF NOT EXISTS eventos_usuario(
             id BIGSERIAL PRIMARY KEY,
@@ -667,35 +675,106 @@ def _touch_user_activity(user_id, event_type=None, seconds=0):
     finally:
         c.close()
 
-def _require_admin(handler):
-    user=_current_user(handler)
-    if not user:
-        handler.js({"error":"Autenticação necessária"},401); return None
-    if user.get("papel") != "admin":
-        handler.js({"error":"Acesso administrativo não autorizado"},403); return None
-    handler.user=user
-    return user
+def _view_cookie(target_id, max_age=SESSION_DAYS*86400):
+    """Cookie assinado que permite ao nutricionista abrir um cliente."""
+    payload = str(int(target_id))
+    signature = hmac.new(SESSION_SECRET.encode("utf-8"), f"view:{payload}".encode("utf-8"), hashlib.sha256).hexdigest()
+    secure = '; Secure' if IS_PRODUCTION else ''
+    return f'{VIEW_COOKIE}={payload}.{signature}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'
 
-def _current_user(handler):
+
+def _view_cookie_target(handler):
+    raw = _cookie_value(handler, VIEW_COOKIE)
+    payload, sep, signature = raw.partition('.')
+    if not sep or not payload.isdigit() or not signature:
+        return None
+    expected = hmac.new(SESSION_SECRET.encode("utf-8"), f"view:{payload}".encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    return int(payload)
+
+
+def _current_actor(handler):
+    """Retorna o usuário autenticado original, sem aplicar o modo de visualização."""
     token = _cookie_value(handler, SESSION_COOKIE)
     if not token:
         return None
     c = ddb()
     try:
-        row = c.execute('''SELECT u.id, u.email, u.papel, u.bloqueado FROM sessoes s JOIN usuarios u ON u.id=s.usuario_id
-                           WHERE s.token_hash=? AND s.expira_em>NOW()''', (_token_hash(token),)).fetchone()
-        if not row or row.get("bloqueado"):
+        row = c.execute("SELECT u.id,u.email,u.papel,u.bloqueado,u.ativo,u.nutricionista_id,u.origem,u.criado_em,u.ultimo_acesso,u.ultima_atividade,u.segundos_uso FROM sessoes s JOIN usuarios u ON u.id=s.usuario_id WHERE s.token_hash=? AND s.expira_em>NOW()", (_token_hash(token),)).fetchone()
+        if not row or row.get("bloqueado") or not bool(row.get("ativo", True)):
             return None
-        user = dict(row)
-        _ensure_user_records(c, user['id'])
-        c.commit()
-        return user
+        return dict(row)
     finally:
         c.close()
+
+
+def _require_admin(handler):
+    actor = _current_actor(handler)
+    if not actor:
+        handler.js({"error":"Autenticação necessária"}, 401)
+        return None
+    if actor.get("papel") != "admin":
+        handler.js({"error":"Acesso administrativo não autorizado"}, 403)
+        return None
+    handler.actor = actor
+    handler.user = actor
+    return actor
+
+
+def _require_nutritionist(handler):
+    actor = _current_actor(handler)
+    if not actor:
+        handler.js({"error":"Autenticação necessária"}, 401)
+        return None
+    if actor.get("papel") != "nutricionista":
+        handler.js({"error":"Acesso exclusivo para nutricionistas"}, 403)
+        return None
+    handler.actor = actor
+    handler.user = actor
+    return actor
+
+
+def _current_user(handler):
+    actor = _current_actor(handler)
+    if not actor:
+        return None
+    user = dict(actor)
+    user["ator_id"] = actor["id"]
+    user["ator_papel"] = actor["papel"]
+    user["em_visualizacao"] = False
+
+    if actor.get("papel") == "nutricionista":
+        target_id = _view_cookie_target(handler)
+        if target_id and target_id != actor["id"]:
+            c = ddb()
+            try:
+                target = c.execute("SELECT id,email,papel,bloqueado,ativo,nutricionista_id,origem,criado_em,ultimo_acesso,ultima_atividade,segundos_uso FROM usuarios WHERE id=? AND papel='cliente' AND nutricionista_id=?", (target_id, actor["id"])).fetchone()
+                if target and not target.get("bloqueado") and bool(target.get("ativo", True)):
+                    user = dict(target)
+                    user["ator_id"] = actor["id"]
+                    user["ator_papel"] = actor["papel"]
+                    user["ator_email"] = actor.get("email")
+                    user["em_visualizacao"] = True
+            finally:
+                c.close()
+
+    c = ddb()
+    try:
+        _ensure_user_records(c, user["id"])
+        c.commit()
+    finally:
+        c.close()
+    return user
 
 def _session_cookie(token, max_age=SESSION_DAYS*86400):
     secure = '; Secure' if IS_PRODUCTION else ''
     return f'{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}'
+
+
+def _clear_view_cookie():
+    secure = '; Secure' if IS_PRODUCTION else ''
+    return f'{VIEW_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}'
 
 def _food_energy_cache(rows, user_id):
     """Retorna kcal por 100 g/ml para os alimentos usados no período."""
@@ -2984,6 +3063,7 @@ main{
 
 </style></head><body>
 <div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V45 · Diário Alimentar · Segurança P0</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
+<div id="viewModeBanner" style="display:none;max-width:1180px;margin:10px auto 0;padding:10px 13px;border:1px solid #fbbf2466;border-radius:12px;background:#422006;color:#fef3c7;font-size:12px;align-items:center;justify-content:space-between;gap:10px"><span id="viewModeText"></span><button onclick="stopNutritionistView()" style="padding:8px 10px;border:1px solid #fcd34d66;border-radius:8px;background:#78350f;color:#fff;font-weight:bold">VOLTAR AO PAINEL</button></div>
 <main>
 <section class="hero">
   <div class="heroTop">
@@ -3679,7 +3759,9 @@ async function saveActiveHistory(event){
     button.textContent="Salvar os 7 dias";
   }
 }
-function showApp(user,csrf=""){csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>ensureWeeklyActiveHistory()).catch(e=>console.error("carregamento inicial:",e))}
+function renderViewMode(user){const banner=document.getElementById("viewModeBanner"),text=document.getElementById("viewModeText");if(!banner)return;if(user?.em_visualizacao){banner.style.display="flex";text.textContent="Visualizando o diário de "+(user.email||"cliente")+" como nutricionista."}else{banner.style.display="none"}}
+async function stopNutritionistView(){try{await api("/api/nutritionist/stop-view",{method:"POST",headers:{"Content-Type":"application/json"}})}finally{location.href="/nutritionist"}}
+function showApp(user,csrf=""){if(user?.papel==="admin"&&!user?.em_visualizacao){location.href="/admin";return}if(user?.papel==="nutricionista"&&!user?.em_visualizacao){location.href="/nutritionist";return}csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";renderViewMode(user);mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh()]).then(()=>ensureWeeklyActiveHistory()).catch(e=>console.error("carregamento inicial:",e))}
 setInterval(()=>{if(currentUserId)api("/api/heartbeat",{headers:{"X-CSRF-Token":csrfToken}}).catch(()=>{})},30000);
 async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
@@ -4544,7 +4626,16 @@ searchEl.oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,40
 """
 HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V55 · Diário Alimentar · Bebidas em ml").replace("V45 · DIÁRIO ALIMENTAR", "V55 · DIÁRIO ALIMENTAR").replace("<title>V43 - Diário Alimentar · Base pessoal confirmada</title>", "<title>V55 · Diário Alimentar · Bebidas em ml</title>")
 
-ADMIN_HTML = r"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Painel Administrativo</title><style>body{font-family:Arial,sans-serif;margin:0;background:#07111f;color:#e5eef8}main{max-width:1200px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:22px}.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.card{background:#0b1728;border:1px solid #ffffff18;border-radius:14px;padding:16px}.card b{display:block;font-size:28px;margin-top:7px}.muted{color:#94a3b8;font-size:12px}table{width:100%;border-collapse:collapse;margin-top:18px;background:#0b1728;border-radius:14px;overflow:hidden}th,td{padding:11px;border-bottom:1px solid #ffffff12;text-align:left;font-size:13px}th{color:#94a3b8;font-size:11px;text-transform:uppercase}.on{color:#4ade80}.off{color:#94a3b8}.blocked{color:#fb7185}button{border:0;border-radius:8px;padding:8px 11px;cursor:pointer;font-weight:bold}button.block{background:#7f1d1d;color:#fff}button.unblock{background:#166534;color:#fff}@media(max-width:800px){.cards{grid-template-columns:repeat(2,1fr)}table{display:block;overflow:auto;white-space:nowrap}.top{align-items:flex-start;flex-direction:column}}</style></head><body><main><div class="top"><div><h1>🔐 Painel Administrativo</h1><div class="muted">Controle de usuários e utilização do Diário Alimentar</div></div><button id="refresh">Atualizar</button></div><section class="cards"><div class="card">Usuários<b id="total">—</b></div><div class="card">Online agora<b id="online">—</b></div><div class="card">Novos hoje<b id="today">—</b></div><div class="card">Ativos 24h<b id="active24">—</b></div><div class="card">Bloqueados<b id="blocked">—</b></div></section><table><thead><tr><th>ID</th><th>E-mail</th><th>Cadastro</th><th>Último acesso</th><th>Atividade</th><th>Uso</th><th>Status</th><th>Ação</th></tr></thead><tbody id="users"><tr><td colspan="8">Carregando...</td></tr></tbody></table></main><script>async function api(u,o={}){const r=await fetch(u,o);const j=await r.json();if(!r.ok)throw Error(j.error||'Erro');return j}function fmt(d){return d?new Date(d).toLocaleString('pt-BR'):'—'}function usage(s){s=Number(s||0);return s<60?s+'s':Math.floor(s/60)+' min'}async function load(){try{const [st,us]=await Promise.all([api('/api/admin/stats'),api('/api/admin/users')]);for(const k of ['total','online','today','active24','blocked'])document.getElementById(k).textContent=st[k];document.getElementById('users').innerHTML=us.users.map(u=>{const online=!u.bloqueado&&u.ultima_atividade&&Date.now()-new Date(u.ultima_atividade).getTime()<90000;return '<tr><td>'+u.id+'</td><td>'+u.email+(u.papel==='admin'?' <b>ADMIN</b>':'')+'</td><td>'+fmt(u.criado_em)+'</td><td>'+fmt(u.ultimo_acesso)+'</td><td>'+fmt(u.ultima_atividade)+'</td><td>'+usage(u.segundos_uso)+'</td><td class="'+(u.bloqueado?'blocked':online?'on':'off')+'">'+(u.bloqueado?'BLOQUEADO':online?'ONLINE':'OFFLINE')+'</td><td>'+(u.papel==='admin'?'—':u.bloqueado?'<button class="unblock" data-id="'+u.id+'">Desbloquear</button>':'<button class="block" data-id="'+u.id+'">Bloquear</button>')+'</td></tr>'}).join('');document.querySelectorAll('[data-id]').forEach(b=>b.addEventListener('click',async()=>{b.disabled=true;await api('/api/admin/'+(b.classList.contains('block')?'block':'unblock'),{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({user_id:Number(b.dataset.id)})});load()}))}catch(e){alert(e.message)}}async function csrf(){const j=await api('/api/me');return j.csrf||''}document.getElementById('refresh').addEventListener('click',load);load();setInterval(load,30000)</script></body></html>"""
+ADMIN_HTML = r"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gestão · Diário Alimentar</title><style>
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;margin:0;background:#07111f;color:#e5eef8}main{max-width:1180px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:20px}.muted{color:#94a3b8;font-size:12px}.actions,.formrow{display:flex;gap:8px;flex-wrap:wrap}.panel{background:#0b1728;border:1px solid #ffffff20;border-radius:16px;padding:16px;margin-top:14px;box-shadow:0 14px 34px #0004}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{background:#10243a;border:1px solid #ffffff18;border-radius:12px;padding:13px}.card b{display:block;font-size:26px;margin-top:5px}.tag{display:inline-block;padding:4px 7px;border-radius:999px;font-size:10px;font-weight:bold;background:#166534;color:#dcfce7}.tag.nutri{background:#7c3aed;color:#ede9fe}.tag.master{background:#1d4ed8;color:#dbeafe}.tag.off{background:#475569;color:#e2e8f0}input,select{padding:10px;border:1px solid #ffffff25;border-radius:9px;background:#16263a;color:#fff;min-width:0}.formrow label{display:flex;flex-direction:column;gap:5px;color:#cbd5e1;font-size:11px;font-weight:bold;flex:1;min-width:170px}button{border:0;border-radius:9px;padding:10px 12px;cursor:pointer;font-weight:bold;background:#2563eb;color:#fff}button.secondary{background:#1e293b;border:1px solid #475569}button.green{background:#16a34a}button.red{background:#991b1b}button:disabled{opacity:.55;cursor:wait}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{padding:10px 8px;border-bottom:1px solid #ffffff12;text-align:left;font-size:12px;vertical-align:middle}th{color:#94a3b8;font-size:10px;text-transform:uppercase}td small{display:block;color:#94a3b8;margin-top:3px}.status{min-height:19px;color:#fcd34d;font-size:12px;margin-top:8px}@media(max-width:760px){main{padding:14px 10px}.top{flex-direction:column}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{padding:13px}table{display:block;overflow-x:auto;white-space:nowrap}}
+</style></head><body><main><div class="top"><div><div class="muted">DIÁRIO ALIMENTAR · GESTÃO GERAL</div><h1 style="margin:5px 0">🔐 Painel master</h1><div class="muted">Você administra nutricionistas e clientes que adquiriram o programa diretamente.</div></div><div class="actions"><button class="secondary" onclick="load()">Atualizar</button><button class="secondary" onclick="logout()">Sair</button></div></div><section class="cards"><div class="card">Nutricionistas<b id="nutris">—</b></div><div class="card">Clientes diretos<b id="direct">—</b></div><div class="card">Ativos<b id="active">—</b></div><div class="card">Inativos<b id="inactive">—</b></div></section><section class="panel"><h2 style="margin:0 0 5px">Cadastrar acesso</h2><div class="muted">Crie um nutricionista ou um cliente direto. Clientes vinculados a nutricionistas serão criados no painel do respectivo nutricionista.</div><div class="formrow" style="margin-top:12px"><label>Tipo<select id="newRole"><option value="nutricionista">Nutricionista</option><option value="cliente">Cliente direto</option></select></label><label>Nome<input id="newName" placeholder="Nome completo"></label><label>E-mail<input id="newEmail" type="email" placeholder="email@exemplo.com"></label><label>Senha inicial<input id="newPassword" type="password" minlength="8" placeholder="Mínimo de 8 caracteres"></label><button style="align-self:end" onclick="createUser()">CRIAR ACESSO</button></div><div id="createStatus" class="status"></div></section><section class="panel"><h2 style="margin:0">Nutricionistas e clientes diretos</h2><div class="muted" style="margin-top:5px">Clientes vinculados a nutricionistas ficam sob a gestão do respectivo nutricionista.</div><table><thead><tr><th>Nome / e-mail</th><th>Perfil</th><th>Origem</th><th>Cadastro</th><th>Status</th><th>Ação</th></tr></thead><tbody id="users"><tr><td colspan="6">Carregando...</td></tr></tbody></table></section></main><script>
+async function api(u,o={}){const r=await fetch(u,o);const j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}async function csrf(){const j=await api('/api/me');return j.csrf||''}function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}function fmt(d){return d?new Date(d).toLocaleString('pt-BR'):'—'}function roleLabel(p){return p==='nutricionista'?'NUTRICIONISTA':p==='admin'?'MASTER':'CLIENTE DIRETO'}async function createUser(){const status=document.getElementById('createStatus');status.textContent='Criando...';try{const j=await api('/api/admin/create-user',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({papel:document.getElementById('newRole').value,nome:document.getElementById('newName').value,email:document.getElementById('newEmail').value,password:document.getElementById('newPassword').value})});status.textContent='Acesso criado para '+j.user.email+'.';document.getElementById('newPassword').value='';load()}catch(e){status.textContent=e.message}}async function toggle(id,active){try{await api('/api/admin/active',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({user_id:id,ativo:active})});load()}catch(e){alert(e.message)}}async function logout(){try{await api('/api/auth/logout',{method:'POST',headers:{'X-CSRF-Token':await csrf()}})}finally{location.href='/'}}async function load(){try{const j=await api('/api/admin/users');document.getElementById('nutris').textContent=j.summary.nutricionistas;document.getElementById('direct').textContent=j.summary.clientes_diretos;document.getElementById('active').textContent=j.summary.ativos;document.getElementById('inactive').textContent=j.summary.inativos;document.getElementById('users').innerHTML=j.users.map(u=>{const active=Boolean(u.ativo)&&!u.bloqueado;const cls=u.papel==='nutricionista'?'nutri':u.papel==='admin'?'master':'';const origin=u.papel==='nutricionista'?'Gerido pelo master':'Aquisição direta';return '<tr><td><b>'+esc(u.nome||'Sem nome')+'</b><small>'+esc(u.email)+'</small></td><td><span class="tag '+cls+'">'+roleLabel(u.papel)+'</span></td><td>'+origin+'</td><td>'+fmt(u.criado_em)+'</td><td><span class="tag '+(active?'':'off')+'">'+(active?'ATIVO':'INATIVO')+'</span></td><td>'+(u.papel==='admin'?'—':'<button class="'+(active?'red':'green')+'" onclick="toggle('+u.id+','+(!active)+')">'+(active?'INATIVAR':'REATIVAR')+'</button>')+'</td></tr>'}).join('')}catch(e){document.getElementById('users').innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>'}}load();</script></body></html>"""
+
+NUTRI_HTML = r"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Painel do nutricionista · Diário Alimentar</title><style>
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;margin:0;background:#07111f;color:#e5eef8}main{max-width:1050px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:15px;margin-bottom:18px}.muted{color:#94a3b8;font-size:12px}.panel{background:#0b1728;border:1px solid #ffffff20;border-radius:16px;padding:16px;margin-top:14px;box-shadow:0 14px 34px #0004}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.card{background:#10243a;border:1px solid #ffffff18;border-radius:12px;padding:13px}.card b{display:block;font-size:26px;margin-top:5px}.actions,.formrow{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:9px;padding:10px 12px;cursor:pointer;font-weight:bold;background:#2563eb;color:#fff}button.secondary{background:#1e293b;border:1px solid #475569}button.green{background:#16a34a}button.red{background:#991b1b}button:disabled{opacity:.55;cursor:wait}input{padding:10px;border:1px solid #ffffff25;border-radius:9px;background:#16263a;color:#fff;min-width:0}.formrow label{display:flex;flex-direction:column;gap:5px;color:#cbd5e1;font-size:11px;font-weight:bold;flex:1;min-width:190px}.status{min-height:19px;color:#fcd34d;font-size:12px;margin-top:8px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{padding:10px 8px;border-bottom:1px solid #ffffff12;text-align:left;font-size:12px;vertical-align:middle}th{color:#94a3b8;font-size:10px;text-transform:uppercase}td small{display:block;color:#94a3b8;margin-top:3px}.empty{padding:14px;border:1px dashed #475569;border-radius:10px;color:#cbd5e1;margin-top:10px}@media(max-width:700px){main{padding:14px 10px}.top{flex-direction:column}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{padding:13px}table{display:block;overflow-x:auto;white-space:nowrap}}
+</style></head><body><main><div class="top"><div><div class="muted">DIÁRIO ALIMENTAR · ACOMPANHAMENTO PROFISSIONAL</div><h1 style="margin:5px 0">🩺 Painel do nutricionista</h1><div id="nutriName" class="muted">Carregando...</div></div><div class="actions"><button class="secondary" onclick="load()">Atualizar</button><button class="secondary" onclick="logout()">Sair</button></div></div><section class="cards"><div class="card">Clientes ativos<b id="active">—</b></div><div class="card">Clientes inativos<b id="inactive">—</b></div><div class="card">Total acompanhado<b id="total">—</b></div></section><section class="panel"><h2 style="margin:0 0 5px">Adicionar cliente</h2><div class="muted">O cliente criado aqui ficará vinculado somente a este nutricionista.</div><div class="formrow" style="margin-top:12px"><label>Nome<input id="newName" placeholder="Nome completo"></label><label>E-mail<input id="newEmail" type="email" placeholder="email@exemplo.com"></label><label>Senha inicial<input id="newPassword" type="password" minlength="8" placeholder="Mínimo de 8 caracteres"></label><button style="align-self:end" onclick="createClient()">CRIAR CLIENTE</button></div><div id="createStatus" class="status"></div></section><section class="panel"><h2 style="margin:0">Meus clientes</h2><div class="muted" style="margin-top:5px">Ao abrir um cliente, você verá a mesma visão do diário dele. A edição de dieta e metas será acrescentada na próxima etapa.</div><table><thead><tr><th>Cliente</th><th>Cadastro</th><th>Estado</th><th>Ações</th></tr></thead><tbody id="clients"><tr><td colspan="4">Carregando...</td></tr></tbody></table></section></main><script>
+async function api(u,o={}){const r=await fetch(u,o);const j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}async function csrf(){const j=await api('/api/me');return j.csrf||''}function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}function fmt(d){return d?new Date(d).toLocaleString('pt-BR'):'—'}async function createClient(){const status=document.getElementById('createStatus');status.textContent='Criando...';try{const j=await api('/api/nutritionist/create-client',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({nome:document.getElementById('newName').value,email:document.getElementById('newEmail').value,password:document.getElementById('newPassword').value})});status.textContent='Cliente criado: '+j.user.email+'.';document.getElementById('newPassword').value='';load()}catch(e){status.textContent=e.message}}async function toggle(id,active){try{await api('/api/nutritionist/client-active',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({user_id:id,ativo:active})});load()}catch(e){alert(e.message)}}async function openClient(id){try{await api('/api/nutritionist/view-client',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({user_id:id})});location.href='/'}catch(e){alert(e.message)}}async function logout(){try{await api('/api/auth/logout',{method:'POST',headers:{'X-CSRF-Token':await csrf()}})}finally{location.href='/'}}async function load(){try{const j=await api('/api/nutritionist/clients');document.getElementById('nutriName').textContent='Responsável: '+(j.nutricionista.nome||j.nutricionista.email);document.getElementById('active').textContent=j.summary.ativos;document.getElementById('inactive').textContent=j.summary.inativos;document.getElementById('total').textContent=j.summary.total;document.getElementById('clients').innerHTML=j.clients.length?j.clients.map(c=>{const active=Boolean(c.ativo)&&!c.bloqueado;return '<tr><td><b>'+esc(c.nome||'Sem nome')+'</b><small>'+esc(c.email)+'</small></td><td>'+fmt(c.criado_em)+'</td><td>'+(active?'ATIVO':'INATIVO')+'</td><td><div class="actions"><button onclick="openClient('+c.id+')">ABRIR DIÁRIO</button><button class="'+(active?'red':'green')+'" onclick="toggle('+c.id+','+(!active)+')">'+(active?'INATIVAR':'REATIVAR')+'</button></div></td></tr>'}).join(''):'<tr><td colspan="4"><div class="empty">Nenhum cliente cadastrado ainda.</div></td></tr>'}catch(e){document.getElementById('clients').innerHTML='<tr><td colspan="4">'+esc(e.message)+'</td></tr>'}}load();</script></body></html>"""
+
 
 class H(BaseHTTPRequestHandler):
     def end_headers(self):
@@ -4560,7 +4651,11 @@ class H(BaseHTTPRequestHandler):
         if isinstance(o, dict) and isinstance(o.get("error"), str):
             o = {**o, "error": public_error_message(o["error"])}
         b=json.dumps(o,ensure_ascii=False,default=json_default).encode();self.send_response(s);self.send_header("Content-Type", "application/json; charset=utf-8");self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");self.send_header("Content-Length",str(len(b)));
-        for k,v in (headers or {}).items(): self.send_header(k,v)
+        for k,v in (headers or {}).items():
+            if isinstance(v,(list,tuple)):
+                for item in v:self.send_header(k,item)
+            else:
+                self.send_header(k,v)
         self.end_headers();self.wfile.write(b)
     def client_ip(self):
         forwarded = self.headers.get("X-Forwarded-For", "")
@@ -4677,6 +4772,10 @@ class H(BaseHTTPRequestHandler):
             user=_require_admin(self)
             if not user:return
             b=ADMIN_HTML.encode("utf-8");self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
+        if p.path=="/nutritionist":
+            user=_require_nutritionist(self)
+            if not user:return
+            b=NUTRI_HTML.encode("utf-8");self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Set-Cookie",_clear_view_cookie());self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b);return
         if p.path=="/api/admin/stats":
             user=_require_admin(self)
             if not user:return
@@ -4694,9 +4793,19 @@ class H(BaseHTTPRequestHandler):
             if not user:return
             c=ddb()
             try:
-                rows=c.execute("SELECT u.id,u.email,u.papel,u.bloqueado,u.criado_em,u.ultimo_acesso,u.ultima_atividade,u.segundos_uso,(SELECT COUNT(*) FROM eventos_usuario e WHERE e.usuario_id=u.id) AS eventos FROM usuarios u ORDER BY u.criado_em DESC").fetchall()
+                rows=c.execute("SELECT u.id,u.email,u.papel,u.bloqueado,u.ativo,u.nutricionista_id,u.origem,u.criado_em,u.ultimo_acesso,u.ultima_atividade,u.segundos_uso,COALESCE(p.nome,'') AS nome FROM usuarios u LEFT JOIN perfis p ON p.usuario_id=u.id WHERE u.papel IN ('admin','nutricionista') OR (u.papel='cliente' AND u.nutricionista_id IS NULL) ORDER BY CASE WHEN u.papel='admin' THEN 0 WHEN u.papel='nutricionista' THEN 1 ELSE 2 END,u.criado_em DESC").fetchall()
             finally:c.close()
-            self.js({"users":[dict(r) for r in rows]});return
+            users=[dict(r) for r in rows]
+            self.js({"users":users,"summary":{"nutricionistas":sum(1 for x in users if x.get("papel")=="nutricionista"),"clientes_diretos":sum(1 for x in users if x.get("papel")=="cliente"),"ativos":sum(1 for x in users if bool(x.get("ativo",True)) and not x.get("bloqueado")),"inativos":sum(1 for x in users if not bool(x.get("ativo",True)) or x.get("bloqueado"))}});return
+        if p.path=="/api/nutritionist/clients":
+            user=_require_nutritionist(self)
+            if not user:return
+            c=ddb()
+            try:
+                rows=c.execute("SELECT u.id,u.email,u.papel,u.bloqueado,u.ativo,u.criado_em,u.ultimo_acesso,COALESCE(p.nome,'') AS nome FROM usuarios u LEFT JOIN perfis p ON p.usuario_id=u.id WHERE u.papel='cliente' AND u.nutricionista_id=? ORDER BY u.ativo DESC,COALESCE(p.nome,u.email)",(user["id"],)).fetchall()
+            finally:c.close()
+            clients=[dict(r) for r in rows]
+            self.js({"nutricionista":dict(user),"clients":clients,"summary":{"total":len(clients),"ativos":sum(1 for x in clients if bool(x.get("ativo",True)) and not x.get("bloqueado")),"inativos":sum(1 for x in clients if not bool(x.get("ativo",True)) or x.get("bloqueado"))}});return
         if p.path=="/api/me":
             user=_current_user(self)
             if user:self.js({"authenticated":True,"user":user,"csrf":self.csrf_token()})
@@ -4707,7 +4816,7 @@ class H(BaseHTTPRequestHandler):
             try:
                 if token:c.execute("DELETE FROM sessoes WHERE token_hash=?",(_token_hash(token),));c.commit()
             finally:c.close()
-            self.js({"ok":True},headers={"Set-Cookie":_session_cookie("",0)});return
+            self.js({"ok":True},headers={"Set-Cookie":[_session_cookie("",0),_clear_view_cookie()]});return
         if p.path=="/a_wide_high_resolution_panoramic_landscape_photo.png":
             img=BASE/"a_wide_high_resolution_panoramic_landscape_photo.png"
             if not img.exists():
@@ -5057,10 +5166,10 @@ class H(BaseHTTPRequestHandler):
                 if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("Informe um e-mail válido.")
                 if len(password)<8: raise ValueError("A senha deve ter pelo menos 8 caracteres.")
                 c=ddb();existing=int(c.execute("SELECT COUNT(*) AS n FROM usuarios").fetchone()["n"])
-                row=c.execute("INSERT INTO usuarios(email,senha_hash) VALUES(?,?) RETURNING id,email",(email,_hash_password(password))).fetchone()
+                row=c.execute("INSERT INTO usuarios(email,senha_hash,papel,origem,ativo) VALUES(?,?,?,?,TRUE) RETURNING id,email,papel,origem",(email,_hash_password(password),"cliente","direto")).fetchone()
                 _ensure_user_records(c,row["id"],migrate_legacy=(existing==0));token=secrets.token_urlsafe(32)
                 c.execute("INSERT INTO sessoes(usuario_id,token_hash,expira_em) VALUES(?,?,NOW()+INTERVAL '30 days')",(row["id"],_token_hash(token)));c.commit()
-                self.js({"ok":True,"user":{"id":row["id"],"email":row["email"]},"csrf":_csrf_for_token(token)},headers={"Set-Cookie":_session_cookie(token)})
+                self.js({"ok":True,"user":dict(row),"csrf":_csrf_for_token(token)},headers={"Set-Cookie":_session_cookie(token)})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":"Não foi possível criar a conta: "+str(e)},400)
@@ -5072,10 +5181,10 @@ class H(BaseHTTPRequestHandler):
             try:
                 if not self.enforce_rate_limit("login",5,900): return
                 x=self.body();email=str(x.get("email","")).strip().lower();password=str(x.get("password",""));c=ddb()
-                row=c.execute("SELECT id,email,senha_hash,papel,bloqueado FROM usuarios WHERE email=?",(email,)).fetchone()
-                if not row or row.get("bloqueado") or not _verify_password(password,row["senha_hash"]): raise ValueError("E-mail ou senha inválidos.")
+                row=c.execute("SELECT id,email,senha_hash,papel,bloqueado,ativo,nutricionista_id,origem FROM usuarios WHERE email=?",(email,)).fetchone()
+                if not row or row.get("bloqueado") or not bool(row.get("ativo",True)) or not _verify_password(password,row["senha_hash"]): raise ValueError("E-mail ou senha inválidos.")
                 token=secrets.token_urlsafe(32);c.execute("INSERT INTO sessoes(usuario_id,token_hash,expira_em) VALUES(?,?,NOW()+INTERVAL '30 days')",(row["id"],_token_hash(token)));c.execute("UPDATE usuarios SET ultimo_acesso=NOW(), ultima_atividade=NOW() WHERE id=?",(row["id"],));c.execute("INSERT INTO eventos_usuario(usuario_id,tipo) VALUES(?,?)",(row["id"],"login"));c.commit()
-                self.js({"ok":True,"user":{"id":row["id"],"email":row["email"]},"csrf":_csrf_for_token(token)},headers={"Set-Cookie":_session_cookie(token)})
+                self.js({"ok":True,"user":{k:row.get(k) for k in ("id","email","papel","ativo","nutricionista_id","origem")},"csrf":_csrf_for_token(token)},headers={"Set-Cookie":_session_cookie(token)})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},401)
@@ -5089,6 +5198,101 @@ class H(BaseHTTPRequestHandler):
                 if token:c.execute("DELETE FROM sessoes WHERE token_hash=?",(_token_hash(token),));c.commit()
             finally:c.close()
             self.js({"ok":True},headers={"Set-Cookie":_session_cookie("",0)});return
+
+        if self.path=="/api/nutritionist/stop-view":
+            actor=_current_actor(self)
+            if not actor or actor.get("papel")!="nutricionista":
+                self.js({"error":"Acesso exclusivo para nutricionistas"},403);return
+            if not self.verify_csrf():return
+            self.js({"ok":True},headers={"Set-Cookie":_clear_view_cookie()});return
+
+        if self.path=="/api/admin/create-user":
+            admin=_require_admin(self)
+            if not admin:return
+            if not self.verify_csrf():return
+            c=None
+            try:
+                x=self.body();papel=str(x.get("papel","")).strip().lower();nome=str(x.get("nome","")).strip();email=str(x.get("email","")).strip().lower();password=str(x.get("password",""))
+                if papel not in ("nutricionista","cliente"):raise ValueError("Escolha nutricionista ou cliente direto.")
+                if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):raise ValueError("Informe um e-mail válido.")
+                if len(password)<8:raise ValueError("A senha deve ter pelo menos 8 caracteres.")
+                c=ddb();row=c.execute("INSERT INTO usuarios(email,senha_hash,papel,origem,ativo) VALUES(?,?,?,?,TRUE) RETURNING id,email,papel,origem",(email,_hash_password(password),papel,"gestao_master" if papel=="nutricionista" else "direto")).fetchone();_ensure_user_records(c,row["id"]);c.execute("UPDATE perfis SET nome=? WHERE usuario_id=?",(nome or email,row["id"]));c.commit();self.js({"ok":True,"user":dict(row)})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":"Não foi possível criar o acesso: "+str(e)},400)
+            finally:
+                if c:c.close()
+            return
+
+        if self.path=="/api/admin/active":
+            admin=_require_admin(self)
+            if not admin:return
+            if not self.verify_csrf():return
+            c=None
+            try:
+                x=self.body();target=int(x.get("user_id"));active=bool(x.get("ativo"))
+                if target==admin["id"] and not active:raise ValueError("O master não pode ser inativado.")
+                c=ddb();row=c.execute("SELECT id,papel FROM usuarios WHERE id=?",(target,)).fetchone()
+                if not row or row.get("papel")=="admin":raise ValueError("Usuário não disponível para esta ação.")
+                c.execute("UPDATE usuarios SET ativo=? WHERE id=?",(active,target))
+                if not active:c.execute("DELETE FROM sessoes WHERE usuario_id=?",(target,))
+                c.execute("INSERT INTO eventos_usuario(usuario_id,tipo) VALUES(?,?)",(target,"activated" if active else "deactivated"));c.commit();self.js({"ok":True,"ativo":active})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+
+        if self.path=="/api/nutritionist/create-client":
+            nutri=_require_nutritionist(self)
+            if not nutri:return
+            if not self.verify_csrf():return
+            c=None
+            try:
+                x=self.body();nome=str(x.get("nome","")).strip();email=str(x.get("email","")).strip().lower();password=str(x.get("password",""))
+                if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):raise ValueError("Informe um e-mail válido.")
+                if len(password)<8:raise ValueError("A senha deve ter pelo menos 8 caracteres.")
+                c=ddb();row=c.execute("INSERT INTO usuarios(email,senha_hash,papel,origem,nutricionista_id,ativo) VALUES(?,?,?,?,?,TRUE) RETURNING id,email,papel,origem,nutricionista_id",(email,_hash_password(password),"cliente","nutricionista",nutri["id"])).fetchone();_ensure_user_records(c,row["id"]);c.execute("UPDATE perfis SET nome=? WHERE usuario_id=?",(nome or email,row["id"]));c.commit();self.js({"ok":True,"user":dict(row)})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":"Não foi possível criar o cliente: "+str(e)},400)
+            finally:
+                if c:c.close()
+            return
+
+        if self.path=="/api/nutritionist/client-active":
+            nutri=_require_nutritionist(self)
+            if not nutri:return
+            if not self.verify_csrf():return
+            c=None
+            try:
+                x=self.body();target=int(x.get("user_id"));active=bool(x.get("ativo"));c=ddb();row=c.execute("SELECT id FROM usuarios WHERE id=? AND papel='cliente' AND nutricionista_id=?",(target,nutri["id"])).fetchone()
+                if not row:raise ValueError("Cliente não encontrado na sua carteira.")
+                c.execute("UPDATE usuarios SET ativo=? WHERE id=?",(active,target))
+                if not active:c.execute("DELETE FROM sessoes WHERE usuario_id=?",(target,))
+                c.execute("INSERT INTO eventos_usuario(usuario_id,tipo) VALUES(?,?)",(target,"activated" if active else "deactivated"));c.commit();self.js({"ok":True,"ativo":active})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+
+        if self.path=="/api/nutritionist/view-client":
+            nutri=_require_nutritionist(self)
+            if not nutri:return
+            if not self.verify_csrf():return
+            try:
+                x=self.body();target=int(x.get("user_id"));c=ddb()
+                try:
+                    row=c.execute("SELECT id FROM usuarios WHERE id=? AND papel='cliente' AND nutricionista_id=?",(target,nutri["id"])).fetchone()
+                finally:
+                    c.close()
+                if not row:raise ValueError("Cliente não encontrado na sua carteira.")
+                self.js({"ok":True},headers={"Set-Cookie":_view_cookie(target)})
+            except Exception as e:self.js({"error":str(e)},400)
+            return
         if self.path=="/api/admin/block" or self.path=="/api/admin/unblock":
             user=_require_admin(self)
             if not user:return
