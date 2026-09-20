@@ -1634,10 +1634,10 @@ def _pdf_one_page_report(pdf, dataset, page_no=1):
     table = Table([header] + table_rows + [total], colWidths=column_widths)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10243a")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 6), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEADING", (0, 0), (-1, -1), 7), ("FONTSIZE", (0, 1), (-1, -2), 5), ("GRID", (0, 0), (-1, -1), .16, colors.HexColor("#cbd5e1")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 7), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEADING", (0, 0), (-1, -1), 8), ("FONTSIZE", (0, 1), (-1, -2), 6), ("GRID", (0, 0), (-1, -1), .16, colors.HexColor("#cbd5e1")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f8fafc")]), ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#dbeafe")),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"), ("FONTSIZE", (0, -1), (-1, -1), 5),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"), ("FONTSIZE", (0, -1), (-1, -1), 6),
         ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
     _, table_height = table.wrap(usable, 230)
@@ -2248,6 +2248,9 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
         for x, y, value in virtual_points:
             pdf.setFillColor(colors.HexColor("#facc15"))
             pdf.circle(x, y, 1.45 * mm, stroke=0, fill=1)
+            pdf.setFillColor(colors.HexColor("#a16207"))
+            pdf.setFont("Helvetica-Bold", 6.5)
+            pdf.drawCentredString(x, max(weight_bottom + 2 * mm, y - 4 * mm), f"{value:.1f} kg")
         pdf.setStrokeColor(colors.HexColor("#db2777"))
         pdf.setLineWidth(2.0)
         for first, second in zip(weight_points, weight_points[1:]):
@@ -4679,7 +4682,7 @@ async function downloadReport(){
     const response=await fetch("/api/report.pdf?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end),{credentials:"same-origin"});
     if(!response.ok){let message="Não foi possível gerar o relatório.";try{message=(await response.json()).error||message}catch(e){}throw new Error(message)}
     const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
-    link.href=url;link.download="resumo_alimentacao_"+start+"_"+end+".pdf";document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);
+    link.href=url;link.download="resumo_alimentacao_"+start+"_"+end+".pdf";link.target="_blank";link.rel="noopener";document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
   }catch(error){alert(error.message||"Não foi possível gerar o relatório PDF.")}
   finally{if(button){button.disabled=false;button.textContent="⬇️ BAIXAR RELATÓRIO PDF"}}
 }
@@ -4729,7 +4732,7 @@ async function loadHistory(start,end,periodBodyMeasurements=[],requestSeq=period
     const weightPoints=weightMeasurements.map(x=>{const index=weightByDay.get(x.data);const px=((index+0.5)/Math.max(1,j.days.length))*100;const py=94-((x.peso-weightMin)/weightRange)*78;return {x,px,py}}).filter(x=>Number.isFinite(x.px)&&Number.isFinite(x.py));
     const virtualPoints=virtualMeasurements.map(x=>{const index=weightByDay.get(x.data);const px=((index+0.5)/Math.max(1,j.days.length))*100;const py=94-((x.peso-weightMin)/weightRange)*78;return {x,px,py}}).filter(x=>Number.isFinite(x.px)&&Number.isFinite(x.py));
     const integerLabel=v=>Math.round(Number(v)||0).toLocaleString("pt-BR");
-    const weightSvg=(weightPoints.length||virtualPoints.length)?`<div style='position:absolute;left:12px;right:12px;top:30px;height:150px;z-index:3;pointer-events:none'><svg viewBox='0 0 100 100' preserveAspectRatio='none' style='width:100%;height:100%;overflow:visible'><polyline points='${virtualPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#eab308' stroke-width='1.4' vector-effect='non-scaling-stroke'/>${virtualPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.25' fill='#facc15' stroke='#713f12' stroke-width='.5' vector-effect='non-scaling-stroke'><title>Peso virtual: ${fmt(p.x.peso)} kg</title></circle>`).join("")}<polyline points='${weightPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#f472b6' stroke-width='1.5' vector-effect='non-scaling-stroke'/>${weightPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.8' fill='#f472b6' stroke='#fff' stroke-width='.7' vector-effect='non-scaling-stroke'/><text x='${p.px}' y='${Math.max(7,p.py-4)}' text-anchor='middle' fill='#f9a8d4' font-size='3.2' font-weight='700'>${fmt(p.x.peso)} kg</text>`).join("")}</svg></div>`:"";
+    const weightSvg=(weightPoints.length||virtualPoints.length)?`<div style='position:absolute;left:12px;right:12px;top:30px;height:150px;z-index:3;pointer-events:none'><svg viewBox='0 0 100 100' preserveAspectRatio='none' style='width:100%;height:100%;overflow:visible'><polyline points='${virtualPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#eab308' stroke-width='1.4' vector-effect='non-scaling-stroke'/>${virtualPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.25' fill='#facc15' stroke='#713f12' stroke-width='.5' vector-effect='non-scaling-stroke'/><text x='${p.px}' y='${Math.min(96,p.py+7)}' text-anchor='middle' fill='#facc15' font-size='2.9' font-weight='700'>${fmt(p.x.peso)} kg</text>`).join("")}<polyline points='${weightPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#f472b6' stroke-width='1.5' vector-effect='non-scaling-stroke'/>${weightPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.8' fill='#f472b6' stroke='#fff' stroke-width='.7' vector-effect='non-scaling-stroke'/><text x='${p.px}' y='${Math.max(7,p.py-4)}' text-anchor='middle' fill='#f9a8d4' font-size='3.2' font-weight='700'>${fmt(p.x.peso)} kg</text>`).join("")}</svg></div>`:"";
     const head="<h3 style='margin:8px 0'>EVOLUÇÃO DIÁRIA DE CALORIAS CONSUMIDAS</h3>";
     const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.max(1,j.days.length)},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${integerLabel(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     const bodyChart=bodyCompositionChart(j);
