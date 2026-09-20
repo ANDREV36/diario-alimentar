@@ -124,6 +124,69 @@ def goal_dict(row):
         data.update(dict(row))
     return data
 
+def _goal_context(c, user_id):
+    """Identifica a origem das metas que estão efetivamente em uso.
+
+    A tabela metas_usuario continua sendo a fonte dos números usados nos
+    cálculos. A prescrição profissional é considerada vigente quando possui
+    ao menos uma meta, não há ajuste manual posterior e sua atualização é
+    igual ou posterior à atualização das metas pessoais.
+    """
+    row = c.execute("""
+        SELECT
+            m.manual_override,
+            m.atualizado_em AS metas_atualizado_em,
+            pn.nutricionista_id,
+            pn.atualizado_em AS prescricao_atualizado_em,
+            pn.calorias_kcal,
+            pn.proteina_g,
+            pn.carboidratos_g,
+            pn.gorduras_g,
+            pn.sodio_mg,
+            pn.fibras_g,
+            pn.agua_ml,
+            u.email AS nutricionista_email,
+            COALESCE(p.nome, u.email) AS nutricionista_nome
+        FROM metas_usuario m
+        LEFT JOIN prescricoes_nutricionais pn ON pn.cliente_id=m.usuario_id
+        LEFT JOIN usuarios u ON u.id=pn.nutricionista_id
+        LEFT JOIN perfis p ON p.usuario_id=pn.nutricionista_id
+        WHERE m.usuario_id=?
+    """, (user_id,)).fetchone()
+    if not row:
+        return {"source":"personal","label":"Metas do perfil ou pessoais","professional_active":False}
+    professional_keys=("calorias_kcal","proteina_g","carboidratos_g","gorduras_g","sodio_mg","fibras_g","agua_ml")
+    has_prescribed=bool(row.get("nutricionista_id")) and any(row.get(key) is not None for key in professional_keys)
+    professional_active=has_prescribed and not bool(row.get("manual_override"))
+    if professional_active and row.get("metas_atualizado_em") and row.get("prescricao_atualizado_em"):
+        professional_active=row["prescricao_atualizado_em"] >= row["metas_atualizado_em"]
+    if professional_active:
+        name=str(row.get("nutricionista_nome") or row.get("nutricionista_email") or "nutricionista")
+        return {
+            "source":"professional",
+            "label":"Metas prescritas pelo nutricionista",
+            "professional_active":True,
+            "nutricionista_nome":name,
+            "nutricionista_email":str(row.get("nutricionista_email") or ""),
+            "updated_at":row.get("prescricao_atualizado_em"),
+        }
+    if has_prescribed:
+        return {
+            "source":"personal",
+            "label":"Metas pessoais em uso; há uma prescrição profissional cadastrada",
+            "professional_active":False,
+            "nutricionista_nome":str(row.get("nutricionista_nome") or row.get("nutricionista_email") or "nutricionista"),
+            "nutricionista_email":str(row.get("nutricionista_email") or ""),
+            "updated_at":row.get("metas_atualizado_em"),
+        }
+    return {
+        "source":"personal",
+        "label":"Metas ajustadas manualmente" if bool(row.get("manual_override")) else "Metas calculadas pelo perfil",
+        "professional_active":False,
+        "updated_at":row.get("metas_atualizado_em"),
+    }
+
+
 def _basal_from_profile_row(profile_row):
   if not profile_row:
     return None
@@ -1107,6 +1170,7 @@ def report_period_data(user_id, start, end):
         active_rows = c.execute("SELECT data,calorias_kcal,basal_kcal,consumido_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?", (user_id, start, end)).fetchall()
         measurement_rows = c.execute("SELECT data,peso_kg,agua_kg,agua_estimada FROM medicoes_corporais WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data", (user_id, start, end)).fetchall()
         goals_row = c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?", (user_id,)).fetchone()
+        goals_context = _goal_context(c, user_id)
 
         profile = c.execute("SELECT nome,idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?", (user_id,)).fetchone()
     finally:
@@ -1180,6 +1244,7 @@ def report_period_data(user_id, start, end):
         "body_measurements": list(body_by_day.values()),
 
         "name": (profile["nome"] if profile and profile["nome"] else "Pessoa usuária"),
+        "goals_context": goals_context,
         "energy": {"days": energy_days, "totals": energy_totals},
     }
 
@@ -1610,7 +1675,8 @@ def _pdf_one_page_report(pdf, dataset, page_no=1):
     pdf.setFillColor(colors.HexColor("#0b1728")); pdf.rect(0, height - 25 * mm, width, 25 * mm, stroke=0, fill=1)
     pdf.setFillColor(colors.white); pdf.setFont("Helvetica-Bold", 15); pdf.drawString(12 * mm, height - 12 * mm, "RESUMO DE ALIMENTAÇÃO")
     pdf.setFillColor(colors.HexColor("#bfdbfe")); pdf.setFont("Helvetica", 6.4)
-    pdf.drawString(12 * mm, height - 18 * mm, f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')} · consumo diário, metas e acumulados")
+    goal_label = str((dataset.get("goals_context") or {}).get("label") or "Metas do período")
+    pdf.drawString(12 * mm, height - 18 * mm, f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')} · consumo diário, metas e acumulados · {goal_label}")
     header = ["Dia"] + [f"{metric[2]}{metric[3]}" for metric in REPORT_METRICS] + ["Médiameta"]
     table_rows = []
     for day in dataset["days"]:
@@ -3394,6 +3460,7 @@ main{height:auto!important;min-height:calc(100vh - 70px)!important;overflow:visi
     <div><span class="eyebrow">SEU OBJETIVO</span><h2>🎯 Metas do dia</h2></div>
     <button id="goalsToggle" onclick="toggleGoalsDashboard()" class="miniSummaryBtn" aria-expanded="false">VER METAS</button>
   </div>
+  <div id="goalSourceNotice" style="margin:8px 0 0;padding:8px 10px;border-radius:9px;background:rgba(56,189,248,.10);border:1px solid rgba(125,211,252,.18);color:#bae6fd;font-size:11px;line-height:1.35"></div>
   <div id="goalCards" class="goalCards" style="display:none"></div>
   <button onclick="openSummary()" style="width:100%;margin-top:10px;padding:10px;border:1px solid #ffffff25;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">⚙️ AJUSTAR METAS</button>
 </div>
@@ -4478,6 +4545,21 @@ function toggleGoalsDashboard(){
   btn.textContent=open?"VER METAS":"OCULTAR METAS";
   btn.setAttribute("aria-expanded",String(!open));
 }
+function goalContextDate(value){
+  if(!value)return "";
+  const d=new Date(value);if(Number.isNaN(d.getTime()))return "";
+  return d.toLocaleDateString("pt-BR")+" "+d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});
+}
+function goalContextMessage(ctx,compact=false){
+  const c=ctx||{},date=goalContextDate(c.updated_at);
+  if(c.source==="professional"){
+    const name=esc(c.nutricionista_nome||"nutricionista");
+    return `<span style="color:#bae6fd">🎯 <b>Metas vigentes:</b> prescritas por ${name}${date?` · atualizadas em ${esc(date)}`:""}.</span>`;
+  }
+  const label=esc(c.label||"Metas pessoais");
+  return `<span style="color:#cbd5e1">🎯 <b>Metas vigentes:</b> ${label}${date?` · atualizadas em ${esc(date)}`:""}.</span>`;
+}
+function renderGoalSource(ctx){const el=document.getElementById("goalSourceNotice");if(el)el.innerHTML=goalContextMessage(ctx,true)}
 function renderGoalCards(j){
   const g=j.goals||{},t=j.daily||{},water=Number(j.water||0);
   const data=[
@@ -4529,6 +4611,7 @@ async function refresh(){
     syncBodyMeasurementForm(j.body_measurement);
     const consumed=Array.isArray(j.items)?j.items:[];
     const goals=j.goals||{};
+    renderGoalSource(j.goal_context);
     items.innerHTML=consumed.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" "+esc(x.unidade||"g")+" · "+fmt(x.kcal)+" kcal</div></div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
     if(consumed.length){const toggle=document.getElementById("consumedFoodsToggle");items.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
     try{draw(partial,j.partial||{});}catch(e){console.error("nutrientes:",e)}
@@ -4639,7 +4722,7 @@ async function addWater(ml){
   finally{window.waterSubmitting=false;setWaterButtonsBusy(false);}
 }
 async function customWater(){let v=prompt("Quantidade de água em ml:","500");if(v===null)return;let ml=Number(v);if(!(ml>0)){alert("Quantidade inválida.");return}await addWater(ml)}
-async function openSummary(){let j=await api("/api/summary?data="+day.value);document.getElementById("goalModeNotice").textContent=j.goals.manual_override?"As metas atuais foram ajustadas manualmente e não serão substituídas ao salvar o perfil ou recalcular os dados.":"As metas atuais estão no modo automático e podem ser atualizadas pelo cálculo do perfil.";let a=[['energia_kcal','calorias_kcal','🔥 Calorias','kcal'],['proteina_g','proteina_g','💪 Proteína','g'],['carboidrato_g','carboidratos_g','🍚 Carboidratos','g'],['lipidios_g','gorduras_g','🥑 Gorduras','g'],['fibra_g','fibras_g','🌱 Fibras','g'],['sodio_mg','sodio_mg','🧂 Sódio','mg']];document.getElementById("summaryContent").innerHTML=a.map(x=>{let v=Number(j.daily[x[0]]||0),m=Number(j.goals[x[1]]||0),p=pct(v,m),left=Math.max(0,m-v);return `<div class="metric nutrient-source" data-nutrient="${x[0]}" data-start="${day.value}" data-end="${day.value}" style="margin-bottom:8px"><small>${x[2]} ⓘ</small><b>${fmt(v)} / ${fmt(m)} ${x[3]}</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${p}%;background:#22a447"></div></div><small>${m>0?(x[1]==='sodio_mg'?'Restam ':'Faltam ')+fmt(left)+' '+x[3]:''}</small></div>`}).join('')+`<div class="metric"><small>💧 Água</small><b>${fmt(j.water/1000)} / ${fmt(Number(j.goals.agua_ml||0)/1000)} L</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${pct(j.water,Number(j.goals.agua_ml||0))}%;background:#1683ff"></div></div><small>${Number(j.goals.agua_ml||0)>0?fmt(Math.max(0,Number(j.goals.agua_ml)-Number(j.water))/1000)+' L restantes':''}</small></div>`;document.getElementById("goalForm").innerHTML=[['calorias_kcal','🔥 Calorias','kcal'],['proteina_g','💪 Proteína','g'],['carboidratos_g','🍚 Carboidratos','g'],['gorduras_g','🥑 Gorduras','g'],['fibras_g','🌱 Fibras','g'],['sodio_mg','🧂 Sódio','mg'],['agua_ml','💧 Água','ml']].map(x=>`<div class="metric"><small>${x[1]}</small><input id="g_${x[0]}" type="number" step="0.01" value="${j.goals[x[0]]??''}" style="width:100%;padding:9px;border:1px solid #ddd;border-radius:8px"><small>${x[2]}</small></div>`).join('');document.getElementById("summaryModal").style.display="block"}
+async function openSummary(){let j=await api("/api/summary?data="+day.value);document.getElementById("goalModeNotice").innerHTML=j.goal_context?goalContextMessage(j.goal_context):j.goals.manual_override?"As metas atuais foram ajustadas manualmente e não serão substituídas ao salvar o perfil ou recalcular os dados.":"As metas atuais estão no modo automático e podem ser atualizadas pelo cálculo do perfil.";let a=[['energia_kcal','calorias_kcal','🔥 Calorias','kcal'],['proteina_g','proteina_g','💪 Proteína','g'],['carboidrato_g','carboidratos_g','🍚 Carboidratos','g'],['lipidios_g','gorduras_g','🥑 Gorduras','g'],['fibra_g','fibras_g','🌱 Fibras','g'],['sodio_mg','sodio_mg','🧂 Sódio','mg']];document.getElementById("summaryContent").innerHTML=a.map(x=>{let v=Number(j.daily[x[0]]||0),m=Number(j.goals[x[1]]||0),p=pct(v,m),left=Math.max(0,m-v);return `<div class="metric nutrient-source" data-nutrient="${x[0]}" data-start="${day.value}" data-end="${day.value}" style="margin-bottom:8px"><small>${x[2]} ⓘ</small><b>${fmt(v)} / ${fmt(m)} ${x[3]}</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${p}%;background:#22a447"></div></div><small>${m>0?(x[1]==='sodio_mg'?'Restam ':'Faltam ')+fmt(left)+' '+x[3]:''}</small></div>`}).join('')+`<div class="metric"><small>💧 Água</small><b>${fmt(j.water/1000)} / ${fmt(Number(j.goals.agua_ml||0)/1000)} L</b><div style="height:10px;background:#e5e7eb;border-radius:20px;overflow:hidden"><div style="height:100%;width:${pct(j.water,Number(j.goals.agua_ml||0))}%;background:#1683ff"></div></div><small>${Number(j.goals.agua_ml||0)>0?fmt(Math.max(0,Number(j.goals.agua_ml)-Number(j.water))/1000)+' L restantes':''}</small></div>`;document.getElementById("goalForm").innerHTML=[['calorias_kcal','🔥 Calorias','kcal'],['proteina_g','💪 Proteína','g'],['carboidratos_g','🍚 Carboidratos','g'],['gorduras_g','🥑 Gorduras','g'],['fibras_g','🌱 Fibras','g'],['sodio_mg','🧂 Sódio','mg'],['agua_ml','💧 Água','ml']].map(x=>`<div class="metric"><small>${x[1]}</small><input id="g_${x[0]}" type="number" step="0.01" value="${j.goals[x[0]]??''}" style="width:100%;padding:9px;border:1px solid #ddd;border-radius:8px"><small>${x[2]}</small></div>`).join('');document.getElementById("summaryModal").style.display="block"}
 function closeSummary(){document.getElementById("summaryModal").style.display="none"}
 async function saveGoals(){let d={manual_override:true};for(const k of ['calorias_kcal','proteina_g','carboidratos_g','gorduras_g','fibras_g','sodio_mg','agua_ml'])d[k]=Number(document.getElementById('g_'+k).value)||0;await api('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});await refresh();await openSummary();alert('Metas manuais salvas.')}
 async function applyCalculatedGoals(){
@@ -4832,7 +4915,7 @@ async function loadPeriod(){
     document.getElementById("periodInfo").innerHTML=
       `<div style="padding:10px;background:#f8fafc;border-radius:10px;font-size:13px">
         <b>${j.start_br} a ${j.end_br}</b> · ${days} ${days===1?"dia":"dias"}<br>
-        O consumo é o total realmente registrado no diário nesse intervalo.
+        O consumo é o total realmente registrado no diário nesse intervalo.<br>${goalContextMessage(j.goal_context)}
       </div>`;
     const g=j.goals;
     document.getElementById("periodContent").innerHTML=
@@ -5240,6 +5323,7 @@ class H(BaseHTTPRequestHandler):
                 water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"]
                 water_entries=c.execute("SELECT id,hora,quantidade_ml FROM hidratacao WHERE usuario_id=? AND data=? ORDER BY id DESC",(self.user["id"],d,)).fetchall()
                 g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
+                goal_context=_goal_context(c,self.user["id"])
                 energy=_daily_energy_snapshot(c,self.user["id"],d,food_nutrient_cache)
                 measurement=c.execute("SELECT data,peso_kg,agua_kg,agua_estimada FROM medicoes_corporais WHERE usuario_id=? AND data=?",(self.user["id"],d)).fetchone()
             finally:
@@ -5248,7 +5332,7 @@ class H(BaseHTTPRequestHandler):
             if measurement:
                 body_measurement=_body_measurement_values(measurement.get("peso_kg"),measurement.get("agua_kg"),bool(measurement.get("agua_estimada")))
                 if body_measurement:body_measurement["data"]=str(measurement.get("data") or d)
-            self.js({"items":items,"daily":calc(rows,self.user["id"],food_nutrient_cache),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"],food_nutrient_cache),"water":float(water or 0),"water_entries":[dict(x) for x in water_entries],"goals":goal_dict(g),"energy":energy,"body_measurement":body_measurement});return
+            self.js({"items":items,"daily":calc(rows,self.user["id"],food_nutrient_cache),"partial":calc([x for x in rows if x["refeicao"]==m],self.user["id"],food_nutrient_cache),"water":float(water or 0),"water_entries":[dict(x) for x in water_entries],"goals":goal_dict(g),"goal_context":goal_context,"energy":energy,"body_measurement":body_measurement});return
         if p.path.startswith("/api/food/"):
             try: food_id=int(p.path.rsplit("/",1)[1])
             except ValueError:
@@ -5388,6 +5472,7 @@ class H(BaseHTTPRequestHandler):
                 rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id",(self.user["id"],start,end)).fetchall()
                 water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchone()["total_water"]
                 g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
+                goal_context=_goal_context(c,self.user["id"])
                 active_rows=c.execute("SELECT data,calorias_kcal,basal_kcal,saldo_kcal FROM gasto_ativo_diario WHERE usuario_id=? AND data>=? AND data<=?",(self.user["id"],start,end)).fetchall()
                 measurement_rows=c.execute("SELECT data,peso_kg,agua_kg,agua_estimada FROM medicoes_corporais WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data",(self.user["id"],start,end)).fetchall()
                 profile=c.execute("SELECT idade,sexo,peso_kg,altura_cm,gordura_corporal_pct FROM perfis WHERE usuario_id=?",(self.user["id"],)).fetchone()
@@ -5427,7 +5512,7 @@ class H(BaseHTTPRequestHandler):
             self.js({
                 "start":start,"end":end,"days":days,
                 "start_br":d1.strftime("%d/%m/%Y"),"end_br":d2.strftime("%d/%m/%Y"),
-                "daily":calc(rows,self.user["id"],food_nutrient_cache),"water":float(water or 0),"goals":goal_dict(g),
+                "daily":calc(rows,self.user["id"],food_nutrient_cache),"water":float(water or 0),"goals":goal_dict(g),"goal_context":goal_context,
                 "body_measurements":list(mmap.values()),
                 "energy":{"days":energy_days,"totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()}}
             })
@@ -5464,8 +5549,9 @@ class H(BaseHTTPRequestHandler):
             q=parse_qs(p.query);d=q.get("data",[today_sp().isoformat()])[0];c=ddb()
             try:
                 rows=c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchall();water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"];g=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(self.user["id"],)).fetchone()
+                goal_context=_goal_context(c,self.user["id"])
             finally:c.close()
-            self.js({"daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":goal_dict(g)})
+            self.js({"daily":calc(rows,self.user["id"]),"water":float(water or 0),"goals":goal_dict(g),"goal_context":goal_context})
             return
         if p.path=="/api/water":
             q=parse_qs(p.query);d=q.get("data",[today_sp().isoformat()])[0];c=ddb()
@@ -5549,7 +5635,7 @@ class H(BaseHTTPRequestHandler):
                 goal_updates={k:v for k,v in goals.items() if v is not None}
                 if goal_updates:
                     sets=", ".join(f"{k}=?" for k in goal_updates)
-                    c.execute("UPDATE metas_usuario SET "+sets+",atualizado_em=NOW() WHERE usuario_id=?",[*goal_updates.values(),target_id])
+                    c.execute("UPDATE metas_usuario SET "+sets+",manual_override=FALSE,atualizado_em=NOW() WHERE usuario_id=?",[*goal_updates.values(),target_id])
                 c.commit();self.js({"ok":True})
             except Exception as e:
                 if c:c.rollback()
