@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V69 · Cópia de Diário para teste"
+APP_VERSION = "V70 · Correção da cópia de Diário"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -924,7 +924,7 @@ def _copy_diary_data(c, source_id, target_id, actor_id):
         c.execute("UPDATE metas_usuario SET "+", ".join(f+"=?" for f in fields)+", atualizado_em=NOW() WHERE usuario_id=?",[source_goals.get(f) for f in fields]+[target_id])
 
     food_fields=("nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","manganes_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","cobre_mg","zinco_mg","vitamina_c_mg","tiamina_mg","riboflavina_mg","niacina_mg","piridoxina_mg","porcao_valor","porcao_unidade","base_calculo","criado_em","atualizado_em","ativo","origem","confianca_ia")
-    foods=c.execute("SELECT "+", ".join(food_fields)+" FROM alimentos_usuario WHERE usuario_id=? ORDER BY id",(source_id,)).fetchall()
+    foods=c.execute("SELECT id,"+", ".join(food_fields)+" FROM alimentos_usuario WHERE usuario_id=? ORDER BY id",(source_id,)).fetchall()
     food_map={};food_count=0
     for food in foods:
         vals=[food.get(f) for f in food_fields]
