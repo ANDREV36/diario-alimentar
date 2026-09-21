@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V68 · Fase 4 profissional completa"
+APP_VERSION = "V69 · Cópia de Diário para teste"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -888,6 +888,80 @@ def _professional_profile(c, user_id):
 
 def _professional_access_for_admin(c, target_id):
     return c.execute("SELECT id,email,papel,ativo,bloqueado,nutricionista_id FROM usuarios WHERE id=? AND papel='cliente'",(int(target_id),)).fetchone()
+
+
+def _copy_diary_data(c, source_id, target_id, actor_id):
+    """Copia o conteúdo operacional do Diário, preservando datas e isolando IDs."""
+    source_id=int(source_id);target_id=int(target_id);actor_id=int(actor_id)
+    if source_id==target_id:
+        raise ValueError("A origem e o destino precisam ser usuários diferentes.")
+    source=c.execute("SELECT id,email,papel FROM usuarios WHERE id=?",(source_id,)).fetchone()
+    target=c.execute("SELECT id,email,papel FROM usuarios WHERE id=?",(target_id,)).fetchone()
+    if not source: raise ValueError("Usuário de origem não encontrado.")
+    if not target: raise ValueError("Usuário de teste não encontrado.")
+    if target.get("papel")!="cliente":
+        raise ValueError("O destino deve ser um usuário do tipo cliente.")
+    if not bool(c.execute("SELECT ativo FROM usuarios WHERE id=?",(target_id,)).fetchone().get("ativo",True)):
+        raise ValueError("Ative o usuário de teste antes de copiar os dados.")
+
+    # Não mistura históricos: o destino deve estar sem conteúdo de Diário.
+    data_tables=("consumo","hidratacao","medicoes_corporais","gasto_ativo_diario","alimentos_usuario","favoritos","porcoes")
+    occupied=[]
+    for table in data_tables:
+        row=c.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE usuario_id=?",(target_id,)).fetchone()
+        if int(row.get("n") or 0)>0: occupied.append(table)
+    if occupied:
+        raise ValueError("O usuário de teste já possui dados ("+", ".join(occupied)+"). Use um usuário vazio para evitar mistura de históricos.")
+
+    _ensure_user_records(c,target_id)
+    source_profile=c.execute("SELECT * FROM perfis WHERE usuario_id=?",(source_id,)).fetchone()
+    if source_profile:
+        fields=("nome","idade","sexo","peso_kg","altura_cm","gordura_corporal_pct","atividade","objetivo","peso_meta_kg","ritmo_kg_semana")
+        c.execute("UPDATE perfis SET "+", ".join(f+"=?" for f in fields)+" WHERE usuario_id=?",[source_profile.get(f) for f in fields]+[target_id])
+    source_goals=c.execute("SELECT * FROM metas_usuario WHERE usuario_id=?",(source_id,)).fetchone()
+    if source_goals:
+        fields=("calorias_kcal","proteina_g","carboidratos_g","gorduras_g","fibras_g","sodio_mg","agua_ml","manual_override")
+        c.execute("UPDATE metas_usuario SET "+", ".join(f+"=?" for f in fields)+", atualizado_em=NOW() WHERE usuario_id=?",[source_goals.get(f) for f in fields]+[target_id])
+
+    food_fields=("nome","energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","colesterol_mg","calcio_mg","magnesio_mg","manganes_mg","fosforo_mg","ferro_mg","sodio_mg","potassio_mg","cobre_mg","zinco_mg","vitamina_c_mg","tiamina_mg","riboflavina_mg","niacina_mg","piridoxina_mg","porcao_valor","porcao_unidade","base_calculo","criado_em","atualizado_em","ativo","origem","confianca_ia")
+    foods=c.execute("SELECT "+", ".join(food_fields)+" FROM alimentos_usuario WHERE usuario_id=? ORDER BY id",(source_id,)).fetchall()
+    food_map={};food_count=0
+    for food in foods:
+        vals=[food.get(f) for f in food_fields]
+        marks=",".join("?" for _ in food_fields)
+        row=c.execute("INSERT INTO alimentos_usuario(usuario_id,"+", ".join(food_fields)+") VALUES(?,"+marks+") RETURNING id",[target_id]+vals).fetchone()
+        food_map[int(food.get("id"))]=int(row["id"]);food_count+=1
+
+    def mapped_food_id(value):
+        if value is None:return None
+        value=int(value)
+        if value<0 and -value in food_map:return -food_map[-value]
+        return value
+
+    counts={"alimentos_usuario":food_count}
+    c.execute("""INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g,unidade)
+                 SELECT ?,data,refeicao,alimento_id,alimento_nome,quantidade_g,unidade FROM consumo WHERE usuario_id=? ORDER BY id""",(target_id,source_id))
+    # Corrige IDs de alimentos personalizados depois da cópia, mantendo alimentos da base nutricional.
+    for row in c.execute("SELECT id,alimento_id FROM consumo WHERE usuario_id=? ORDER BY id",(target_id,)).fetchall():
+        new_id=mapped_food_id(row.get("alimento_id"))
+        if new_id!=row.get("alimento_id"): c.execute("UPDATE consumo SET alimento_id=? WHERE id=? AND usuario_id=?",(new_id,row["id"],target_id))
+    for table,fields in (("hidratacao",("data","hora","quantidade_ml")),("medicoes_corporais",("data","peso_kg","agua_kg","agua_estimada","criado_em","atualizado_em")),("gasto_ativo_diario",("data","calorias_kcal","basal_kcal","consumido_kcal","saldo_kcal","criado_em","atualizado_em"))):
+        rows=c.execute("SELECT "+", ".join(fields)+f" FROM {table} WHERE usuario_id=? ORDER BY id",(source_id,)).fetchall()
+        for row in rows:
+            c.execute(f"INSERT INTO {table}(usuario_id,"+", ".join(fields)+") VALUES(? ,"+",".join("?" for _ in fields)+")",[target_id]+[row.get(f) for f in fields])
+        counts[table]=len(rows)
+    for table,fields in (("favoritos",("alimento_id","alimento_nome","criado_em")),("porcoes",("alimento_id","alimento_nome","nome","quantidade_g","unidade","criado_em"))):
+        rows=c.execute("SELECT "+", ".join(fields)+f" FROM {table} WHERE usuario_id=? ORDER BY id",(source_id,)).fetchall()
+        for row in rows:
+            vals=[mapped_food_id(row.get("alimento_id")) if f=="alimento_id" else row.get(f) for f in fields]
+            c.execute(f"INSERT INTO {table}(usuario_id,"+", ".join(fields)+") VALUES(? ,"+",".join("?" for _ in fields)+")",[target_id]+vals)
+        counts[table]=len(rows)
+    pref=c.execute("SELECT historico_gasto_inicial_concluido FROM preferencias_usuario WHERE usuario_id=?",(source_id,)).fetchone()
+    if pref:
+        c.execute("UPDATE preferencias_usuario SET historico_gasto_inicial_concluido=?,atualizado_em=NOW() WHERE usuario_id=?",(bool(pref.get("historico_gasto_inicial_concluido")),target_id))
+    counts["consumo"]=int(c.execute("SELECT COUNT(*) AS n FROM consumo WHERE usuario_id=?",(target_id,)).fetchone().get("n") or 0)
+    _audit_professional(c,actor_id,target_id,"admin_copy_diary",json.dumps({"source_id":source_id,"source_email":source.get("email"),"counts":counts},ensure_ascii=False))
+    return {"source":dict(source),"target":dict(target),"counts":counts}
 
 
 def _hash_password(password):
@@ -5220,7 +5294,7 @@ HTML = HTML.replace("V45 · Diário Alimentar · Segurança P0", "V55 · Diário
 
 ADMIN_HTML = r"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>Gestão · Diário Alimentar</title><style>
 *{box-sizing:border-box}html,body{width:100%;height:100%;overflow:hidden;overscroll-behavior:none;touch-action:pan-y}body{font-family:Arial,sans-serif;margin:0;background:#07111f;color:#e5eef8;overflow:hidden;position:fixed;inset:0;touch-action:pan-y}main{width:100vw;max-width:none;height:100dvh;overflow-y:auto;overflow-x:hidden;margin:0;padding:22px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:20px}.muted{color:#94a3b8;font-size:12px}.actions,.formrow{display:flex;gap:8px;flex-wrap:wrap}.panel{background:#0b1728;border:1px solid #ffffff20;border-radius:16px;padding:16px;margin-top:14px;box-shadow:0 14px 34px #0004}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{background:#10243a;border:1px solid #ffffff18;border-radius:12px;padding:13px}.card b{display:block;font-size:26px;margin-top:5px}.tag{display:inline-block;padding:4px 7px;border-radius:999px;font-size:10px;font-weight:bold;background:#166534;color:#dcfce7}.tag.nutri{background:#7c3aed;color:#ede9fe}.tag.master{background:#1d4ed8;color:#dbeafe}.tag.off{background:#475569;color:#e2e8f0}input,select{padding:10px;border:1px solid #ffffff25;border-radius:9px;background:#16263a;color:#fff;min-width:0}.formrow label{display:flex;flex-direction:column;gap:5px;color:#cbd5e1;font-size:11px;font-weight:bold;flex:1;min-width:170px}button{border:0;border-radius:9px;padding:10px 12px;cursor:pointer;font-weight:bold;background:#2563eb;color:#fff}button.secondary{background:#1e293b;border:1px solid #475569}button.green{background:#16a34a}button.red{background:#991b1b}button:disabled{opacity:.55;cursor:wait}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{padding:10px 8px;border-bottom:1px solid #ffffff12;text-align:left;font-size:12px;vertical-align:middle}th{color:#94a3b8;font-size:10px;text-transform:uppercase}td small{display:block;color:#94a3b8;margin-top:3px}.status{min-height:19px;color:#fcd34d;font-size:12px;margin-top:8px}@media(max-width:760px){main{padding:14px 10px}.top{flex-direction:column}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{padding:13px}table{display:block;overflow-x:auto;white-space:nowrap}}
-.adminWide{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.adminWide .panel{margin-top:0}.tiny{font-size:10px;color:#94a3b8}.danger{color:#fecaca}.auditRow{padding:8px 0;border-bottom:1px solid #ffffff12;font-size:11px;line-height:1.4}@media(max-width:700px){.adminWide{grid-template-columns:1fr}.adminWide .panel{margin-top:12px}}</style></head><body><main><div class="top"><div><div class="muted">DIÁRIO ALIMENTAR · GESTÃO GERAL</div><h1 style="margin:5px 0">🔐 Painel master</h1><div class="muted">Você administra nutricionistas e clientes que adquiriram o programa diretamente.</div></div><div class="actions"><button class="secondary" onclick="load()">Atualizar</button><button class="secondary" onclick="location.href='/'">ABRIR MEU DIÁRIO</button><button class="secondary" onclick="logout()">Sair</button></div></div><section class="cards"><div class="card">Nutricionistas<b id="nutris">—</b></div><div class="card">Clientes diretos<b id="direct">—</b></div><div class="card">Ativos<b id="active">—</b></div><div class="card">Inativos<b id="inactive">—</b></div></section><section class="panel"><h2 style="margin:0 0 5px">Cadastrar acesso</h2><div class="muted">Crie um nutricionista ou um cliente direto. Clientes vinculados a nutricionistas serão criados no painel do respectivo nutricionista.</div><div class="formrow" style="margin-top:12px"><label>Tipo<select id="newRole"><option value="nutricionista">Nutricionista</option><option value="cliente">Cliente direto</option></select></label><label>Nome<input id="newName" placeholder="Nome completo"></label><label>E-mail<input id="newEmail" type="email" placeholder="email@exemplo.com"></label><label>Senha inicial<input id="newPassword" type="password" minlength="8" placeholder="Mínimo de 8 caracteres"></label><button style="align-self:end" onclick="createUser()">CRIAR ACESSO</button></div><div id="createStatus" class="status"></div></section><section class="panel"><h2 style="margin:0">Nutricionistas e clientes diretos</h2><div class="muted" style="margin-top:5px">Clientes vinculados a nutricionistas ficam sob a gestão do respectivo nutricionista.</div><table><thead><tr><th>Nome / e-mail</th><th>Perfil</th><th>Origem</th><th>Cadastro</th><th>Status</th><th>Ação</th></tr></thead><tbody id="users"><tr><td colspan="6">Carregando...</td></tr></tbody></table></section><div class="adminWide"><section class="panel"><h2 style="margin:0">Clientes e vínculos</h2><div class="muted" style="margin-top:5px">Transfira clientes entre nutricionistas ou deixe-os como clientes diretos.</div><div id="adminClientTools" style="margin-top:10px">Carregando...</div></section><section class="panel"><h2 style="margin:0">Auditoria e sessões</h2><div class="actions" style="margin-top:10px"><button onclick="loadAudit()">ATUALIZAR AUDITORIA</button><button class="secondary" onclick="loadSessions()">VER SESSÕES</button></div><div id="adminAudit" class="status"></div><div id="adminSessions" class="status"></div></section></div><section class="panel"><h2 style="margin:0">Histórico recente de alterações</h2><div id="auditRows" style="margin-top:8px">Clique em atualizar auditoria.</div></section></main><script>
+.adminWide{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.adminWide .panel{margin-top:0}.tiny{font-size:10px;color:#94a3b8}.danger{color:#fecaca}.auditRow{padding:8px 0;border-bottom:1px solid #ffffff12;font-size:11px;line-height:1.4}@media(max-width:700px){.adminWide{grid-template-columns:1fr}.adminWide .panel{margin-top:12px}}.copyPanel{border-color:#38bdf855;background:#0d2034}.copyGrid{align-items:end}.copyGrid label{min-width:190px}.copyWarning{font-size:11px;color:#fcd34d;margin-top:8px}.copyResult{font-size:12px;color:#bbf7d0;margin-top:8px}</style></head><body><main><div class="top"><div><div class="muted">DIÁRIO ALIMENTAR · GESTÃO GERAL</div><h1 style="margin:5px 0">🔐 Painel master</h1><div class="muted">Você administra nutricionistas e clientes que adquiriram o programa diretamente.</div></div><div class="actions"><button class="secondary" onclick="load()">Atualizar</button><button class="secondary" onclick="location.href='/'">ABRIR MEU DIÁRIO</button><button class="secondary" onclick="logout()">Sair</button></div></div><section class="cards"><div class="card">Nutricionistas<b id="nutris">—</b></div><div class="card">Clientes diretos<b id="direct">—</b></div><div class="card">Ativos<b id="active">—</b></div><div class="card">Inativos<b id="inactive">—</b></div></section><section class="panel"><h2 style="margin:0 0 5px">Cadastrar acesso</h2><div class="muted">Crie um nutricionista ou um cliente direto. Clientes vinculados a nutricionistas serão criados no painel do respectivo nutricionista.</div><div class="formrow" style="margin-top:12px"><label>Tipo<select id="newRole"><option value="nutricionista">Nutricionista</option><option value="cliente">Cliente direto</option></select></label><label>Nome<input id="newName" placeholder="Nome completo"></label><label>E-mail<input id="newEmail" type="email" placeholder="email@exemplo.com"></label><label>Senha inicial<input id="newPassword" type="password" minlength="8" placeholder="Mínimo de 8 caracteres"></label><button style="align-self:end" onclick="createUser()">CRIAR ACESSO</button></div><div id="createStatus" class="status"></div></section><section class="panel copyPanel" id="copyDiaryPanel"><h2 style="margin:0 0 5px">Preparar usuário para teste</h2><div class="muted">Copie o conteúdo de um Diário para um usuário existente e vazio, preservando as datas dos lançamentos.</div><div class="formrow copyGrid" style="margin-top:12px"><label>Usuário de origem<select id="copySource"><option value="">Carregando...</option></select></label><label>Usuário de teste<select id="copyTarget"><option value="">Carregando...</option></select></label><button onclick="copyDiary()">COPIAR DIÁRIO</button></div><div class="copyWarning">Serão copiados perfil, metas, alimentos personalizados, favoritos, porções, alimentação, água, gasto ativo, peso e massa de água. Senhas, sessões, permissões, vínculo profissional e auditoria não serão copiados. O destino precisa estar sem dados de Diário.</div><div id="copyStatus" class="copyResult"></div></section><section class="panel"><h2 style="margin:0">Nutricionistas e clientes diretos</h2><div class="muted" style="margin-top:5px">Clientes vinculados a nutricionistas ficam sob a gestão do respectivo nutricionista.</div><table><thead><tr><th>Nome / e-mail</th><th>Perfil</th><th>Origem</th><th>Cadastro</th><th>Status</th><th>Ação</th></tr></thead><tbody id="users"><tr><td colspan="6">Carregando...</td></tr></tbody></table></section><div class="adminWide"><section class="panel"><h2 style="margin:0">Clientes e vínculos</h2><div class="muted" style="margin-top:5px">Transfira clientes entre nutricionistas ou deixe-os como clientes diretos.</div><div id="adminClientTools" style="margin-top:10px">Carregando...</div></section><section class="panel"><h2 style="margin:0">Auditoria e sessões</h2><div class="actions" style="margin-top:10px"><button onclick="loadAudit()">ATUALIZAR AUDITORIA</button><button class="secondary" onclick="loadSessions()">VER SESSÕES</button></div><div id="adminAudit" class="status"></div><div id="adminSessions" class="status"></div></section></div><section class="panel"><h2 style="margin:0">Histórico recente de alterações</h2><div id="auditRows" style="margin-top:8px">Clique em atualizar auditoria.</div></section></main><script>
 async function api(u,o={}){const r=await fetch(u,o);const j=await r.json();if(!r.ok)throw Error(j.error||"Erro");return j}
 async function csrf(){const j=await api('/api/me');return j.csrf||''}
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
@@ -5237,7 +5311,9 @@ async function loadClients(){try{const [j,n]=await Promise.all([api('/api/admin/
 async function loadAudit(){const box=document.getElementById('auditRows');box.textContent='Carregando...';try{const j=await api('/api/admin/audit');box.innerHTML=j.events.length?j.events.map(e=>'<div class="auditRow"><b>'+esc(e.tipo)+'</b> · '+fmt(e.criado_em)+'<br>'+esc(e.ator_nome)+' → '+esc(e.cliente_nome||'sistema')+'<br><span class="tiny">'+esc(e.detalhes)+'</span></div>').join(''):'Nenhuma alteração registrada.'}catch(e){box.textContent=e.message}}
 async function loadSessions(){const box=document.getElementById('adminSessions');try{const j=await api('/api/admin/sessions');box.innerHTML='Sessões ativas/registradas: '+j.sessions.length+'. Para encerrar uma sessão, inative ou bloqueie o usuário.'}catch(e){box.textContent=e.message}}
 async function logout(){try{await api('/api/auth/logout',{method:'POST',headers:{'X-CSRF-Token':await csrf()}})}finally{location.href='/'}}
-async function load(){try{const j=await api('/api/admin/users');document.getElementById('nutris').textContent=j.summary.nutricionistas;document.getElementById('direct').textContent=j.summary.clientes_diretos;document.getElementById('active').textContent=j.summary.ativos;document.getElementById('inactive').textContent=j.summary.inativos;document.getElementById('users').innerHTML=j.users.map(u=>{const active=Boolean(u.ativo)&&!u.bloqueado;const cls=u.papel==='nutricionista'?'nutri':u.papel==='admin'?'master':'';const origin=u.papel==='nutricionista'?'Gerido pelo master':'Aquisição direta';const count=u.papel==='nutricionista'?' · '+(u.clientes_count||0)+' clientes':'';let actions='—';if(u.papel!=='admin'){actions='<button class="'+(active?'red':'green')+'" onclick="toggle('+u.id+','+(!active)+')">'+(active?'INATIVAR':'REATIVAR')+'</button> <button class="secondary" onclick="blockUser('+u.id+','+(!u.bloqueado)+')">'+(u.bloqueado?'DESBLOQUEAR':'BLOQUEAR')+'</button> <button class="secondary" onclick="editUser('+u.id+')">EDITAR</button> <button class="secondary" onclick="resetPassword('+u.id+')">NOVA SENHA</button>'}return '<tr><td><b>'+esc(u.nome||'Sem nome')+'</b><small>'+esc(u.email)+'</small></td><td><span class="tag '+cls+'">'+roleLabel(u.papel)+'</span>'+count+'</td><td>'+origin+'</td><td>'+fmt(u.criado_em)+'</td><td><span class="tag '+(active?'':'off')+'">'+(active?'ATIVO':'INATIVO')+(u.bloqueado?' · BLOQUEADO':'')+'</span></td><td>'+actions+'</td></tr>'}).join('')}catch(e){document.getElementById('users').innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>'}loadClients();loadAudit()}
+async function loadCopyUsers(){const source=document.getElementById('copySource'),target=document.getElementById('copyTarget');if(!source||!target)return;try{const j=await api('/api/admin/copy-users');const label=u=>esc((u.nome||u.email)+' · '+(u.papel==='admin'?'MASTER':u.papel==='nutricionista'?'NUTRICIONISTA':'CLIENTE')+' · '+u.email);source.innerHTML=j.users.map(u=>'<option value="'+u.id+'">'+label(u)+'</option>').join('');const clients=j.users.filter(u=>u.papel==='cliente'&&u.ativo&&!u.bloqueado);target.innerHTML=clients.length?clients.map(u=>'<option value="'+u.id+'">'+label(u)+'</option>').join(''):'<option value="">Nenhum cliente ativo disponível</option>';if(j.admin_id&&j.users.some(u=>Number(u.id)===Number(j.admin_id)))source.value=String(j.admin_id);if(!clients.length)document.getElementById('copyStatus').textContent='Crie ou ative um usuário Cliente para teste.'}catch(e){document.getElementById('copyStatus').textContent=e.message}}
+async function copyDiary(){const source=document.getElementById('copySource')?.value,target=document.getElementById('copyTarget')?.value,status=document.getElementById('copyStatus');if(!source||!target){status.textContent='Selecione a origem e o usuário de teste.';return}if(String(source)===String(target)){status.textContent='A origem e o destino precisam ser diferentes.';return}if(!confirm('Copiar todo o Diário da origem para o usuário de teste? O destino precisa estar vazio.'))return;status.textContent='Copiando dados...';try{const j=await api('/api/admin/copy-diary',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':await csrf()},body:JSON.stringify({source_id:Number(source),target_id:Number(target),confirm:true})});const c=j.counts||{};status.textContent='Cópia concluída: '+(c.consumo||0)+' lançamentos, '+(c.hidratacao||0)+' registros de água, '+(c.medicoes_corporais||0)+' aferições e '+(c.gasto_ativo_diario||0)+' registros de gasto ativo.';loadClients();loadAudit();loadCopyUsers()}catch(e){status.textContent=e.message}}
+async function load(){try{const j=await api('/api/admin/users');document.getElementById('nutris').textContent=j.summary.nutricionistas;document.getElementById('direct').textContent=j.summary.clientes_diretos;document.getElementById('active').textContent=j.summary.ativos;document.getElementById('inactive').textContent=j.summary.inativos;document.getElementById('users').innerHTML=j.users.map(u=>{const active=Boolean(u.ativo)&&!u.bloqueado;const cls=u.papel==='nutricionista'?'nutri':u.papel==='admin'?'master':'';const origin=u.papel==='nutricionista'?'Gerido pelo master':'Aquisição direta';const count=u.papel==='nutricionista'?' · '+(u.clientes_count||0)+' clientes':'';let actions='—';if(u.papel!=='admin'){actions='<button class="'+(active?'red':'green')+'" onclick="toggle('+u.id+','+(!active)+')">'+(active?'INATIVAR':'REATIVAR')+'</button> <button class="secondary" onclick="blockUser('+u.id+','+(!u.bloqueado)+')">'+(u.bloqueado?'DESBLOQUEAR':'BLOQUEAR')+'</button> <button class="secondary" onclick="editUser('+u.id+')">EDITAR</button> <button class="secondary" onclick="resetPassword('+u.id+')">NOVA SENHA</button>'}return '<tr><td><b>'+esc(u.nome||'Sem nome')+'</b><small>'+esc(u.email)+'</small></td><td><span class="tag '+cls+'">'+roleLabel(u.papel)+'</span>'+count+'</td><td>'+origin+'</td><td>'+fmt(u.criado_em)+'</td><td><span class="tag '+(active?'':'off')+'">'+(active?'ATIVO':'INATIVO')+(u.bloqueado?' · BLOQUEADO':'')+'</span></td><td>'+actions+'</td></tr>'}).join('')}catch(e){document.getElementById('users').innerHTML='<tr><td colspan="6">'+esc(e.message)+'</td></tr>'}loadClients();loadAudit();loadCopyUsers()}
 load();</script><script>
 /* Painéis profissionais: sem zoom por pinça, duplo toque, roda ou teclado. */
 (()=>{
@@ -5461,6 +5537,14 @@ class H(BaseHTTPRequestHandler):
             finally:c.close()
             users=[dict(r) for r in rows]
             self.js({"users":users,"summary":{"nutricionistas":sum(1 for x in users if x.get("papel")=="nutricionista"),"clientes_diretos":sum(1 for x in users if x.get("papel")=="cliente"),"ativos":sum(1 for x in users if bool(x.get("ativo",True)) and not x.get("bloqueado")),"inativos":sum(1 for x in users if not bool(x.get("ativo",True)) or x.get("bloqueado"))}});return
+        if p.path=="/api/admin/copy-users":
+            admin=_require_admin(self)
+            if not admin:return
+            c=ddb()
+            try:
+                rows=c.execute("SELECT u.id,u.email,u.papel,u.ativo,u.bloqueado,COALESCE(p.nome,u.email) AS nome FROM usuarios u LEFT JOIN perfis p ON p.usuario_id=u.id ORDER BY CASE WHEN u.id=? THEN 0 WHEN u.papel='admin' THEN 1 WHEN u.papel='cliente' THEN 2 ELSE 3 END,COALESCE(p.nome,u.email)",(admin["id"],)).fetchall()
+            finally:c.close()
+            self.js({"admin_id":admin["id"],"users":[dict(r) for r in rows]});return
         if p.path=="/api/admin/nutritionists":
             admin=_require_admin(self)
             if not admin:return
@@ -6104,6 +6188,21 @@ class H(BaseHTTPRequestHandler):
             if not self.verify_csrf():return
             self.js({"ok":True},headers={"Set-Cookie":_clear_view_cookie()});return
 
+        if self.path=="/api/admin/copy-diary":
+            admin=_require_admin(self)
+            if not admin:return
+            if not self.verify_csrf():return
+            c=None
+            try:
+                x=self.body();source_id=int(x.get("source_id"));target_id=int(x.get("target_id"));confirm=bool(x.get("confirm"))
+                if not confirm:raise ValueError("Confirme a cópia dos dados para continuar.")
+                c=ddb();result=_copy_diary_data(c,source_id,target_id,admin["id"]);c.commit();self.js({"ok":True,**result})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
         if self.path=="/api/admin/create-user":
             admin=_require_admin(self)
             if not admin:return
