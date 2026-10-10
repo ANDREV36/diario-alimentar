@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V72 · Relatório até 60 dias e médias semanais"
+APP_VERSION = "V75 · Calendário PDF por tamanho real da semana"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -1751,20 +1751,73 @@ def _calendar_food_groups(foods):
     return result
 
 
-def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
+def _calendar_week_profiles(dataset, month_start):
+    """Retorna o tamanho natural de cada semana do mês para paginação."""
+    month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    grid_start = month_start - timedelta(days=month_start.weekday())
+    grid_end = month_end + timedelta(days=6 - month_end.weekday())
+    week_count = ((grid_end - grid_start).days + 1) // 7
+    selected_start, selected_end = dataset["start"], dataset["end"]
+    day_rows = {date.fromisoformat(row["data"]): row for row in dataset.get("days", [])}
+    profiles = []
+    for week_index in range(week_count):
+        week_dates = [grid_start + timedelta(days=week_index * 7 + column) for column in range(7)]
+        max_foods = 0
+        for current_date in week_dates:
+            in_period = selected_start <= current_date <= selected_end
+            in_scope = in_period and current_date.month == month_start.month
+            if in_scope:
+                max_foods = max(max_foods, len((day_rows.get(current_date) or {}).get("foods", [])))
+        base_font = max(3.4, min(5.2, 5.2 - max(0, max_foods - 12) * 0.08))
+        line_height = base_font + 1.0
+        profiles.append({
+            "week_index": week_index,
+            "max_foods": max_foods,
+            "natural_height": max(86.0, 43.0 + max(1, max_foods) * line_height),
+        })
+    return grid_start, profiles
+
+
+def _calendar_week_slices(dataset, month_start, available_height):
+    """Divide o mês em páginas sem comprimir uma semana por causa das outras."""
+    _, profiles = _calendar_week_profiles(dataset, month_start)
+    slices = []
+    current = []
+    current_height = 0.0
+    for profile in profiles:
+        height = float(profile["natural_height"])
+        if current and current_height + height > available_height:
+            slices.append((current[0], current[-1] + 1))
+            current = []
+            current_height = 0.0
+        current.append(profile["week_index"])
+        current_height += height
+    if current:
+        slices.append((current[0], current[-1] + 1))
+    return slices or [(0, 1)]
+
+
+def _pdf_month_calendar_page(pdf, dataset, month_start, page_no, week_start=0, week_end=None, continuation=None, continuation_total=None):
     """Desenha uma página A3 paisagem por mês, com uma linha para cada semana."""
     month_names = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
     month_label = f"{month_names[month_start.month - 1].capitalize()} de {month_start.year}"
+    continuation_label = ""
+    if continuation and continuation_total and continuation_total > 1:
+        continuation_label = f" · continuação {continuation}/{continuation_total}"
     width, height = _pdf_header(
         pdf,
         "CALENDÁRIO ALIMENTAR",
-        f"{dataset['name']} · {month_label} · consumo, água e saldo energético diário",
+        f"{dataset['name']} · {month_label}{continuation_label} · consumo, água e saldo energético diário",
         A3,
     )
     month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     grid_start = month_start - timedelta(days=month_start.weekday())
     grid_end = month_end + timedelta(days=6 - month_end.weekday())
-    week_count = ((grid_end - grid_start).days + 1) // 7
+    all_week_count = ((grid_end - grid_start).days + 1) // 7
+    week_start = max(0, int(week_start or 0))
+    week_end = all_week_count if week_end is None else min(all_week_count, int(week_end))
+    visible_week_indices = list(range(week_start, max(week_start, week_end)))
+    week_count = len(visible_week_indices)
     selected_start, selected_end = dataset["start"], dataset["end"]
     day_rows = {date.fromisoformat(row["data"]): row for row in dataset.get("days", [])}
     energy_rows = {date.fromisoformat(row["data"]): row for row in (dataset.get("energy") or {}).get("days", [])}
@@ -1778,48 +1831,42 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
     weekday_height = 8 * mm
     body_top = top - weekday_height
 
-    # A altura de cada semana passa a ser definida pelo dia mais extenso
-    # daquela semana. Assim, os 7 dias de uma mesma semana sempre têm
-    # exatamente a mesma altura, sem cortar a lista de alimentos.
+    # Cada semana conserva o tamanho físico necessário para o seu maior dia.
+    # A paginação externa garante que uma semana extensa não seja comprimida
+    # apenas porque outras semanas também possuem lançamentos.
     week_data = []
-    for week_index in range(week_count):
-        week_dates = [grid_start + timedelta(days=week_index * 7 + column) for column in range(7)]
+    for global_week_index in visible_week_indices:
+        week_dates = [grid_start + timedelta(days=global_week_index * 7 + column) for column in range(7)]
         max_foods = 0
         for current_date in week_dates:
             in_period = selected_start <= current_date <= selected_end
             in_scope = in_period and current_date.month == month_start.month
-            if not in_scope:
-                continue
-            foods = (day_rows.get(current_date) or {}).get("foods", [])
-            max_foods = max(max_foods, len(foods))
-        # Espaço reservado para: dia + lista completa + consumo/água/saldo.
-        # Nunca usamos a altura para esconder itens; se necessário, a fonte
-        # da semana é reduzida de forma controlada.
+            if in_scope:
+                max_foods = max(max_foods, len((day_rows.get(current_date) or {}).get("foods", [])))
         food_font = max(3.4, min(5.2, 5.2 - max(0, max_foods - 12) * 0.08))
         line_height = food_font + 1.0
-        required_height = max(55, 31 + max(1, max_foods) * line_height + 10)
-        week_data.append({"max_foods": max_foods, "food_font": food_font, "line_height": line_height, "required_height": required_height})
+        week_data.append({"max_foods": max_foods, "food_font": food_font, "line_height": line_height, "required_height": max(86.0, 43.0 + max(1, max_foods) * line_height)})
 
     available_height = body_top - bottom
     required_total = sum(item["required_height"] for item in week_data)
-    if required_total <= available_height:
-        row_heights = [item["required_height"] for item in week_data]
-    else:
-        # Mantém as semanas proporcionais ao conteúdo. Se houver muitos
-        # alimentos, reduzimos a tipografia apenas o necessário para que
-        # todas as semanas caibam na página, sem eliminar alimentos.
-        scale = available_height / required_total
-        row_heights = [max(45, item["required_height"] * scale) for item in week_data]
-        # Ajuste final para somar exatamente a área disponível.
-        excess = sum(row_heights) - available_height
-        if excess > 0:
-            largest = max(range(len(row_heights)), key=lambda i: row_heights[i])
-            row_heights[largest] = max(45, row_heights[largest] - excess)
-        # A tipografia acompanha a redução da semana, preservando todos os
-        # alimentos mesmo quando o período contém semanas muito extensas.
+    row_heights = [item["required_height"] for item in week_data]
+    if required_total > available_height and required_total > 0:
+        # Uma semana isolada muito extensa ainda pode precisar de fonte menor,
+        # mas nunca invade o cabeçalho ou os totais inferiores.
+        fixed_overhead = 43.0
+        content_need = sum(item["max_foods"] * item["line_height"] for item in week_data)
+        content_space = max(0.0, available_height - fixed_overhead * max(1, week_count))
+        scale = min(1.0, content_space / content_need) if content_need > 0 else 1.0
         for item in week_data:
-            item["food_font"] = max(2.8, item["food_font"] * scale)
-            item["line_height"] = item["food_font"] + 1.0
+            item["food_font"] = max(2.5, item["food_font"] * scale)
+            item["line_height"] = max(3.0, item["food_font"] + 1.0)
+            item["required_height"] = max(86.0, fixed_overhead + max(1, item["max_foods"]) * item["line_height"])
+        row_heights = [item["required_height"] for item in week_data]
+        if sum(row_heights) > available_height:
+            compact = available_height / sum(row_heights)
+            for item in week_data:
+                item["line_height"] = max(3.0, item["line_height"] * compact)
+            row_heights = [max(86.0, fixed_overhead + max(1, item["max_foods"]) * item["line_height"]) for item in week_data]
 
     pdf.setFillColor(colors.HexColor("#64748b"))
     pdf.setFont("Helvetica", 7)
@@ -1843,10 +1890,10 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
     pdf.drawCentredString(saldo_x + saldo_width / 2, body_top + 1.8 * mm, "basal + ativo - consumido")
 
     current_y = body_top
-    for week_index in range(week_count):
-        row_height = row_heights[week_index]
+    for page_week_index, global_week_index in enumerate(visible_week_indices):
+        row_height = row_heights[page_week_index]
         cell_y = current_y - row_height
-        week_dates = [grid_start + timedelta(days=week_index * 7 + column) for column in range(7)]
+        week_dates = [grid_start + timedelta(days=global_week_index * 7 + column) for column in range(7)]
         week_in_scope = [d for d in week_dates if selected_start <= d <= selected_end and d.month == month_start.month]
         week_energy = [energy_rows[d] for d in week_in_scope if d in energy_rows]
         weekly_basal = sum(float(row.get("basal_kcal") or 0) for row in week_energy)
@@ -1909,10 +1956,11 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
             if not food_lines:
                 food_lines = [{"text": "Sem consumo registrado", "highlight": False}]
 
-            week_cfg = week_data[week_index]
+            week_cfg = week_data[page_week_index]
             food_font = week_cfg["food_font"]
             line_height = week_cfg["line_height"]
-            # Não truncar: todos os alimentos do dia são desenhados.
+            # Todos os alimentos são desenhados dentro da altura calculada;
+            # a área inferior dos totais permanece reservada.
             pdf.setFont("Helvetica", food_font)
             text_y = cell_y + row_height - 22
             for item in food_lines:
@@ -1943,7 +1991,7 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
         pdf.rect(saldo_x, cell_y, saldo_width, row_height, stroke=1, fill=1)
         pdf.setFillColor(colors.HexColor(saldo_text_color))
         pdf.setFont("Helvetica-Bold", 7)
-        pdf.drawString(saldo_x + 5, cell_y + row_height - 15, f"SEMANA {week_index + 1}")
+        pdf.drawString(saldo_x + 5, cell_y + row_height - 15, f"SEMANA {global_week_index + 1}")
         pdf.setFont("Helvetica-Bold", 12)
         saldo_display = f"{weekly_saldo:+,.0f} kcal".replace(",", ".") if week_in_scope else "—"
         pdf.drawString(saldo_x + 5, cell_y + row_height - 31, saldo_display)
@@ -2526,47 +2574,26 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
         # VALOR DA BARRA
         # ========================================================
 
-        pdf.setFillColor(colors.HexColor("#334155"))
-        pdf.setFont("Helvetica-Bold", 8)
-
-        value_label = "EM ANDAMENTO" if is_current_day else f"{value:,.0f}".replace(",", ".")
-
-        pdf.drawCentredString(
-            x + bar_w / 2,
-            value_y,
-            value_label
-        )
+        # Em períodos longos, os valores continuam disponíveis nas barras e
+        # no PDF, mas os rótulos são espaçados para não ficarem sobrepostos.
+        value_stride = 1 if count <= 21 else 2 if count <= 35 else 7
+        date_stride = 1 if count <= 14 else 2 if count <= 35 else 7
+        show_value = count <= 21 or idx % value_stride == 0 or idx == count - 1 or is_current_day
+        show_date = count <= 14 or idx % date_stride == 0 or idx == count - 1
+        if show_value:
+            pdf.setFillColor(colors.HexColor("#334155"))
+            pdf.setFont("Helvetica-Bold", 8 if count <= 21 else 6.4)
+            value_label = "EM ANDAMENTO" if is_current_day else f"{value:,.0f}".replace(",", ".")
+            pdf.drawCentredString(x + bar_w / 2, value_y, value_label)
 
         # ========================================================
         # DATA / DIA
         # ========================================================
-
-        label = str(
-            item.get("label") or ""
-        )
-
-        pdf.setFillColor(colors.HexColor("#475569"))
-        pdf.setFont("Helvetica-Bold", 8)
-
-        # Para poucos dias, horizontal.
-        # Para muitos dias, reduz um pouco o tamanho.
-        if count <= 10:
-
-            pdf.drawCentredString(
-                x + bar_w / 2,
-                chart_bottom + 3 * mm,
-                label
-            )
-
-        else:
-
-            pdf.setFont("Helvetica-Bold", 6.5)
-
-            pdf.drawCentredString(
-                x + bar_w / 2,
-                chart_bottom + 3 * mm,
-                label
-            )
+        label = str(item.get("label") or "")
+        if show_date:
+            pdf.setFillColor(colors.HexColor("#475569"))
+            pdf.setFont("Helvetica-Bold", 8 if count <= 14 else 6.5)
+            pdf.drawCentredString(x + bar_w / 2, chart_bottom + 3 * mm, label)
 
     # ============================================================
     # LINHA DE PESO (EIXO SECUNDÁRIO EM KG)
@@ -2648,25 +2675,27 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
         pdf.setLineWidth(1.5)
         for first, second in zip(virtual_points, virtual_points[1:]):
             pdf.line(first[0], first[1], second[0], second[1])
-        for x, y, value in virtual_points:
+        for point_index, (x, y, value) in enumerate(virtual_points):
             pdf.setFillColor(colors.HexColor("#facc15"))
             pdf.circle(x, y, 1.45 * mm, stroke=0, fill=1)
-            pdf.setFillColor(colors.HexColor("#a16207"))
-            pdf.setFont("Helvetica-Bold", 6.5)
-            pdf.drawCentredString(x, max(weight_bottom + 2 * mm, y - 4 * mm), f"{value:.1f} kg")
+            if len(virtual_points) <= 14 or point_index % 7 == 0 or point_index == len(virtual_points) - 1:
+                pdf.setFillColor(colors.HexColor("#a16207"))
+                pdf.setFont("Helvetica-Bold", 6.2)
+                pdf.drawCentredString(x, max(weight_bottom + 2 * mm, y - 4 * mm), f"{value:.1f} kg")
         pdf.setStrokeColor(colors.HexColor("#db2777"))
         pdf.setLineWidth(2.0)
         for first, second in zip(weight_points, weight_points[1:]):
             pdf.line(first[0], first[1], second[0], second[1])
-        for x, y, value in weight_points:
+        for point_index, (x, y, value) in enumerate(weight_points):
             pdf.setFillColor(colors.HexColor("#ec4899"))
             pdf.circle(x, y, 2.2 * mm, stroke=0, fill=1)
             pdf.setStrokeColor(colors.white)
             pdf.setLineWidth(0.7)
             pdf.circle(x, y, 2.2 * mm, stroke=1, fill=0)
-            pdf.setFillColor(colors.HexColor("#9d174d"))
-            pdf.setFont("Helvetica-Bold", 7)
-            pdf.drawCentredString(x, y + 4 * mm, f"{value:.1f} kg")
+            if len(weight_points) <= 14 or point_index % 7 == 0 or point_index == len(weight_points) - 1:
+                pdf.setFillColor(colors.HexColor("#9d174d"))
+                pdf.setFont("Helvetica-Bold", 6.5)
+                pdf.drawCentredString(x, y + 4 * mm, f"{value:.1f} kg")
         pdf.setFillColor(colors.HexColor("#be185d"))
         pdf.setFont("Helvetica-Bold", 7)
         pdf.drawRightString(chart_right, chart_top - 4 * mm, "PESO (kg)")
@@ -2677,116 +2706,50 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
     # ============================================================
     # LEGENDA
     # ============================================================
+    # Duas linhas independentes evitam sobreposição quando o PDF é visto
+    # em tela ou impresso em escala reduzida.
+    legend_y1 = 24 * mm
+    legend_y2 = 19 * mm
+    legend_font = 7.2
 
-    legend_y = 22 * mm
+    legend_items_1 = [
+        (left, "#16a34a", "Saldo — déficit", False),
+        (left + 55 * mm, "#dc2626", "Superávit", False),
+        (left + 105 * mm, "#ec4899", "Peso real", False),
+        (left + 157 * mm, "#facc15", "Peso virtual", True),
+    ]
+    legend_items_2 = [
+        (left, "#1d4ed8", "Média 7d sem água", True),
+        (left + 105 * mm, "#60a5fa", "Média 7d peso total", True),
+    ]
+    for x, color, label, line in legend_items_1 + legend_items_2:
+        y = legend_y1 if (x, color, label, line) in legend_items_1 else legend_y2
+        pdf.setFillColor(colors.HexColor(color))
+        pdf.roundRect(x, y + (1 * mm if line else 0), 7 * mm, 1.6 * mm if line else 3.5 * mm, 0.8 * mm, stroke=0, fill=1)
+        pdf.setFillColor(colors.HexColor("#334155"))
+        pdf.setFont("Helvetica-Bold", legend_font)
+        pdf.drawString(x + 10 * mm, y, label)
 
-    # Déficit
-    pdf.setFillColor(colors.HexColor("#16a34a"))
-
-    pdf.roundRect(
-        left,
-        legend_y,
-        7 * mm,
-        3.5 * mm,
-        1 * mm,
-        stroke=0,
-        fill=1
-    )
-
-    pdf.setFillColor(colors.HexColor("#334155"))
-    pdf.setFont("Helvetica-Bold", 8.5)
-
-    pdf.drawString(
-        left + 10 * mm,
-        legend_y,
-        "Saldo — déficit"
-    )
-
-    # Superávit
-    legend_x2 = left + 55 * mm
-
-    pdf.setFillColor(colors.HexColor("#dc2626"))
-
-    pdf.roundRect(
-        legend_x2,
-        legend_y,
-        7 * mm,
-        3.5 * mm,
-        1 * mm,
-        stroke=0,
-        fill=1
-    )
-
-    pdf.setFillColor(colors.HexColor("#334155"))
-    pdf.setFont("Helvetica-Bold", 8.5)
-
-    pdf.drawString(
-        legend_x2 + 10 * mm,
-        legend_y,
-        "Superávit"
-    )
-
-    # Peso
-    legend_x3 = left + 112 * mm
-    pdf.setFillColor(colors.HexColor("#ec4899"))
-    pdf.roundRect(legend_x3, legend_y, 7 * mm, 3.5 * mm, 1 * mm, stroke=0, fill=1)
-    pdf.setFillColor(colors.HexColor("#334155"))
-    pdf.setFont("Helvetica-Bold", 8.5)
-    pdf.drawString(legend_x3 + 10 * mm, legend_y, "Peso (linha, kg)")
-
-    # Peso virtual
-    legend_x4 = left + 178 * mm
-    pdf.setFillColor(colors.HexColor("#facc15"))
-    pdf.roundRect(legend_x4, legend_y + 1 * mm, 7 * mm, 1.5 * mm, 0.7 * mm, stroke=0, fill=1)
-    pdf.setFillColor(colors.HexColor("#334155"))
-    pdf.setFont("Helvetica-Bold", 8.5)
-    pdf.drawString(legend_x4 + 10 * mm, legend_y, "Peso virtual")
-
-    legend_x5 = left + 245 * mm
-    pdf.setFillColor(colors.HexColor("#1d4ed8"))
-    pdf.roundRect(legend_x5, legend_y + 1 * mm, 7 * mm, 1.5 * mm, 0.7 * mm, stroke=0, fill=1)
-    pdf.setFillColor(colors.HexColor("#334155"))
-    pdf.setFont("Helvetica-Bold", 8.0)
-    pdf.drawString(legend_x5 + 10 * mm, legend_y, "Média 7d sem água")
-
-    legend_x6 = left + 310 * mm
-    pdf.setFillColor(colors.HexColor("#60a5fa"))
-    pdf.roundRect(legend_x6, legend_y + 1 * mm, 7 * mm, 1.5 * mm, 0.7 * mm, stroke=0, fill=1)
-    pdf.setFillColor(colors.HexColor("#334155"))
-    pdf.setFont("Helvetica-Bold", 8.0)
-    pdf.drawString(legend_x6 + 10 * mm, legend_y, "Média 7d peso total")
-
-    # Referência
     pdf.setFillColor(colors.HexColor("#64748b"))
-    pdf.setFont("Helvetica", 8)
-
-    pdf.drawRightString(
-        right,
-        legend_y,
-        "Referência matemática: 7.000 kcal ≈ 1 kg de gordura"
-    )
+    pdf.setFont("Helvetica", 6.8)
+    pdf.drawRightString(right, legend_y2, "7.000 kcal ≈ 1 kg de gordura")
 
     # ============================================================
     # OBSERVAÇÃO
     # ============================================================
 
     pdf.setFillColor(colors.HexColor("#64748b"))
-    pdf.setFont("Helvetica", 7.5)
-
-    pdf.drawString(
-        left,
-        15 * mm,
-        "Saldo positivo representa déficit energético; saldo negativo representa superávit energético. O dia atual aparece em cinza e não entra no déficit acumulado por ainda estar em andamento."
-    )
+    pdf.setFont("Helvetica", 6.5)
+    pdf.drawString(left, 14.8 * mm, "Saldo positivo = déficit; saldo negativo = superávit. O dia atual aparece em cinza e não entra no déficit acumulado.")
 
     # ============================================================
     # RODAPÉ
     # ============================================================
-
+    pdf.setFillColor(colors.HexColor("#1e3a8a"))
+    pdf.setFont("Helvetica", 6.2)
+    pdf.drawString(left, 12.4 * mm, "Médias azuis: aferições disponíveis em blocos consecutivos de 7 dias — azul escuro sem água e azul claro com o peso total.")
     pdf.setFillColor(colors.HexColor("#a16207"))
-    pdf.setFont("Helvetica", 7.2)
-    pdf.drawString(left, 12.5 * mm, "Linhas azuis: médias das aferições disponíveis em blocos consecutivos de 7 dias — azul escuro sem água e azul claro com o peso total.")
-    pdf.drawString(left, 9.5 * mm, "Linha amarela: peso virtual pelo saldo acumulado, 7.000 kcal = 1 kg, sem incorporar a variação de água.")
+    pdf.drawString(left, 10.2 * mm, "Peso virtual: saldo acumulado na proporção de 7.000 kcal = 1 kg, sem incorporar a variação de água.")
     _pdf_footer(pdf, page_no)
 
 
@@ -3304,12 +3267,16 @@ def build_food_report_pdf(user_id, start, end):
     page_no += 1
     _pdf_energy_balance_page(pdf, dataset, page_no)
 
-    # Páginas seguintes: calendário completo, com alimentos por dia e saldo semanal.
+    # Páginas seguintes: calendário completo. Cada página recebe somente
+    # as semanas que cabem naturalmente; uma semana extensa não é achatada.
     month_cursor = dataset["start"].replace(day=1)
+    calendar_available_height = landscape(A3)[1] - (45 * mm + 8 * mm) - 19 * mm
     while month_cursor <= dataset["end"]:
-        pdf.showPage()
-        page_no += 1
-        _pdf_month_calendar_page(pdf, dataset, month_cursor, page_no)
+        slices = _calendar_week_slices(dataset, month_cursor, calendar_available_height)
+        for part_index, (week_start, week_end) in enumerate(slices, start=1):
+            pdf.showPage()
+            page_no += 1
+            _pdf_month_calendar_page(pdf, dataset, month_cursor, page_no, week_start, week_end, part_index, len(slices))
         month_cursor = (month_cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
 
     pdf.save()
