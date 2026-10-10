@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V77 · Escalas verticais separadas no gráfico"
+APP_VERSION = "V78 · Nós e rótulos menores no gráfico"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -2709,9 +2709,9 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             pdf.line(first[0], first[1], second[0], second[1])
         for x, y, value, label in weekly_dry_points:
             pdf.setFillColor(colors.HexColor("#1d4ed8"))
-            pdf.circle(x, y, 1.55 * mm, stroke=0, fill=1)
+            pdf.circle(x, y, 0.62 * mm, stroke=0, fill=1)
             pdf.setFillColor(colors.HexColor("#1e3a8a"))
-            pdf.setFont("Helvetica-Bold", 6.5)
+            pdf.setFont("Helvetica-Bold", 2.6)
             pdf.drawCentredString(x, max(dry_bottom + 1 * mm, y - 3 * mm), f"{value:.1f} kg")
         pdf.setStrokeColor(colors.HexColor("#60a5fa"))
         pdf.setLineWidth(1.5)
@@ -2719,9 +2719,9 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             pdf.line(first[0], first[1], second[0], second[1])
         for x, y, value, label in weekly_total_points:
             pdf.setFillColor(colors.HexColor("#60a5fa"))
-            pdf.circle(x, y, 1.55 * mm, stroke=0, fill=1)
+            pdf.circle(x, y, 0.62 * mm, stroke=0, fill=1)
             pdf.setFillColor(colors.HexColor("#0369a1"))
-            pdf.setFont("Helvetica-Bold", 6.5)
+            pdf.setFont("Helvetica-Bold", 2.6)
             pdf.drawCentredString(x, min(total_top - 1 * mm, y + 3 * mm), f"{value:.1f} kg")
 
         pdf.setStrokeColor(colors.HexColor("#ca8a04"))
@@ -2730,9 +2730,9 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             pdf.line(first[0], first[1], second[0], second[1])
         for x, y, value in virtual_points:
             pdf.setFillColor(colors.HexColor("#facc15"))
-            pdf.circle(x, y, 1.45 * mm, stroke=0, fill=1)
+            pdf.circle(x, y, 0.58 * mm, stroke=0, fill=1)
             pdf.setFillColor(colors.HexColor("#a16207"))
-            pdf.setFont("Helvetica-Bold", 6.5)
+            pdf.setFont("Helvetica-Bold", 2.6)
             pdf.drawCentredString(x, max(total_bottom + 1 * mm, y - 3 * mm), f"{value:.1f} kg")
         pdf.setStrokeColor(colors.HexColor("#db2777"))
         pdf.setLineWidth(2.0)
@@ -2740,12 +2740,12 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             pdf.line(first[0], first[1], second[0], second[1])
         for x, y, value in weight_points:
             pdf.setFillColor(colors.HexColor("#ec4899"))
-            pdf.circle(x, y, 2.2 * mm, stroke=0, fill=1)
+            pdf.circle(x, y, 0.88 * mm, stroke=0, fill=1)
             pdf.setStrokeColor(colors.white)
-            pdf.setLineWidth(0.7)
-            pdf.circle(x, y, 2.2 * mm, stroke=1, fill=0)
+            pdf.setLineWidth(0.28)
+            pdf.circle(x, y, 0.88 * mm, stroke=1, fill=0)
             pdf.setFillColor(colors.HexColor("#9d174d"))
-            pdf.setFont("Helvetica-Bold", 7)
+            pdf.setFont("Helvetica-Bold", 2.8)
             pdf.drawCentredString(x, min(total_top - 1 * mm, y + 3 * mm), f"{value:.1f} kg")
         pdf.setFillColor(colors.HexColor("#be185d"))
         pdf.setFont("Helvetica-Bold", 7)
