@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V70 · Correção da cópia de Diário"
+APP_VERSION = "V72 · Relatório até 60 dias e médias semanais"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -1082,8 +1082,9 @@ def _require_nutritionist(handler):
 
 def _nutritionist_view_write_blocked(handler):
     actor = _current_actor(handler)
-    if actor and actor.get("papel") in ("nutricionista","admin") and _view_cookie_target(handler):
-        handler.js({"error":"Não foi possível alterar o diário enquanto ele está sendo visualizado pelo nutricionista."},403)
+    target_id = _view_cookie_target(handler) if actor else None
+    if actor and actor.get("papel") in ("nutricionista","admin") and target_id and int(target_id) != int(actor.get("id")):
+        handler.js({"error":"Modo somente leitura: a nutricionista pode consultar este Diário e gerar relatórios, mas não pode alterar lançamentos."},403)
         return True
     return False
 
@@ -1134,6 +1135,7 @@ def _current_user(handler):
     user["ator_id"] = actor["id"]
     user["ator_papel"] = actor["papel"]
     user["em_visualizacao"] = False
+    user["somente_leitura"] = False
 
     if actor.get("papel") in ("nutricionista","admin"):
         target_id = _view_cookie_target(handler)
@@ -1151,6 +1153,7 @@ def _current_user(handler):
                     user["ator_papel"] = actor["papel"]
                     user["ator_email"] = actor.get("email")
                     user["em_visualizacao"] = True
+                    user["somente_leitura"] = True
             finally:
                 c.close()
 
@@ -1341,6 +1344,8 @@ def relevant_nutrient_analysis(rows, user_id):
     }
 
 
+REPORT_MAX_DAYS = 60
+
 REPORT_METRICS = (
     ("energia_kcal", "calorias_kcal", "Calorias", "kcal", "#ef4444"),
     ("proteina_g", "proteina_g", "Proteína", "g", "#8b5cf6"),
@@ -1406,6 +1411,46 @@ def _apply_virtual_weight_series(energy_days, body_measurements):
         item["virtual_weight_kg"] = round(virtual_weight, 3)
 
 
+def _weekly_weight_averages(period_start, period_end, body_measurements):
+    """Calcula médias de peso total e peso sem água em blocos consecutivos de 7 dias."""
+    if isinstance(period_start, str):
+        period_start = date.fromisoformat(period_start)
+    if isinstance(period_end, str):
+        period_end = date.fromisoformat(period_end)
+    valid = []
+    for item in body_measurements or []:
+        try:
+            day = date.fromisoformat(str(item.get("data")))
+            peso = float(item.get("peso_kg") or 0)
+            agua = float(item.get("agua_kg") or 0)
+        except Exception:
+            continue
+        if period_start <= day <= period_end and peso > 0 and agua > 0 and agua <= peso:
+            valid.append((day, peso, peso - agua))
+    if not valid:
+        return []
+    result = []
+    block_start = period_start
+    while block_start <= period_end:
+        block_end = min(period_end, block_start + timedelta(days=6))
+        points = [row for row in valid if block_start <= row[0] <= block_end]
+        if points:
+            total_average = sum(row[1] for row in points) / len(points)
+            dry_average = sum(row[2] for row in points) / len(points)
+            result.append({
+                "data": block_start.isoformat(),
+                "end_data": block_end.isoformat(),
+                "label": f"{block_start.strftime('%d/%m')}–{block_end.strftime('%d/%m')}",
+                "start_offset": (block_start - period_start).days,
+                "end_offset": (block_end - period_start).days,
+                "peso_medio_kg": round(total_average, 3),
+                "massa_sem_agua_media_kg": round(dry_average, 3),
+                "afericoes": len(points),
+            })
+        block_start = block_end + timedelta(days=1)
+    return result
+
+
 def report_period_data(user_id, start, end):
     try:
         d1, d2 = date.fromisoformat(start), date.fromisoformat(end)
@@ -1413,8 +1458,8 @@ def report_period_data(user_id, start, end):
         raise ValueError("Datas inválidas para o relatório.")
     if d1 > d2:
         raise ValueError("A data inicial deve ser anterior à data final.")
-    if (d2 - d1).days > 29:
-        raise ValueError("O relatório permite no máximo 30 dias por vez.")
+    if (d2 - d1).days >= REPORT_MAX_DAYS:
+        raise ValueError("O relatório permite no máximo 60 dias por vez.")
     c = ddb()
     try:
         consumed = c.execute("SELECT * FROM consumo WHERE usuario_id=? AND data>=? AND data<=? ORDER BY data,id", (user_id, start, end)).fetchall()
@@ -1494,6 +1539,7 @@ def report_period_data(user_id, start, end):
     return {
         "start": d1, "end": d2, "days": rows, "goals": goals,
         "body_measurements": list(body_by_day.values()),
+        "weekly_weight_averages": _weekly_weight_averages(d1, d2, body_by_day.values()),
 
         "name": (profile["nome"] if profile and profile["nome"] else "Pessoa usuária"),
         "goals_context": goals_context,
@@ -1857,7 +1903,8 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no):
                 quantity = float(food.get("quantidade_g") or 0)
                 quantity_text = f"{quantity:.0f}" if quantity.is_integer() else f"{quantity:.1f}"
                 meal = meal_short.get(str(food.get("refeicao") or ""), str(food.get("refeicao") or ""))
-                line = f"{meal}: {name} ({quantity_text} {unit})" if meal else f"{name} ({quantity_text} {unit})"
+                calories_text = f"{float(food.get('energia_kcal') or 0):.0f} kcal"
+                line = f"{meal}: {name} ({quantity_text} {unit} · {calories_text})" if meal else f"{name} ({quantity_text} {unit} · {calories_text})"
                 food_lines.append({"text": line, "highlight": key in highlight_keys})
             if not food_lines:
                 food_lines = [{"text": "Sem consumo registrado", "highlight": False}]
@@ -2530,11 +2577,15 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
         for item in (dataset.get("body_measurements") or [])
         if float(item.get("peso_kg") or 0) > 0
     }
+    weekly_averages = [
+        item for item in (dataset.get("weekly_weight_averages") or [])
+        if float(item.get("peso_medio_kg") or 0) > 0 and float(item.get("massa_sem_agua_media_kg") or 0) > 0
+    ]
     weight_items = [body_by_day.get(str(item.get("data"))) for item in days]
     weight_items = [item for item in weight_items if item]
     virtual_items = [item for item in days if float(item.get("virtual_weight_kg") or 0) > 0]
-    if weight_items or virtual_items:
-        weight_values = [float(item.get("peso_kg") or 0) for item in weight_items] + [float(item.get("virtual_weight_kg") or 0) for item in virtual_items]
+    if weight_items or virtual_items or weekly_averages:
+        weight_values = [float(item.get("peso_kg") or 0) for item in weight_items] + [float(item.get("virtual_weight_kg") or 0) for item in virtual_items] + [float(item.get("peso_medio_kg") or 0) for item in weekly_averages] + [float(item.get("massa_sem_agua_media_kg") or 0) for item in weekly_averages]
         weight_min = min(weight_values)
         weight_max = max(weight_values)
         weight_range = max(0.5, weight_max - weight_min)
@@ -2559,6 +2610,40 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             x = chart_left + (idx + 0.5) * step_x
             y = weight_bottom + ((value - weight_min) / weight_range) * (weight_top - weight_bottom)
             virtual_points.append((x, y, value))
+        weekly_total_points = []
+        weekly_dry_points = []
+        for item in weekly_averages:
+            start_offset = max(0, int(item.get("start_offset") or 0))
+            end_offset = max(start_offset, int(item.get("end_offset") if item.get("end_offset") is not None else start_offset))
+            center_offset = (start_offset + end_offset) / 2
+            x = chart_left + (center_offset + 0.5) * step_x
+            total_value = float(item.get("peso_medio_kg") or 0)
+            dry_value = float(item.get("massa_sem_agua_media_kg") or 0)
+            total_y = weight_bottom + ((total_value - weight_min) / weight_range) * (weight_top - weight_bottom)
+            dry_y = weight_bottom + ((dry_value - weight_min) / weight_range) * (weight_top - weight_bottom)
+            weekly_total_points.append((x, total_y, total_value, str(item.get("label") or "")))
+            weekly_dry_points.append((x, dry_y, dry_value, str(item.get("label") or "")))
+        pdf.setStrokeColor(colors.HexColor("#1d4ed8"))
+        pdf.setLineWidth(1.5)
+        for first, second in zip(weekly_dry_points, weekly_dry_points[1:]):
+            pdf.line(first[0], first[1], second[0], second[1])
+        for x, y, value, label in weekly_dry_points:
+            pdf.setFillColor(colors.HexColor("#1d4ed8"))
+            pdf.circle(x, y, 1.55 * mm, stroke=0, fill=1)
+            pdf.setFillColor(colors.HexColor("#1e3a8a"))
+            pdf.setFont("Helvetica-Bold", 6.5)
+            pdf.drawCentredString(x, max(weight_bottom + 2 * mm, y - 4 * mm), f"{value:.1f} kg")
+        pdf.setStrokeColor(colors.HexColor("#60a5fa"))
+        pdf.setLineWidth(1.5)
+        for first, second in zip(weekly_total_points, weekly_total_points[1:]):
+            pdf.line(first[0], first[1], second[0], second[1])
+        for x, y, value, label in weekly_total_points:
+            pdf.setFillColor(colors.HexColor("#60a5fa"))
+            pdf.circle(x, y, 1.55 * mm, stroke=0, fill=1)
+            pdf.setFillColor(colors.HexColor("#0369a1"))
+            pdf.setFont("Helvetica-Bold", 6.5)
+            pdf.drawCentredString(x, min(weight_top - 2 * mm, y + 4 * mm), f"{value:.1f} kg")
+
         pdf.setStrokeColor(colors.HexColor("#ca8a04"))
         pdf.setLineWidth(1.5)
         for first, second in zip(virtual_points, virtual_points[1:]):
@@ -2657,6 +2742,20 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
     pdf.setFont("Helvetica-Bold", 8.5)
     pdf.drawString(legend_x4 + 10 * mm, legend_y, "Peso virtual")
 
+    legend_x5 = left + 245 * mm
+    pdf.setFillColor(colors.HexColor("#1d4ed8"))
+    pdf.roundRect(legend_x5, legend_y + 1 * mm, 7 * mm, 1.5 * mm, 0.7 * mm, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.setFont("Helvetica-Bold", 8.0)
+    pdf.drawString(legend_x5 + 10 * mm, legend_y, "Média 7d sem água")
+
+    legend_x6 = left + 310 * mm
+    pdf.setFillColor(colors.HexColor("#60a5fa"))
+    pdf.roundRect(legend_x6, legend_y + 1 * mm, 7 * mm, 1.5 * mm, 0.7 * mm, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.setFont("Helvetica-Bold", 8.0)
+    pdf.drawString(legend_x6 + 10 * mm, legend_y, "Média 7d peso total")
+
     # Referência
     pdf.setFillColor(colors.HexColor("#64748b"))
     pdf.setFont("Helvetica", 8)
@@ -2686,7 +2785,8 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
 
     pdf.setFillColor(colors.HexColor("#a16207"))
     pdf.setFont("Helvetica", 7.2)
-    pdf.drawString(left, 12.5 * mm, "Linha amarela: peso virtual pelo saldo acumulado, 7.000 kcal = 1 kg, sem incorporar a variação de água.")
+    pdf.drawString(left, 12.5 * mm, "Linhas azuis: médias das aferições disponíveis em blocos consecutivos de 7 dias — azul escuro sem água e azul claro com o peso total.")
+    pdf.drawString(left, 9.5 * mm, "Linha amarela: peso virtual pelo saldo acumulado, 7.000 kcal = 1 kg, sem incorporar a variação de água.")
     _pdf_footer(pdf, page_no)
 
 
@@ -3658,7 +3758,7 @@ main{height:auto!important;min-height:calc(100vh - 70px)!important;overflow:visi
 #professionalPlanCard .professionalDetailSection strong{display:block;margin-bottom:5px;color:#7dd3fc;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
 #professionalPlanCard .professionalBackButton{display:block;width:100%;margin-top:18px;padding:10px;border:1px solid rgba(125,211,252,.35);border-radius:10px;background:rgba(7,22,38,.7);color:#bae6fd;font-family:inherit;font-weight:900;cursor:pointer}
 #professionalPlanCard .professionalBackButton:hover{background:rgba(30,64,175,.35)}
-</style></head><body>
+.readOnlyDisabled{opacity:.45!important;cursor:not-allowed!important;filter:grayscale(.35)}</style></head><body>
 <div id="authScreen" style="display:flex;position:fixed;inset:0;z-index:500;background:#07111f;align-items:center;justify-content:center;padding:18px"><div style="width:min(430px,100%);background:#0b1728;color:#fff;border:1px solid #ffffff25;border-radius:18px;padding:22px;box-shadow:0 20px 70px #0009"><h1 style="margin:0 0 6px">🥗 Diário Alimentar</h1><p style="color:#b9c7d7;font-size:13px;margin:0 0 16px">Entre ou crie sua conta para manter seus dados protegidos.</p><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">E-mail<input id="authEmail" type="email" autocomplete="email" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><label style="display:block;font-size:12px;font-weight:bold;margin:9px 0">Senha<input id="authPassword" type="password" autocomplete="current-password" minlength="8" style="width:100%;padding:11px;margin-top:5px;border-radius:10px;border:1px solid #ffffff30;background:#ffffff10;color:#fff"></label><div id="authStatus" style="min-height:20px;color:#fca5a5;font-size:12px;margin:8px 0"></div><div style="display:flex;gap:8px"><button onclick="login()" style="flex:1;padding:12px;border:0;border-radius:10px;background:#22c55e;color:#06210f;font-weight:bold">ENTRAR</button><button onclick="register()" style="flex:1;padding:12px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:#fff;font-weight:bold">CRIAR CONTA</button></div></div></div><header><div class="headrow"><div><h1 id="appTitle">V45 · Diário Alimentar · Segurança P0</h1><p id="greeting">Alimentação, nutrientes e histórico</p><small id="userEmail" style="color:#9fb0c4"></small></div><div style="display:flex;gap:8px"><button class="profileBtn" onclick="openProfile()">👤 Perfil</button><button id="masterPanelBtn" class="profileBtn" style="display:none" onclick="location.href='/admin'">⚙️ Painel master</button><button class="profileBtn" onclick="logout()">Sair</button></div></div></header>
 <div id="viewModeBanner" style="display:none;max-width:1180px;margin:10px auto 0;padding:10px 13px;border:1px solid #fbbf2466;border-radius:12px;background:#422006;color:#fef3c7;font-size:12px;align-items:center;justify-content:space-between;gap:10px"><span id="viewModeText"></span><button onclick="stopNutritionistView()" style="padding:8px 10px;border:1px solid #fcd34d66;border-radius:8px;background:#78350f;color:#fff;font-weight:bold">VOLTAR AO PAINEL</button></div>
 <main>
@@ -4376,9 +4476,10 @@ async function saveActiveHistory(event){
     button.textContent="Salvar os 7 dias";
   }
 }
-function renderViewMode(user){const banner=document.getElementById("viewModeBanner"),text=document.getElementById("viewModeText");if(!banner)return;if(user?.em_visualizacao){banner.style.display="flex";const isMaster=user.ator_papel==="admin";text.textContent="Visualizando o diário de "+(user.email||"cliente")+(isMaster?" como master.":" como nutricionista.")}else{banner.style.display="none"}}
+function renderViewMode(user){const banner=document.getElementById("viewModeBanner"),text=document.getElementById("viewModeText");if(!banner)return;if(user?.em_visualizacao){banner.style.display="flex";const isMaster=user.ator_papel==="admin";text.textContent="Modo somente leitura · consultando o Diário de "+(user.email||"cliente")+(isMaster?" como master.":" como nutricionista. Você pode consultar os dados e gerar relatórios, mas não alterar lançamentos.")}else{banner.style.display="none"}}
+function applyReadOnlyView(user){const readOnly=Boolean(user?.em_visualizacao);document.body.classList.toggle("readOnlyView",readOnly);if(!readOnly)return;const hideIds=["bodyMeasurementCard","platePhotoCard","mealSelector","personalLists","newBase","editBase","profileModal","activeHistoryModal","summaryModal","consumeEditModal","foodModal","newFoodModal","plateReviewModal"];hideIds.forEach(id=>{const el=document.getElementById(id);if(el)el.style.display="none"});const search=document.getElementById("search");if(search&&search.closest(".card"))search.closest(".card").style.display="none";["button[onclick=\"openProfile()\"]",".heroProfile","#goalsDashboard button[onclick=\"openSummary()\"]",".waterQuickButtons","#professionalMarkRead"].forEach(selector=>document.querySelectorAll(selector).forEach(el=>{el.style.display="none"}));document.querySelectorAll("#energyBalanceBox button,#energyBalanceBox input").forEach(el=>{el.style.display="none"});document.querySelectorAll("button,input,select,textarea").forEach(el=>{const action=(el.getAttribute("onclick")||"").toLowerCase();const blocked=/(save|salvar|addwater|customwater|savebody|bodymeasurement|activeenergy|activepreview|favorite|portion|delete|\bdel\(|\bedit\(|opennewfood|openfoodeditor|analyze_plate|readnutrition|saveprofile|calculateprofile|savegoals|applycalculated|onplatephoto|confirmplate|removeplate|food)/.test(action);if(blocked){el.disabled=true;el.setAttribute("aria-disabled","true");el.classList.add("readOnlyDisabled")}})}
 async function stopNutritionistView(){const isMaster=window.currentUser?.ator_papel==="admin";try{await api(isMaster?"/api/admin/stop-view":"/api/nutritionist/stop-view",{method:"POST",headers:{"Content-Type":"application/json"}})}finally{location.href=isMaster?"/admin":"/nutritionist"}}
-let professionalPlanOpen=false,professionalPlanData=null;const professionalWeekDays=[['segunda','Segunda-feira'],['terca','Terça-feira'],['quarta','Quarta-feira'],['quinta','Quinta-feira'],['sexta','Sexta-feira'],['sabado','Sábado'],['domingo','Domingo']];function professionalDayData(key){const item=professionalPlanData?.days?.[key]||{};return{dieta:typeof item==='object'?(item.dieta||''):item,mensagem:typeof item==='object'?(item.mensagem||''):''}}function closeProfessionalDetail(){const detail=document.getElementById('professionalDetailView'),days=document.getElementById('professionalDays');if(detail){detail.style.display='none';detail.innerHTML=''}if(days)days.style.display='grid'}function toggleProfessionalPlan(){const body=document.getElementById('professionalPlanBody'),button=document.getElementById('professionalPlanToggle');if(!body)return;professionalPlanOpen=body.style.display==='none';if(!professionalPlanOpen)closeProfessionalDetail();body.style.display=professionalPlanOpen?'block':'none';if(button)button.textContent=professionalPlanOpen?'OCULTAR ORIENTAÇÕES':'VER ORIENTAÇÕES'}function openProfessionalDay(key){const pair=professionalWeekDays.find(([k])=>k===key)||[key,key],item=professionalDayData(key),detail=document.getElementById('professionalDetailView'),days=document.getElementById('professionalDays');if(!detail||!days)return;detail.innerHTML='<div class="professionalDetailBox"><div class="professionalDetailTitle"><span>'+pair[1]+'</span><span>📅</span></div><div class="professionalDetailSection"><strong>Dieta do dia</strong><div class="professionalDetailText">'+(item.dieta?esc(item.dieta):'Nenhuma dieta prescrita para este dia.')+'</div></div>'+(item.mensagem?'<div class="professionalDetailSection"><strong>Mensagem do dia</strong><div class="professionalDetailText">'+esc(item.mensagem)+'</div></div>':'')+'<button type="button" class="professionalBackButton" onclick="closeProfessionalDetail()">← VOLTAR</button></div>';days.style.display='none';detail.style.display='block'}function openProfessionalMessages(){const detail=document.getElementById('professionalDetailView'),days=document.getElementById('professionalDays');if(!detail||!days)return;const dayMessages=professionalWeekDays.map(([key,label])=>{const item=professionalDayData(key);return item.mensagem?'<div class="professionalDetailSection"><strong>'+label+'</strong><div class="professionalDetailText">'+esc(item.mensagem)+'</div></div>':''}).join(''),notes=(professionalPlanData?.notes||[]).map(n=>'<div class="professionalDetailSection"><strong>Recado</strong><div class="professionalDetailText">'+esc(n.recado)+'<small style="display:block;color:#94a3b8;margin-top:5px">'+fmt(n.criado_em)+'</small></div></div>').join('');detail.innerHTML='<div class="professionalDetailBox"><div class="professionalDetailTitle"><span>Mensagens</span><span>💬</span></div>'+(dayMessages||notes?dayMessages+notes:'<div class="professionalDetailText">Nenhuma mensagem disponível.</div>')+'<button type="button" class="professionalBackButton" onclick="closeProfessionalDetail()">← VOLTAR</button></div>';days.style.display='none';detail.style.display='block'}async function loadProfessionalPlan(){try{const j=await api('/api/professional-plan');professionalPlanData=j;const card=document.getElementById('professionalPlanCard');if(!card)return;if(!j.nutricionista){card.style.display='none';return}card.style.display='block';card.classList.toggle('professionalNew',Boolean(j.has_new));const professionalName=j.nutricionista?.nome||j.nutricionista?.email||'';document.getElementById('professionalPlanNotice').textContent=j.has_new?'Há uma nova orientação'+(professionalName?' de '+professionalName:'')+'.':(j.updated_at?'Orientações disponíveis'+(professionalName?' de '+professionalName:'')+'.':'Aguardando a prescrição de '+(professionalName||'seu nutricionista')+'.');document.getElementById('professionalDays').innerHTML=professionalWeekDays.map(([key,label])=>'<button type="button" class="professionalDayBox" onclick="openProfessionalDay(\''+key+'\')"><span class="professionalDayLabel">'+label+'</span><span class="professionalBoxArrow">›</span></button>').join('')+'<button type="button" class="professionalDayBox" onclick="openProfessionalMessages()"><span class="professionalDayLabel">Mensagens</span><span class="professionalBoxArrow">›</span></button>';closeProfessionalDetail();const readButton=document.getElementById('professionalMarkRead');if(readButton)readButton.style.display=!j.can_manage&&j.has_new?'block':'none';if(j.has_new&&!professionalPlanOpen)toggleProfessionalPlan()}catch(e){const card=document.getElementById('professionalPlanCard');if(card)card.style.display='none'}}async function markProfessionalPlanRead(){try{await api('/api/professional-plan/read',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken}});await loadProfessionalPlan()}catch(e){alert(e.message)}}function showApp(user,csrf=""){window.currentUser=user||null;if(user?.papel==="nutricionista"&&!user?.em_visualizacao){location.href="/nutritionist";return}csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";const masterPanelBtn=document.getElementById("masterPanelBtn");if(masterPanelBtn)masterPanelBtn.style.display=user?.papel==="admin"&&!user?.em_visualizacao?"inline-block":"none";renderViewMode(user);mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh(),loadProfessionalPlan()]).then(()=>{if(!profileRequired&&profileInputsAreComplete())return ensureYesterdayActivePrompt()}).catch(e=>console.error("carregamento inicial:",e))}
+let professionalPlanOpen=false,professionalPlanData=null;const professionalWeekDays=[['segunda','Segunda-feira'],['terca','Terça-feira'],['quarta','Quarta-feira'],['quinta','Quinta-feira'],['sexta','Sexta-feira'],['sabado','Sábado'],['domingo','Domingo']];function professionalDayData(key){const item=professionalPlanData?.days?.[key]||{};return{dieta:typeof item==='object'?(item.dieta||''):item,mensagem:typeof item==='object'?(item.mensagem||''):''}}function closeProfessionalDetail(){const detail=document.getElementById('professionalDetailView'),days=document.getElementById('professionalDays');if(detail){detail.style.display='none';detail.innerHTML=''}if(days)days.style.display='grid'}function toggleProfessionalPlan(){const body=document.getElementById('professionalPlanBody'),button=document.getElementById('professionalPlanToggle');if(!body)return;professionalPlanOpen=body.style.display==='none';if(!professionalPlanOpen)closeProfessionalDetail();body.style.display=professionalPlanOpen?'block':'none';if(button)button.textContent=professionalPlanOpen?'OCULTAR ORIENTAÇÕES':'VER ORIENTAÇÕES'}function openProfessionalDay(key){const pair=professionalWeekDays.find(([k])=>k===key)||[key,key],item=professionalDayData(key),detail=document.getElementById('professionalDetailView'),days=document.getElementById('professionalDays');if(!detail||!days)return;detail.innerHTML='<div class="professionalDetailBox"><div class="professionalDetailTitle"><span>'+pair[1]+'</span><span>📅</span></div><div class="professionalDetailSection"><strong>Dieta do dia</strong><div class="professionalDetailText">'+(item.dieta?esc(item.dieta):'Nenhuma dieta prescrita para este dia.')+'</div></div>'+(item.mensagem?'<div class="professionalDetailSection"><strong>Mensagem do dia</strong><div class="professionalDetailText">'+esc(item.mensagem)+'</div></div>':'')+'<button type="button" class="professionalBackButton" onclick="closeProfessionalDetail()">← VOLTAR</button></div>';days.style.display='none';detail.style.display='block'}function openProfessionalMessages(){const detail=document.getElementById('professionalDetailView'),days=document.getElementById('professionalDays');if(!detail||!days)return;const dayMessages=professionalWeekDays.map(([key,label])=>{const item=professionalDayData(key);return item.mensagem?'<div class="professionalDetailSection"><strong>'+label+'</strong><div class="professionalDetailText">'+esc(item.mensagem)+'</div></div>':''}).join(''),notes=(professionalPlanData?.notes||[]).map(n=>'<div class="professionalDetailSection"><strong>Recado</strong><div class="professionalDetailText">'+esc(n.recado)+'<small style="display:block;color:#94a3b8;margin-top:5px">'+fmt(n.criado_em)+'</small></div></div>').join('');detail.innerHTML='<div class="professionalDetailBox"><div class="professionalDetailTitle"><span>Mensagens</span><span>💬</span></div>'+(dayMessages||notes?dayMessages+notes:'<div class="professionalDetailText">Nenhuma mensagem disponível.</div>')+'<button type="button" class="professionalBackButton" onclick="closeProfessionalDetail()">← VOLTAR</button></div>';days.style.display='none';detail.style.display='block'}async function loadProfessionalPlan(){try{const j=await api('/api/professional-plan');professionalPlanData=j;const card=document.getElementById('professionalPlanCard');if(!card)return;if(!j.nutricionista){card.style.display='none';return}card.style.display='block';card.classList.toggle('professionalNew',Boolean(j.has_new));const professionalName=j.nutricionista?.nome||j.nutricionista?.email||'';document.getElementById('professionalPlanNotice').textContent=j.has_new?'Há uma nova orientação'+(professionalName?' de '+professionalName:'')+'.':(j.updated_at?'Orientações disponíveis'+(professionalName?' de '+professionalName:'')+'.':'Aguardando a prescrição de '+(professionalName||'seu nutricionista')+'.');document.getElementById('professionalDays').innerHTML=professionalWeekDays.map(([key,label])=>'<button type="button" class="professionalDayBox" onclick="openProfessionalDay(\''+key+'\')"><span class="professionalDayLabel">'+label+'</span><span class="professionalBoxArrow">›</span></button>').join('')+'<button type="button" class="professionalDayBox" onclick="openProfessionalMessages()"><span class="professionalDayLabel">Mensagens</span><span class="professionalBoxArrow">›</span></button>';closeProfessionalDetail();const readButton=document.getElementById('professionalMarkRead');if(readButton)readButton.style.display=!j.can_manage&&j.has_new?'block':'none';if(j.has_new&&!professionalPlanOpen)toggleProfessionalPlan()}catch(e){const card=document.getElementById('professionalPlanCard');if(card)card.style.display='none'}}async function markProfessionalPlanRead(){try{await api('/api/professional-plan/read',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken}});await loadProfessionalPlan()}catch(e){alert(e.message)}}function showApp(user,csrf=""){window.currentUser=user||null;if(user?.papel==="nutricionista"&&!user?.em_visualizacao){location.href="/nutritionist";return}csrfToken=csrf||"";currentUserId=String(user?.id||"");document.getElementById("authScreen").style.display="none";document.getElementById("userEmail").textContent=user?.email||"";const masterPanelBtn=document.getElementById("masterPanelBtn");if(masterPanelBtn)masterPanelBtn.style.display=user?.papel==="admin"&&!user?.em_visualizacao?"inline-block":"none";renderViewMode(user);applyReadOnlyView(user);mealsUI();loadPersonalLists();Promise.all([loadProfile(),refresh(),loadProfessionalPlan()]).then(()=>{applyReadOnlyView(user);if(!user?.em_visualizacao&&!profileRequired&&profileInputsAreComplete())return ensureYesterdayActivePrompt()}).catch(e=>console.error("carregamento inicial:",e))}
 setInterval(()=>{if(currentUserId)api("/api/heartbeat",{headers:{"X-CSRF-Token":csrfToken}}).catch(()=>{})},30000);
 async function login(){try{setAuthStatus("Entrando...");const j=await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
 async function register(){try{setAuthStatus("Criando conta...");const j=await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:document.getElementById("authEmail").value,password:document.getElementById("authPassword").value})});showApp(j.user,j.csrf)}catch(e){setAuthStatus(e.message)}}
@@ -5045,7 +5146,7 @@ async function downloadReport(){
   const start=document.getElementById("periodStart").value,end=document.getElementById("periodEnd").value,button=document.getElementById("downloadReportBtn");
   if(!start||!end||start>end){alert("Informe um período válido antes de gerar o relatório.");return}
   const days=Math.round((new Date(end+"T12:00:00")-new Date(start+"T12:00:00"))/86400000)+1;
-  if(days<1||days>30){alert("Escolha um período entre 1 e 30 dias para o PDF.");return}
+  if(days<1||days>60){alert("Escolha um período entre 1 e 60 dias para o PDF.");return}
   let pdfTab=null,url="";
   try{
     if(button){button.disabled=true;button.textContent="GERANDO PDF..."}
@@ -5101,21 +5202,34 @@ async function loadHistory(start,end,periodBodyMeasurements=[],requestSeq=period
     const maxSaldo=Math.max(1,...j.days.map(x=>Math.abs(Number(x.saldo_kcal||0))));
     const weightMeasurements=(j.body_measurements||[]).map(x=>({data:String(x.data||""),peso:Number(x.peso_kg||0)})).filter(x=>x.peso>0).sort((a,b)=>a.data.localeCompare(b.data));
     const virtualMeasurements=(j.days||[]).map(x=>({data:String(x.data||""),peso:Number(x.virtual_weight_kg)})).filter(x=>Number.isFinite(x.peso)&&x.peso>0);
+    const weeklyAverages=(j.weekly_weight_averages||[]).map(x=>({data:String(x.data||""),label:String(x.label||""),startOffset:Number(x.start_offset||0),endOffset:Number.isFinite(Number(x.end_offset))?Number(x.end_offset):Number(x.start_offset||0),total:Number(x.peso_medio_kg||0),dry:Number(x.massa_sem_agua_media_kg||0)})).filter(x=>x.total>0&&x.dry>0&&x.dry<=x.total);
     const weightByDay=new Map(j.days.map((x,index)=>[x.data,index]));
-    const allWeightValues=[...weightMeasurements.map(x=>x.peso),...virtualMeasurements.map(x=>x.peso)];
+    const allWeightValues=[...weightMeasurements.map(x=>x.peso),...virtualMeasurements.map(x=>x.peso),...weeklyAverages.flatMap(x=>[x.total,x.dry])];
     const weightMin=allWeightValues.length?Math.min(...allWeightValues):0;
     const weightMax=allWeightValues.length?Math.max(...allWeightValues):0;
     const weightRange=Math.max(0.5,weightMax-weightMin);
     const weightPoints=weightMeasurements.map(x=>{const index=weightByDay.get(x.data);const px=((index+0.5)/Math.max(1,j.days.length))*100;const py=94-((x.peso-weightMin)/weightRange)*78;return {x,px,py}}).filter(x=>Number.isFinite(x.px)&&Number.isFinite(x.py));
     const virtualPoints=virtualMeasurements.map(x=>{const index=weightByDay.get(x.data);const px=((index+0.5)/Math.max(1,j.days.length))*100;const py=94-((x.peso-weightMin)/weightRange)*78;return {x,px,py}}).filter(x=>Number.isFinite(x.px)&&Number.isFinite(x.py));
     const integerLabel=v=>Math.round(Number(v)||0).toLocaleString("pt-BR");
-    const weightSvg=(weightPoints.length||virtualPoints.length)?`<div style='position:absolute;left:12px;right:12px;top:30px;height:150px;z-index:3;pointer-events:none'><svg viewBox='0 0 100 100' preserveAspectRatio='none' style='width:100%;height:100%;overflow:visible'><polyline points='${virtualPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#eab308' stroke-width='1.4' vector-effect='non-scaling-stroke'/>${virtualPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.25' fill='#facc15' stroke='#713f12' stroke-width='.5' vector-effect='non-scaling-stroke'/><text x='${p.px}' y='${Math.min(96,p.py+7)}' text-anchor='middle' fill='#facc15' font-size='2.9' font-weight='700'>${fmt(p.x.peso)} kg</text>`).join("")}<polyline points='${weightPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#f472b6' stroke-width='1.5' vector-effect='non-scaling-stroke'/>${weightPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.8' fill='#f472b6' stroke='#fff' stroke-width='.7' vector-effect='non-scaling-stroke'/><text x='${p.px}' y='${Math.max(7,p.py-4)}' text-anchor='middle' fill='#f9a8d4' font-size='3.2' font-weight='700'>${fmt(p.x.peso)} kg</text>`).join("")}</svg></div>`:"";
+    const weeklyPoint=(item,value)=>{const center=(item.startOffset+item.endOffset)/2;const index=(center+0.5)/Math.max(1,j.days.length)*100;const py=94-((value-weightMin)/weightRange)*78;return {x:index,y:py,value};};
+    const weeklyTotalPoints=weeklyAverages.map(item=>weeklyPoint(item,item.total)).filter(p=>Number.isFinite(p.x)&&Number.isFinite(p.y));
+    const weeklyDryPoints=weeklyAverages.map(item=>weeklyPoint(item,item.dry)).filter(p=>Number.isFinite(p.x)&&Number.isFinite(p.y));
+    const weightSvg=(weightPoints.length||virtualPoints.length||weeklyTotalPoints.length||weeklyDryPoints.length)?`<div style='position:absolute;left:12px;right:12px;top:30px;height:150px;z-index:3;pointer-events:none'><svg viewBox='0 0 100 100' preserveAspectRatio='none' style='width:100%;height:100%;overflow:visible'>
+      <polyline points='${weeklyDryPoints.map(p=>`${p.x},${p.y}`).join(" ")}' fill='none' stroke='#1d4ed8' stroke-width='1.35' vector-effect='non-scaling-stroke'/>
+      ${weeklyDryPoints.map(p=>`<circle cx='${p.x}' cy='${p.y}' r='1.45' fill='#1d4ed8' stroke='#dbeafe' stroke-width='.45' vector-effect='non-scaling-stroke'/><text x='${p.x}' y='${Math.min(96,p.y+7)}' text-anchor='middle' fill='#bfdbfe' font-size='2.8' font-weight='700'>${fmt(p.value)} kg</text>`).join("")}
+      <polyline points='${weeklyTotalPoints.map(p=>`${p.x},${p.y}`).join(" ")}' fill='none' stroke='#60a5fa' stroke-width='1.35' vector-effect='non-scaling-stroke'/>
+      ${weeklyTotalPoints.map(p=>`<circle cx='${p.x}' cy='${p.y}' r='1.45' fill='#60a5fa' stroke='#eff6ff' stroke-width='.45' vector-effect='non-scaling-stroke'/><text x='${p.x}' y='${Math.max(7,p.y-4)}' text-anchor='middle' fill='#dbeafe' font-size='2.8' font-weight='700'>${fmt(p.value)} kg</text>`).join("")}
+      <polyline points='${virtualPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#eab308' stroke-width='1.4' vector-effect='non-scaling-stroke'/>
+      ${virtualPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.25' fill='#facc15' stroke='#713f12' stroke-width='.5' vector-effect='non-scaling-stroke'/><text x='${p.px}' y='${Math.min(96,p.py+7)}' text-anchor='middle' fill='#facc15' font-size='2.9' font-weight='700'>${fmt(p.x.peso)} kg</text>`).join("")}
+      <polyline points='${weightPoints.map(p=>`${p.px},${p.py}`).join(" ")}' fill='none' stroke='#f472b6' stroke-width='1.5' vector-effect='non-scaling-stroke'/>
+      ${weightPoints.map(p=>`<circle cx='${p.px}' cy='${p.py}' r='1.8' fill='#f472b6' stroke='#fff' stroke-width='.7' vector-effect='non-scaling-stroke'/><text x='${p.px}' y='${Math.max(7,p.py-4)}' text-anchor='middle' fill='#f9a8d4' font-size='3.2' font-weight='700'>${fmt(p.x.peso)} kg</text>`).join("")}
+    </svg></div>`:"";
     const head="<h3 style='margin:8px 0'>EVOLUÇÃO DIÁRIA DE CALORIAS CONSUMIDAS</h3>";
     const kcalChart=`<div style='display:grid;grid-template-columns:repeat(${Math.max(1,j.days.length)},minmax(28px,1fr));gap:6px;align-items:end;height:190px;padding:12px;background:#172033;border-radius:12px'>`+j.days.map(x=>{const pct=Math.max(3,Math.round(Number(x.energia_kcal||0)/max*100));const d=x.data.slice(5).split('-').reverse().join('/');return `<div title='${d}: ${fmt(x.energia_kcal)} kcal · ${fmt(x.proteina_g)} g proteína · ${fmt(x.agua_ml)} ml água' style='display:flex;flex-direction:column;align-items:center;justify-content:end;height:100%;gap:4px'><small style='font-size:10px;color:#cbd5e1'>${integerLabel(x.energia_kcal)}</small><div style='width:100%;height:${pct}%;min-height:5px;background:linear-gradient(#22c55e,#166534);border-radius:6px 6px 2px 2px'></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>";
     const bodyChart=bodyCompositionChart(j);
     const energyTitle="<h3 style='margin:14px 0 8px'>SALDO ENERGÉTICO (BASAL + ATIVO − CONSUMO) × PESO</h3>";
     const energyChart=periodGraphScroll(`<div style='position:relative;display:grid;grid-template-columns:repeat(${Math.max(1,j.days.length)},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>${weightSvg}`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const current=Boolean(x.is_current_day);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=current?"linear-gradient(#94a3b8,#64748b)":deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal${current?" · dia atual não incluído no déficit acumulado":""}' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${current?"#cbd5e1":deficit?"#86efac":"#fecdd3"}'>${current?"em andamento":integerLabel(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>",j.days.length);
-    box.innerHTML=head+periodGraphScroll(kcalChart,j.days.length)+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart+"<div style='display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:#cbd5e1'><span><i style='display:inline-block;width:11px;height:11px;background:#22c55e;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Saldo — déficit</span><span><i style='display:inline-block;width:11px;height:11px;background:#ef4444;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Superávit</span><span><i style='display:inline-block;width:11px;height:11px;background:#f472b6;border-radius:50%;vertical-align:-1px;margin-right:4px'></i>Peso real</span><span><i style='display:inline-block;width:11px;height:3px;background:#facc15;vertical-align:4px;margin-right:4px'></i>Peso virtual</span></div><small style='display:block;color:#f9a8d4;margin-top:5px'>Linha rosa: peso aferido. <span style='color:#ca8a04'>Linha amarela: peso virtual estimado pelo saldo acumulado, na proporção de 7.000 kcal = 1 kg, sem incorporar a variação de água.</span></small>";
+    box.innerHTML=head+periodGraphScroll(kcalChart,j.days.length)+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart+"<div style='display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:#cbd5e1'><span><i style='display:inline-block;width:11px;height:11px;background:#22c55e;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Saldo — déficit</span><span><i style='display:inline-block;width:11px;height:11px;background:#ef4444;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Superávit</span><span><i style='display:inline-block;width:11px;height:11px;background:#f472b6;border-radius:50%;vertical-align:-1px;margin-right:4px'></i>Peso real</span><span><i style='display:inline-block;width:11px;height:3px;background:#facc15;vertical-align:4px;margin-right:4px'></i>Peso virtual</span><span><i style='display:inline-block;width:11px;height:3px;background:#1d4ed8;vertical-align:4px;margin-right:4px'></i>Média 7 dias sem água</span><span><i style='display:inline-block;width:11px;height:3px;background:#60a5fa;vertical-align:4px;margin-right:4px'></i>Média 7 dias com água</span></div><small style='display:block;color:#f9a8d4;margin-top:5px'>Linha rosa: peso aferido. <span style='color:#ca8a04'>Linha amarela: peso virtual estimado pelo saldo acumulado, na proporção de 7.000 kcal = 1 kg, sem incorporar a variação de água.</span> <span style='color:#bfdbfe'>Linhas azuis: médias das aferições disponíveis em cada bloco consecutivo de 7 dias; azul escuro sem água e azul claro com o peso total.</span></small>";
     }catch(e){
     if(e&&e.name==="AbortError")return;
     if(requestSeq!==periodRequestSeq)return;
@@ -5194,7 +5308,7 @@ async function loadPeriod(){
   if(!s||!e){alert("Informe as duas datas.");return;}
   if(s>e){alert("A data inicial não pode ser maior que a final.");return;}
   const selectedDays=Math.round((new Date(e+"T12:00:00")-new Date(s+"T12:00:00"))/86400000)+1;
-  if(selectedDays>30){alert("O relatório permite no máximo 30 dias por vez.");return;}
+  if(selectedDays>60){alert("O relatório permite no máximo 60 dias por vez.");return;}
   const requestSeq=++periodRequestSeq;
   if(periodAbortController)periodAbortController.abort();
   const controller=new AbortController();
@@ -5231,7 +5345,7 @@ async function loadPeriod(){
           ["piridoxina_mg","B6","mg"],["colesterol_mg","Colesterol","mg"]
         ].map(x=>`<div class="metric period-nutrient-source" data-nutrient="${x[0]}" data-start="${j.start}" data-end="${j.end}"><small>${x[1]} ⓘ</small><b>${fmt(j.daily[x[0]])} ${x[2]}</b><small>Média: ${fmt(Number(j.daily[x[0]]||0)/days)} ${x[2]}/dia</small></div>`).join("")}</div>
       </details>`;
-    const historyPayload={days:(j.energy?.days||[]).map(x=>({...x,energia_kcal:Number(x.consumed_kcal||0),proteina_g:Number(x.proteina_g||0),agua_ml:Number(x.agua_ml||0)})),energy_totals:j.energy?.totals||{},body_measurements:j.body_measurements||[]};
+    const historyPayload={days:(j.energy?.days||[]).map(x=>({...x,energia_kcal:Number(x.consumed_kcal||0),proteina_g:Number(x.proteina_g||0),agua_ml:Number(x.agua_ml||0)})),energy_totals:j.energy?.totals||{},body_measurements:j.body_measurements||[],weekly_weight_averages:j.weekly_weight_averages||[]};
     loadHistory(s,e,j.body_measurements||[],requestSeq,controller.signal,historyPayload);
   }catch(err){
     if(err&&err.name==="AbortError")return;
@@ -5889,7 +6003,7 @@ class H(BaseHTTPRequestHandler):
             cur+=timedelta(days=1)
           _apply_virtual_weight_series(out, mmap.values())
           totals["estimated_fat_loss_kg"]=round(max(0.0,totals["saldo_kcal"])/KCAL_PER_KG_FAT,3)
-          self.js({"days":out,"energy_totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()},"body_measurements":list(mmap.values())});return
+          self.js({"days":out,"energy_totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()},"body_measurements":list(mmap.values()),"weekly_weight_averages":_weekly_weight_averages(d1,d2,mmap.values())});return
         if p.path=="/api/period":
             q=parse_qs(p.query)
             start=q.get("start",[""])[0]
@@ -5897,7 +6011,7 @@ class H(BaseHTTPRequestHandler):
             try:
                 d1=date.fromisoformat(start);d2=date.fromisoformat(end)
                 if d1>d2: raise ValueError("Período inválido")
-                if (d2-d1).days > 29: raise ValueError("O relatório permite no máximo 30 dias por vez.")
+                if (d2-d1).days >= REPORT_MAX_DAYS: raise ValueError("O relatório permite no máximo 60 dias por vez.")
             except Exception as e:
                 self.js({"error":"Datas inválidas"},400);return
             c=ddb()
@@ -5947,6 +6061,7 @@ class H(BaseHTTPRequestHandler):
                 "start_br":d1.strftime("%d/%m/%Y"),"end_br":d2.strftime("%d/%m/%Y"),
                 "daily":calc(rows,self.user["id"],food_nutrient_cache),"water":float(water or 0),"goals":goal_dict(g),"goal_context":goal_context,
                 "body_measurements":list(mmap.values()),
+                "weekly_weight_averages":_weekly_weight_averages(d1,d2,mmap.values()),
                 "energy":{"days":energy_days,"totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()}}
             })
             return
