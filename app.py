@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V75 · Calendário PDF por tamanho real da semana"
+APP_VERSION = "V77 · Escalas verticais separadas no gráfico"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -2017,16 +2017,43 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no, week_start=0, w
     pdf.drawRightString(right, 6 * mm, f"Página {page_no}")
 
 
-def _pdf_one_page_report(pdf, dataset, page_no=1):
+def _summary_table_slices(dataset):
+    """Divide a tabela-resumo em páginas conforme a altura real da folha A3."""
+    total = len(dataset.get("days") or [])
+    if total <= 0:
+        return [(0, 0)]
+    _, page_height = landscape(A3)
+    available = page_height - 29 * mm - 18 * mm
+    header_height = 20.0
+    row_height = 20.0
+    max_rows = max(1, int((available - header_height - row_height) // row_height))
+    slices = []
+    start = 0
+    while start < total:
+        remaining = total - start
+        if remaining <= max_rows:
+            end = total
+        else:
+            end = min(total, start + max_rows)
+        slices.append((start, end))
+        start = end
+    return slices
+
+
+def _pdf_one_page_report(pdf, dataset, page_no=1, row_start=0, row_end=None, continuation=None, continuation_total=None):
     width, height = landscape(A3)
     pdf.setFillColor(colors.HexColor("#0b1728")); pdf.rect(0, height - 25 * mm, width, 25 * mm, stroke=0, fill=1)
     pdf.setFillColor(colors.white); pdf.setFont("Helvetica-Bold", 15); pdf.drawString(12 * mm, height - 12 * mm, "RESUMO DE ALIMENTAÇÃO")
     pdf.setFillColor(colors.HexColor("#bfdbfe")); pdf.setFont("Helvetica", 6.4)
     goal_label = str((dataset.get("goals_context") or {}).get("label") or "Metas do período")
-    pdf.drawString(12 * mm, height - 18 * mm, f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')} · consumo diário, metas e acumulados · {goal_label}")
+    continuation_label = f" · continuação {continuation}/{continuation_total}" if continuation and continuation_total and continuation_total > 1 else ""
+    pdf.drawString(12 * mm, height - 18 * mm, f"{dataset['name']} · {dataset['start'].strftime('%d/%m/%Y')} a {dataset['end'].strftime('%d/%m/%Y')}{continuation_label} · consumo diário, metas e acumulados · {goal_label}")
     header = ["Dia"] + [f"{metric[2]}{metric[3]}" for metric in REPORT_METRICS] + ["Médiameta"]
+    row_start = max(0, int(row_start or 0))
+    row_end = len(dataset["days"]) if row_end is None else min(len(dataset["days"]), int(row_end))
+    is_last_summary_page = row_end >= len(dataset["days"])
     table_rows = []
-    for day in dataset["days"]:
+    for day in dataset["days"][row_start:row_end]:
         cells, percents = [day["label"]], []
         for key, goal_key, _, unit, _ in REPORT_METRICS:
             actual, goal = float(day["values"].get(key, 0) or 0), float(dataset["goals"].get(goal_key, 0) or 0)
@@ -2044,7 +2071,8 @@ def _pdf_one_page_report(pdf, dataset, page_no=1):
         if goal: all_pcts.append(pct)
     total.append(f"{sum(all_pcts)/len(all_pcts):.0f}%" if all_pcts else "—")
     usable = width - 24 * mm; column_widths = [12 * mm] + [((usable - 12 * mm - 16 * mm) / 7)] * 7 + [16 * mm]
-    table = Table([header] + table_rows + [total], colWidths=column_widths)
+    table_data = [header] + table_rows + ([total] if is_last_summary_page else [])
+    table = Table(table_data, colWidths=column_widths)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10243a")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 7), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
@@ -2357,8 +2385,15 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
     chart_top = summary_top - summary_h - 12 * mm
 
     chart_height = chart_top - chart_bottom
-
-    mid_y = chart_bottom + chart_height / 2
+    # A escala vertical fica dividida em duas áreas: barras de saldo na parte
+    # superior e peso real/virtual/médias na faixa inferior. A quantidade de
+    # dias e os rótulos horizontais não são alterados por esta separação.
+    weight_band_bottom = chart_bottom + 5 * mm
+    weight_band_top = chart_bottom + 52 * mm
+    bar_area_bottom = weight_band_top + 8 * mm
+    bar_area_top = chart_top - 8 * mm
+    bar_area_height = max(35 * mm, bar_area_top - bar_area_bottom)
+    mid_y = bar_area_bottom + bar_area_height / 2
 
     # Fundo do gráfico
     pdf.setFillColor(colors.HexColor("#ffffff"))
@@ -2380,7 +2415,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
 
     for step in range(5):
 
-        y = chart_bottom + chart_height * step / 4
+        y = bar_area_bottom + bar_area_height * step / 4
 
         pdf.setStrokeColor(colors.HexColor("#e2e8f0"))
         pdf.line(
@@ -2480,7 +2515,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
 
         # Altura máxima disponível
         max_bar_h = (
-            chart_height / 2
+            bar_area_height / 2
         ) - 10 * mm
 
         bar_h = (
@@ -2516,7 +2551,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
 
             # valor acima da barra
             value_y = min(
-                chart_top - 8 * mm,
+                bar_area_top - 2 * mm,
                 y + bar_h + 3 * mm
             )
 
@@ -2544,7 +2579,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
 
             # valor abaixo da barra
             value_y = max(
-                chart_bottom + 9 * mm,
+                bar_area_bottom + 9 * mm,
                 y - 5 * mm
             )
 
@@ -2574,26 +2609,21 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
         # VALOR DA BARRA
         # ========================================================
 
-        # Em períodos longos, os valores continuam disponíveis nas barras e
-        # no PDF, mas os rótulos são espaçados para não ficarem sobrepostos.
-        value_stride = 1 if count <= 21 else 2 if count <= 35 else 7
-        date_stride = 1 if count <= 14 else 2 if count <= 35 else 7
-        show_value = count <= 21 or idx % value_stride == 0 or idx == count - 1 or is_current_day
-        show_date = count <= 14 or idx % date_stride == 0 or idx == count - 1
-        if show_value:
-            pdf.setFillColor(colors.HexColor("#334155"))
-            pdf.setFont("Helvetica-Bold", 8 if count <= 21 else 6.4)
-            value_label = "EM ANDAMENTO" if is_current_day else f"{value:,.0f}".replace(",", ".")
-            pdf.drawCentredString(x + bar_w / 2, value_y, value_label)
+        # ========================================================
+        # VALOR DA BARRA
+        # ========================================================
+        pdf.setFillColor(colors.HexColor("#334155"))
+        pdf.setFont("Helvetica-Bold", 8)
+        value_label = "EM ANDAMENTO" if is_current_day else f"{value:,.0f}".replace(",", ".")
+        pdf.drawCentredString(x + bar_w / 2, value_y, value_label)
 
         # ========================================================
         # DATA / DIA
         # ========================================================
         label = str(item.get("label") or "")
-        if show_date:
-            pdf.setFillColor(colors.HexColor("#475569"))
-            pdf.setFont("Helvetica-Bold", 8 if count <= 14 else 6.5)
-            pdf.drawCentredString(x + bar_w / 2, chart_bottom + 3 * mm, label)
+        pdf.setFillColor(colors.HexColor("#475569"))
+        pdf.setFont("Helvetica-Bold", 8 if count <= 10 else 6.5)
+        pdf.drawCentredString(x + bar_w / 2, weight_band_top + 3 * mm, label)
 
     # ============================================================
     # LINHA DE PESO (EIXO SECUNDÁRIO EM KG)
@@ -2612,12 +2642,24 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
     weight_items = [item for item in weight_items if item]
     virtual_items = [item for item in days if float(item.get("virtual_weight_kg") or 0) > 0]
     if weight_items or virtual_items or weekly_averages:
-        weight_values = [float(item.get("peso_kg") or 0) for item in weight_items] + [float(item.get("virtual_weight_kg") or 0) for item in virtual_items] + [float(item.get("peso_medio_kg") or 0) for item in weekly_averages] + [float(item.get("massa_sem_agua_media_kg") or 0) for item in weekly_averages]
-        weight_min = min(weight_values)
-        weight_max = max(weight_values)
-        weight_range = max(0.5, weight_max - weight_min)
-        weight_bottom = chart_bottom + 8 * mm
-        weight_top = chart_top - 10 * mm
+        # Duas escalas verticais independentes: peso total/real/virtual
+        # ocupa a faixa superior e massa sem água ocupa a faixa inferior.
+        total_values = [float(item.get("peso_kg") or 0) for item in weight_items] + [float(item.get("virtual_weight_kg") or 0) for item in virtual_items] + [float(item.get("peso_medio_kg") or 0) for item in weekly_averages]
+        dry_values = [float(item.get("massa_sem_agua_media_kg") or 0) for item in weekly_averages]
+        if not dry_values:
+            dry_values = [max(0.0, value - 50.0) for value in total_values]
+        total_min = min(total_values or [0.0]); total_max = max(total_values or [1.0])
+        total_range = max(0.5, total_max - total_min)
+        total_pad = max(0.15, total_range * 0.08)
+        total_min -= total_pad; total_max += total_pad; total_range = max(0.5, total_max - total_min)
+        dry_min = min(dry_values or [0.0]); dry_max = max(dry_values or [1.0])
+        dry_range = max(0.5, dry_max - dry_min)
+        dry_pad = max(0.15, dry_range * 0.10)
+        dry_min -= dry_pad; dry_max += dry_pad; dry_range = max(0.5, dry_max - dry_min)
+        total_bottom = weight_band_bottom + 19 * mm
+        total_top = weight_band_top - 7 * mm
+        dry_bottom = weight_band_bottom + 4 * mm
+        dry_top = weight_band_bottom + 16 * mm
         weight_points = []
         for item in days:
             body = body_by_day.get(str(item.get("data")))
@@ -2626,7 +2668,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             idx = days.index(item)
             x = chart_left + (idx + 0.5) * step_x
             value = float(body.get("peso_kg") or 0)
-            y = weight_bottom + ((value - weight_min) / weight_range) * (weight_top - weight_bottom)
+            y = total_bottom + ((value - total_min) / total_range) * (total_top - total_bottom)
             weight_points.append((x, y, value))
         virtual_points = []
         for item in days:
@@ -2635,7 +2677,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
                 continue
             idx = days.index(item)
             x = chart_left + (idx + 0.5) * step_x
-            y = weight_bottom + ((value - weight_min) / weight_range) * (weight_top - weight_bottom)
+            y = total_bottom + ((value - total_min) / total_range) * (total_top - total_bottom)
             virtual_points.append((x, y, value))
         weekly_total_points = []
         weekly_dry_points = []
@@ -2646,10 +2688,21 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             x = chart_left + (center_offset + 0.5) * step_x
             total_value = float(item.get("peso_medio_kg") or 0)
             dry_value = float(item.get("massa_sem_agua_media_kg") or 0)
-            total_y = weight_bottom + ((total_value - weight_min) / weight_range) * (weight_top - weight_bottom)
-            dry_y = weight_bottom + ((dry_value - weight_min) / weight_range) * (weight_top - weight_bottom)
+            total_y = total_bottom + ((total_value - total_min) / total_range) * (total_top - total_bottom)
+            dry_y = dry_bottom + ((dry_value - dry_min) / dry_range) * (dry_top - dry_bottom)
             weekly_total_points.append((x, total_y, total_value, str(item.get("label") or "")))
             weekly_dry_points.append((x, dry_y, dry_value, str(item.get("label") or "")))
+        pdf.setFillColor(colors.HexColor("#f8fafc"))
+        pdf.roundRect(chart_left, weight_band_bottom, chart_right - chart_left, weight_band_top - weight_band_bottom, 2 * mm, stroke=0, fill=1)
+        pdf.setStrokeColor(colors.HexColor("#cbd5e1"))
+        pdf.setLineWidth(0.5)
+        pdf.line(chart_left, weight_band_top, chart_right, weight_band_top)
+        pdf.setFillColor(colors.HexColor("#64748b"))
+        pdf.setFont("Helvetica-Bold", 6.5)
+        pdf.drawString(chart_left + 3 * mm, weight_band_top - 4 * mm, "PESO TOTAL / REAL / VIRTUAL")
+        pdf.setFillColor(colors.HexColor("#1e3a8a"))
+        pdf.setFont("Helvetica-Bold", 6.0)
+        pdf.drawString(chart_left + 3 * mm, weight_band_bottom + 1.5 * mm, "PESO SEM ÁGUA — escala própria")
         pdf.setStrokeColor(colors.HexColor("#1d4ed8"))
         pdf.setLineWidth(1.5)
         for first, second in zip(weekly_dry_points, weekly_dry_points[1:]):
@@ -2659,7 +2712,7 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             pdf.circle(x, y, 1.55 * mm, stroke=0, fill=1)
             pdf.setFillColor(colors.HexColor("#1e3a8a"))
             pdf.setFont("Helvetica-Bold", 6.5)
-            pdf.drawCentredString(x, max(weight_bottom + 2 * mm, y - 4 * mm), f"{value:.1f} kg")
+            pdf.drawCentredString(x, max(dry_bottom + 1 * mm, y - 3 * mm), f"{value:.1f} kg")
         pdf.setStrokeColor(colors.HexColor("#60a5fa"))
         pdf.setLineWidth(1.5)
         for first, second in zip(weekly_total_points, weekly_total_points[1:]):
@@ -2669,39 +2722,41 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
             pdf.circle(x, y, 1.55 * mm, stroke=0, fill=1)
             pdf.setFillColor(colors.HexColor("#0369a1"))
             pdf.setFont("Helvetica-Bold", 6.5)
-            pdf.drawCentredString(x, min(weight_top - 2 * mm, y + 4 * mm), f"{value:.1f} kg")
+            pdf.drawCentredString(x, min(total_top - 1 * mm, y + 3 * mm), f"{value:.1f} kg")
 
         pdf.setStrokeColor(colors.HexColor("#ca8a04"))
         pdf.setLineWidth(1.5)
         for first, second in zip(virtual_points, virtual_points[1:]):
             pdf.line(first[0], first[1], second[0], second[1])
-        for point_index, (x, y, value) in enumerate(virtual_points):
+        for x, y, value in virtual_points:
             pdf.setFillColor(colors.HexColor("#facc15"))
             pdf.circle(x, y, 1.45 * mm, stroke=0, fill=1)
-            if len(virtual_points) <= 14 or point_index % 7 == 0 or point_index == len(virtual_points) - 1:
-                pdf.setFillColor(colors.HexColor("#a16207"))
-                pdf.setFont("Helvetica-Bold", 6.2)
-                pdf.drawCentredString(x, max(weight_bottom + 2 * mm, y - 4 * mm), f"{value:.1f} kg")
+            pdf.setFillColor(colors.HexColor("#a16207"))
+            pdf.setFont("Helvetica-Bold", 6.5)
+            pdf.drawCentredString(x, max(total_bottom + 1 * mm, y - 3 * mm), f"{value:.1f} kg")
         pdf.setStrokeColor(colors.HexColor("#db2777"))
         pdf.setLineWidth(2.0)
         for first, second in zip(weight_points, weight_points[1:]):
             pdf.line(first[0], first[1], second[0], second[1])
-        for point_index, (x, y, value) in enumerate(weight_points):
+        for x, y, value in weight_points:
             pdf.setFillColor(colors.HexColor("#ec4899"))
             pdf.circle(x, y, 2.2 * mm, stroke=0, fill=1)
             pdf.setStrokeColor(colors.white)
             pdf.setLineWidth(0.7)
             pdf.circle(x, y, 2.2 * mm, stroke=1, fill=0)
-            if len(weight_points) <= 14 or point_index % 7 == 0 or point_index == len(weight_points) - 1:
-                pdf.setFillColor(colors.HexColor("#9d174d"))
-                pdf.setFont("Helvetica-Bold", 6.5)
-                pdf.drawCentredString(x, y + 4 * mm, f"{value:.1f} kg")
+            pdf.setFillColor(colors.HexColor("#9d174d"))
+            pdf.setFont("Helvetica-Bold", 7)
+            pdf.drawCentredString(x, min(total_top - 1 * mm, y + 3 * mm), f"{value:.1f} kg")
         pdf.setFillColor(colors.HexColor("#be185d"))
         pdf.setFont("Helvetica-Bold", 7)
         pdf.drawRightString(chart_right, chart_top - 4 * mm, "PESO (kg)")
         pdf.setFont("Helvetica", 6.5)
-        pdf.drawRightString(chart_right, weight_top, f"{weight_max:.1f} kg")
-        pdf.drawRightString(chart_right, weight_bottom - 2, f"{weight_min:.1f} kg")
+        pdf.drawRightString(chart_right, total_top, f"{total_max:.1f} kg")
+        pdf.drawRightString(chart_right, total_bottom - 2, f"{total_min:.1f} kg")
+        pdf.setFillColor(colors.HexColor("#1e3a8a"))
+        pdf.setFont("Helvetica", 5.8)
+        pdf.drawRightString(chart_right, dry_top, f"{dry_max:.1f} kg")
+        pdf.drawRightString(chart_right, dry_bottom - 1, f"{dry_min:.1f} kg")
 
     # ============================================================
     # LEGENDA
@@ -3244,10 +3299,16 @@ def build_food_report_pdf(user_id, start, end):
     pdf = pdf_canvas.Canvas(output, pagesize=landscape(A3), pageCompression=1)
     page_no = 1
 
-    # Página 1: resumo diário e metas do período.
-    _pdf_one_page_report(pdf, dataset, page_no)
+    # Página 1: resumo diário e metas. Se a tabela ultrapassar a altura
+    # disponível, ela continua em páginas próprias antes dos gráficos.
+    summary_slices = _summary_table_slices(dataset)
+    for part_index, (row_start, row_end) in enumerate(summary_slices, start=1):
+        if part_index > 1:
+            pdf.showPage()
+            page_no += 1
+        _pdf_one_page_report(pdf, dataset, page_no, row_start, row_end, part_index, len(summary_slices))
 
-    # Página 2: gráficos com os valores de cada dia.
+    # Página seguinte: gráficos com os valores de cada dia.
     pdf.showPage()
     page_no += 1
     _pdf_daily_charts_page(pdf, dataset, page_no)
