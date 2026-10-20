@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V78 · Nós e rótulos menores no gráfico"
+APP_VERSION = "V79 · Comparação entre períodos no relatório"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -1546,6 +1546,87 @@ def report_period_data(user_id, start, end):
         "energy": {"days": energy_days, "totals": energy_totals},
     }
 
+
+def _comparison_period_ranges(period_start, period_end):
+    """Divide a janela de 60 dias em blocos consecutivos do tamanho solicitado."""
+    if isinstance(period_start, str):
+        period_start = date.fromisoformat(period_start)
+    if isinstance(period_end, str):
+        period_end = date.fromisoformat(period_end)
+    selected_days = (period_end - period_start).days + 1
+    window_end = period_end
+    window_start = window_end - timedelta(days=REPORT_MAX_DAYS - 1)
+    ranges = []
+    cursor_end = window_end
+    while cursor_end >= window_start:
+        cursor_start = max(window_start, cursor_end - timedelta(days=selected_days - 1))
+        ranges.append((cursor_start, cursor_end))
+        cursor_end = cursor_start - timedelta(days=1)
+    return list(reversed(ranges))
+
+
+def _period_comparison_data(user_id, period_start, period_end):
+    """Retorna comparação dos blocos consecutivos dentro dos últimos 60 dias.
+
+    Os pontos usam média diária para que um eventual primeiro bloco parcial
+    continue comparável aos blocos completos. O total bruto também é enviado
+    para o título/tooltip de cada ponto.
+    """
+    if isinstance(period_start, str):
+        period_start = date.fromisoformat(period_start)
+    if isinstance(period_end, str):
+        period_end = date.fromisoformat(period_end)
+    ranges = _comparison_period_ranges(period_start, period_end)
+    window_start = ranges[0][0]
+    window_dataset = report_period_data(user_id, window_start.isoformat(), period_end.isoformat())
+    day_map = {}
+    for item in window_dataset.get("days") or []:
+        try:
+            day_map[date.fromisoformat(str(item.get("data")))] = item
+        except Exception:
+            continue
+
+    metrics = [
+        {"key": key, "label": label, "unit": unit, "color": color}
+        for key, _goal_key, label, unit, color in REPORT_METRICS
+    ]
+    periods = []
+    for block_start, block_end in ranges:
+        block_days = [
+            day_map[day]
+            for day in sorted(day_map)
+            if block_start <= day <= block_end
+        ]
+        count = max(1, (block_end - block_start).days + 1)
+        totals = {}
+        averages = {}
+        for metric in metrics:
+            key = metric["key"]
+            total = sum(float((item.get("values") or {}).get(key, 0) or 0) for item in block_days)
+            totals[key] = round(total, 2)
+            averages[key] = round(total / count, 2)
+        label = f"{block_start.strftime('%d/%m')}–{block_end.strftime('%d/%m')}"
+        if count != (period_end - period_start).days + 1:
+            label += f" ({count} dias)"
+        periods.append({
+            "start": block_start.isoformat(),
+            "end": block_end.isoformat(),
+            "label": label,
+            "days": count,
+            "selected": block_start == period_start and block_end == period_end,
+            "totals": totals,
+            "averages": averages,
+        })
+    return {
+        "window_start": window_start.isoformat(),
+        "window_end": period_end.isoformat(),
+        "period_days": (period_end - period_start).days + 1,
+        "basis": "média diária por bloco; o total bruto fica no ponto",
+        "metrics": metrics,
+        "periods": periods,
+    }
+
+
 def _pdf_header(pdf, title, subtitle, page_size=None):
     width, height = landscape(page_size or A4)
     pdf.setFillColor(colors.HexColor("#0b1728"))
@@ -2808,6 +2889,95 @@ def _pdf_energy_balance_page(pdf, dataset, page_no=1):
     _pdf_footer(pdf, page_no)
 
 
+
+def _pdf_period_comparison_page(pdf, dataset, page_no):
+    """Desenha a comparação nutricional dos blocos consecutivos no PDF."""
+    comparison = dataset.get("period_comparison") or {}
+    periods = comparison.get("periods") or []
+    metrics = comparison.get("metrics") or []
+    width, height = _pdf_header(
+        pdf,
+        "COMPARAÇÃO ENTRE PERÍODOS",
+        f"{dataset['name']} · últimos 60 dias · blocos de {comparison.get('period_days', 0)} dia(s) · média diária",
+        A3,
+    )
+    left, right = 18 * mm, width - 18 * mm
+    top, bottom = height - 52 * mm, 48 * mm
+    if not periods or not metrics:
+        pdf.setFillColor(colors.HexColor("#64748b"))
+        pdf.setFont("Helvetica", 10)
+        pdf.drawString(left, height / 2, "Não há dados suficientes para comparar os períodos.")
+        _pdf_footer(pdf, page_no)
+        return
+
+    plot_left, plot_right = left + 10 * mm, right - 10 * mm
+    plot_top, plot_bottom = top - 8 * mm, bottom + 16 * mm
+    plot_height = plot_top - plot_bottom
+    count = len(periods)
+    step = (plot_right - plot_left) / max(1, count - 1)
+
+    for index, period in enumerate(periods):
+        if period.get("selected"):
+            x = plot_left + index * step
+            band_width = min(22 * mm, step * 0.82 if count > 1 else 22 * mm)
+            pdf.setFillColor(colors.HexColor("#dbeafe"))
+            pdf.roundRect(x - band_width / 2, plot_bottom - 5 * mm, band_width, plot_height + 10 * mm, 2 * mm, stroke=0, fill=1)
+
+    pdf.setStrokeColor(colors.HexColor("#cbd5e1"))
+    pdf.setLineWidth(0.35)
+    for fraction in (0, 0.5, 1):
+        y = plot_bottom + fraction * plot_height
+        pdf.line(plot_left, y, plot_right, y)
+        pdf.setFillColor(colors.HexColor("#94a3b8"))
+        pdf.setFont("Helvetica", 5.5)
+        pdf.drawRightString(plot_left - 2 * mm, y - 1.5, f"{fraction * 100:.0f}")
+
+    for metric in metrics:
+        key = metric["key"]
+        values = [float((period.get("averages") or {}).get(key, 0) or 0) for period in periods]
+        maximum = max(1.0, max(values or [0.0]))
+        points = []
+        for index, value in enumerate(values):
+            x = plot_left + index * step
+            y = plot_bottom + (value / maximum) * plot_height
+            points.append((x, y, value))
+        pdf.setStrokeColor(colors.HexColor(metric["color"]))
+        pdf.setLineWidth(1.1)
+        for first, second in zip(points, points[1:]):
+            pdf.line(first[0], first[1], second[0], second[1])
+        for x, y, _value in points:
+            pdf.setFillColor(colors.HexColor(metric["color"]))
+            pdf.circle(x, y, 1.25, stroke=0, fill=1)
+
+    pdf.setFillColor(colors.HexColor("#475569"))
+    pdf.setFont("Helvetica", 4.8 if count > 20 else 5.8)
+    for index, period in enumerate(periods):
+        x = plot_left + index * step
+        pdf.saveState()
+        pdf.translate(x, plot_bottom - 8 * mm)
+        pdf.rotate(45)
+        pdf.drawString(0, 0, str(period.get("label") or ""))
+        pdf.restoreState()
+
+    pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.setFont("Helvetica", 6.5)
+    pdf.drawString(left, bottom + 4 * mm, "Escala relativa de 0 a 100 para cada nutriente; o ponto preserva o total e a média diária do bloco.")
+    legend_y = bottom - 2 * mm
+    legend_x = left
+    for index, metric in enumerate(metrics):
+        if index and index % 4 == 0:
+            legend_y -= 7 * mm
+            legend_x = left
+        pdf.setStrokeColor(colors.HexColor(metric["color"]))
+        pdf.setLineWidth(1.7)
+        pdf.line(legend_x, legend_y, legend_x + 8 * mm, legend_y)
+        pdf.setFillColor(colors.HexColor("#334155"))
+        pdf.setFont("Helvetica", 6.5)
+        pdf.drawString(legend_x + 10 * mm, legend_y - 1.5, metric["label"])
+        legend_x += 43 * mm
+    _pdf_footer(pdf, page_no)
+
+
 def _pdf_daily_charts_page(pdf, dataset, page_no):
     """Exibe todos os nutrientes em gráficos diários com os valores de cada dia."""
     width, height = _pdf_header(
@@ -3295,6 +3465,7 @@ def build_food_report_pdf(user_id, start, end):
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("A geração de PDF não está disponível. Atualize as dependências do serviço.")
     dataset = report_period_data(user_id, start, end)
+    dataset["period_comparison"] = _period_comparison_data(user_id, dataset["start"], dataset["end"])
     output = io.BytesIO()
     pdf = pdf_canvas.Canvas(output, pagesize=landscape(A3), pageCompression=1)
     page_no = 1
@@ -3327,6 +3498,11 @@ def build_food_report_pdf(user_id, start, end):
     pdf.showPage()
     page_no += 1
     _pdf_energy_balance_page(pdf, dataset, page_no)
+
+    # Página seguinte: comparação entre blocos consecutivos dos últimos 60 dias.
+    pdf.showPage()
+    page_no += 1
+    _pdf_period_comparison_page(pdf, dataset, page_no)
 
     # Páginas seguintes: calendário completo. Cada página recebe somente
     # as semanas que cabem naturalmente; uma semana extensa não é achatada.
@@ -5217,12 +5393,32 @@ function bodyCompositionChart(history){
   const bars=visibleMeasurements.map(x=>`<div title="${esc(x.label)} · peso ${fmt(x.peso)} kg · água ${fmt(x.agua)} kg${x.aguaEstimada?" (estimada)":""} · massa sem água ${fmt(x.seco)} kg" style="display:flex;flex-direction:column;align-items:center;justify-content:end;min-width:0;gap:4px"><small style="font-size:10px;color:#86efac;white-space:nowrap;font-weight:800">${fmt(x.peso)} kg</small><div style="height:190px;width:100%;display:flex;align-items:stretch"><div style="height:100%;width:100%;display:flex;flex-direction:column;border:2px solid #22c55e;border-radius:6px;overflow:hidden;background:#052e16">${seg(x.secoPct,x.seco,"#facc15","#713f12")}${seg(x.aguaPct,x.agua,"#38bdf8","#075985")}</div></div><small style="font-size:9px;color:#cbd5e1;white-space:nowrap">${esc(x.label)}</small><small style="font-size:8px;color:${x.aguaEstimada?"#fbbf24":"#94a3b8"};white-space:nowrap">${x.aguaEstimada?"água estimada":"água medida"}</small></div>`).join("");
   return `<h3 style="margin:14px 0 8px">⚖️ Composição corporal — início e fim, cada barra = 100% do peso</h3><div style="display:grid;grid-template-columns:repeat(${columns},minmax(34px,1fr));gap:6px;align-items:end;height:270px;padding:12px;background:#0f172a;border-radius:12px">${bars}</div><div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:10px;color:#cbd5e1"><span><i style="display:inline-block;width:10px;height:10px;background:#22c55e;border:2px solid #16a34a;border-radius:2px;vertical-align:-2px"></i> Peso total (100%)</span><span><i style="display:inline-block;width:10px;height:10px;background:#38bdf8;border-radius:2px;vertical-align:-2px"></i> Água</span><span><i style="display:inline-block;width:10px;height:10px;background:#facc15;border-radius:2px;vertical-align:-2px"></i> Massa sem água (gordura + massa magra)</span></div><div style="margin-top:8px;padding:10px 12px;background:#172033;border-radius:10px;color:#cbd5e1;font-size:11px;line-height:1.45"><b style="color:#86efac">Paralelo entre déficit e resultado real:</b><br>Saldo energético apurado: ${fmtSigned(saldoKcal)} kcal → variação esperada: <b>${fmtSigned(expected)} kg</b>.<br>Variação real sem água: ${fmtSigned(weightChange)} kg − ${fmtSigned(waterChange)} kg = <b>${fmtSigned(realChange)} kg</b>.<br>Diferença real − prevista: <b>${fmtSigned(difference)} kg</b> · correspondência: <b>${correspondence===null?"—":fmtSigned(correspondence)+"%"}</b> · <b>${coherence}</b>.<br><small>O trecho amarelo reúne gordura e massa magra; a verificação mede a coerência do déficit com a redução do peso sem a variação de água.</small></div>${note}`;
 }
+function periodComparisonChart(comparison){
+  const periods=Array.isArray(comparison?.periods)?comparison.periods:[],metrics=Array.isArray(comparison?.metrics)?comparison.metrics:[];
+  if(!periods.length||!metrics.length)return "";
+  const width=Math.max(820,periods.length*96),height=345,left=58,right=width-18,top=24,bottom=254,plotHeight=bottom-top;
+  const xAt=i=>periods.length===1?(left+right)/2:left+i*(right-left)/Math.max(1,periods.length-1);
+  const escTitle=x=>esc(String(x||""));
+  const valueText=(v,unit)=>unit==="mg"?Math.round(Number(v)||0).toLocaleString("pt-BR"):(unit==="kcal"?Math.round(Number(v)||0).toLocaleString("pt-BR"):(unit==="L"?((Number(v)||0)/1000).toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2}):(Number(v)||0).toLocaleString("pt-BR",{minimumFractionDigits:1,maximumFractionDigits:1})));
+  const selected=periods.map((p,i)=>p.selected?`<rect x='${xAt(i)-38}' y='8' width='76' height='286' rx='8' fill='#1e3a8a' opacity='.22'></rect>`:"").join("");
+  const grid=[0,.25,.5,.75,1].map(f=>{const y=bottom-f*plotHeight;return `<line x1='${left}' y1='${y}' x2='${right}' y2='${y}' stroke='#334155' stroke-width='1'/><text x='${left-8}' y='${y+4}' text-anchor='end' fill='#94a3b8' font-size='10'>${Math.round(f*100)}</text>`}).join("");
+  const lines=metrics.map(m=>{
+    const vals=periods.map(p=>Number((p.averages||{})[m.key]||0)),max=Math.max(1,...vals),points=vals.map((v,i)=>`${xAt(i)},${bottom-(v/max)*plotHeight}`).join(" ");
+    const nodes=periods.map((p,i)=>{const v=vals[i],y=bottom-(v/max)*plotHeight,total=Number((p.totals||{})[m.key]||0);return `<circle cx='${xAt(i)}' cy='${y}' r='3.2' fill='${m.color}' stroke='#0f172a' stroke-width='1'><title>${escTitle(m.label)} · ${escTitle(p.label)} · total ${valueText(total,m.unit)} ${m.unit} · média/dia ${valueText(v,m.unit)} ${m.unit}</title></circle>`}).join("");
+    return `<polyline points='${points}' fill='none' stroke='${m.color}' stroke-width='2.2' vector-effect='non-scaling-stroke'/>${nodes}`;
+  }).join("");
+  const labels=periods.map((p,i)=>`<text x='${xAt(i)}' y='${bottom+21}' text-anchor='middle' fill='${p.selected?"#bfdbfe":"#cbd5e1"}' font-size='${periods.length>20?8:10}' font-weight='${p.selected?700:400}'>${escTitle(p.label)}</text>`).join("");
+  const legend=metrics.map(m=>`<span style='display:inline-flex;align-items:center;gap:4px;margin-right:12px;margin-bottom:5px'><i style='width:18px;height:3px;background:${m.color};display:inline-block;border-radius:4px'></i>${escTitle(m.label)}</span>`).join("");
+  return `<h3 style='margin:14px 0 8px'>COMPARAÇÃO ENTRE PERÍODOS — ÚLTIMOS 60 DIAS</h3><div style='padding:9px 10px;background:#172033;border-radius:10px;color:#cbd5e1;font-size:11px;line-height:1.45;margin-bottom:7px'>Cada linha representa um nutriente. Os blocos têm o mesmo tamanho do período solicitado e avançam para trás até completar 60 dias. O gráfico usa <b>média diária</b> para manter a comparação justa; passe o cursor ou toque em um nó para ver o total e a média daquele bloco.</div><div class='periodGraphScroll'><div style='min-width:${width}px;background:#0f172a;border-radius:12px;padding:10px 10px 2px'><svg viewBox='0 0 ${width} ${height}' style='display:block;width:${width}px;height:${height}px;overflow:visible'>${selected}${grid}${lines}${labels}</svg><div style='display:flex;flex-wrap:wrap;gap:0 4px;color:#cbd5e1;font-size:10px;padding:5px 4px 0'>${legend}</div></div></div>`;
+}
+
 let periodRequestSeq=0;
 let periodAbortController=null;
 async function loadHistory(start,end,periodBodyMeasurements=[],requestSeq=periodRequestSeq,signal=null,preloaded=null){
   const box=document.getElementById("historyChart");if(!box)return;
   try{
     const j=preloaded||await api("/api/history?start="+encodeURIComponent(start)+"&end="+encodeURIComponent(end),signal?{signal}:{});
+    if(!j.period_comparison)j.period_comparison=null;
     if(requestSeq!==periodRequestSeq)return;
     j.start=start;j.end=end;
     if(!Array.isArray(j.body_measurements)||!j.body_measurements.length)j.body_measurements=Array.isArray(periodBodyMeasurements)?periodBodyMeasurements:[];
@@ -5257,7 +5453,7 @@ async function loadHistory(start,end,periodBodyMeasurements=[],requestSeq=period
     const bodyChart=bodyCompositionChart(j);
     const energyTitle="<h3 style='margin:14px 0 8px'>SALDO ENERGÉTICO (BASAL + ATIVO − CONSUMO) × PESO</h3>";
     const energyChart=periodGraphScroll(`<div style='position:relative;display:grid;grid-template-columns:repeat(${Math.max(1,j.days.length)},minmax(28px,1fr));gap:6px;align-items:stretch;height:210px;padding:12px;background:#0f172a;border-radius:12px'>${weightSvg}`+j.days.map(x=>{const v=Number(x.saldo_kcal||0);const current=Boolean(x.is_current_day);const deficit=v>0;const pct=Math.max(4,Math.round(Math.abs(v)/maxSaldo*100));const d=x.data.slice(5).split('-').reverse().join('/');const color=current?"linear-gradient(#94a3b8,#64748b)":deficit?"linear-gradient(#22c55e,#15803d)":"linear-gradient(#fb7185,#be123c)";return `<div title='${d}: basal ${fmt(x.basal_kcal)} + ativo ${fmt(x.active_kcal)} - consumo ${fmt(x.consumed_kcal)} = saldo ${fmt(x.saldo_kcal)} kcal${current?" · dia atual não incluído no déficit acumulado":""}' style='display:flex;flex-direction:column;justify-content:space-between;align-items:center;height:100%'><small style='font-size:10px;color:${current?"#cbd5e1":deficit?"#86efac":"#fecdd3"}'>${current?"em andamento":integerLabel(v)}</small><div style='display:flex;align-items:${deficit?"flex-end":"flex-start"};height:150px;width:100%'><div style='width:100%;height:${pct}%;min-height:5px;background:${color};border-radius:${deficit?"6px 6px 2px 2px":"2px 2px 6px 6px"}'></div></div><small style='font-size:10px;color:#cbd5e1'>${d}</small></div>`}).join("")+"</div>",j.days.length);
-    box.innerHTML=head+periodGraphScroll(kcalChart,j.days.length)+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart+"<div style='display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:#cbd5e1'><span><i style='display:inline-block;width:11px;height:11px;background:#22c55e;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Saldo — déficit</span><span><i style='display:inline-block;width:11px;height:11px;background:#ef4444;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Superávit</span><span><i style='display:inline-block;width:11px;height:11px;background:#f472b6;border-radius:50%;vertical-align:-1px;margin-right:4px'></i>Peso real</span><span><i style='display:inline-block;width:11px;height:3px;background:#facc15;vertical-align:4px;margin-right:4px'></i>Peso virtual</span><span><i style='display:inline-block;width:11px;height:3px;background:#1d4ed8;vertical-align:4px;margin-right:4px'></i>Média 7 dias sem água</span><span><i style='display:inline-block;width:11px;height:3px;background:#60a5fa;vertical-align:4px;margin-right:4px'></i>Média 7 dias com água</span></div><small style='display:block;color:#f9a8d4;margin-top:5px'>Linha rosa: peso aferido. <span style='color:#ca8a04'>Linha amarela: peso virtual estimado pelo saldo acumulado, na proporção de 7.000 kcal = 1 kg, sem incorporar a variação de água.</span> <span style='color:#bfdbfe'>Linhas azuis: médias das aferições disponíveis em cada bloco consecutivo de 7 dias; azul escuro sem água e azul claro com o peso total.</span></small>";
+    box.innerHTML=head+periodGraphScroll(kcalChart,j.days.length)+"<small style='display:block;color:#9fb0c4;margin-top:6px'>Passe o cursor sobre uma barra para ver calorias, proteína e água do dia.</small>"+bodyChart+energyTitle+energyChart+"<div style='display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:#cbd5e1'><span><i style='display:inline-block;width:11px;height:11px;background:#22c55e;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Saldo — déficit</span><span><i style='display:inline-block;width:11px;height:11px;background:#ef4444;border-radius:2px;vertical-align:-1px;margin-right:4px'></i>Superávit</span><span><i style='display:inline-block;width:11px;height:11px;background:#f472b6;border-radius:50%;vertical-align:-1px;margin-right:4px'></i>Peso real</span><span><i style='display:inline-block;width:11px;height:3px;background:#facc15;vertical-align:4px;margin-right:4px'></i>Peso virtual</span><span><i style='display:inline-block;width:11px;height:3px;background:#1d4ed8;vertical-align:4px;margin-right:4px'></i>Média 7 dias sem água</span><span><i style='display:inline-block;width:11px;height:3px;background:#60a5fa;vertical-align:4px;margin-right:4px'></i>Média 7 dias com água</span></div><small style='display:block;color:#f9a8d4;margin-top:5px'>Linha rosa: peso aferido. <span style='color:#ca8a04'>Linha amarela: peso virtual estimado pelo saldo acumulado, na proporção de 7.000 kcal = 1 kg, sem incorporar a variação de água.</span> <span style='color:#bfdbfe'>Linhas azuis: médias das aferições disponíveis em cada bloco consecutivo de 7 dias; azul escuro sem água e azul claro com o peso total.</span></small>"+periodComparisonChart(j.period_comparison);
     }catch(e){
     if(e&&e.name==="AbortError")return;
     if(requestSeq!==periodRequestSeq)return;
@@ -5373,7 +5569,7 @@ async function loadPeriod(){
           ["piridoxina_mg","B6","mg"],["colesterol_mg","Colesterol","mg"]
         ].map(x=>`<div class="metric period-nutrient-source" data-nutrient="${x[0]}" data-start="${j.start}" data-end="${j.end}"><small>${x[1]} ⓘ</small><b>${fmt(j.daily[x[0]])} ${x[2]}</b><small>Média: ${fmt(Number(j.daily[x[0]]||0)/days)} ${x[2]}/dia</small></div>`).join("")}</div>
       </details>`;
-    const historyPayload={days:(j.energy?.days||[]).map(x=>({...x,energia_kcal:Number(x.consumed_kcal||0),proteina_g:Number(x.proteina_g||0),agua_ml:Number(x.agua_ml||0)})),energy_totals:j.energy?.totals||{},body_measurements:j.body_measurements||[],weekly_weight_averages:j.weekly_weight_averages||[]};
+    const historyPayload={days:(j.energy?.days||[]).map(x=>({...x,energia_kcal:Number(x.consumed_kcal||0),proteina_g:Number(x.proteina_g||0),agua_ml:Number(x.agua_ml||0)})),energy_totals:j.energy?.totals||{},body_measurements:j.body_measurements||[],weekly_weight_averages:j.weekly_weight_averages||[],period_comparison:j.period_comparison||null};
     loadHistory(s,e,j.body_measurements||[],requestSeq,controller.signal,historyPayload);
   }catch(err){
     if(err&&err.name==="AbortError")return;
@@ -6090,6 +6286,7 @@ class H(BaseHTTPRequestHandler):
                 "daily":calc(rows,self.user["id"],food_nutrient_cache),"water":float(water or 0),"goals":goal_dict(g),"goal_context":goal_context,
                 "body_measurements":list(mmap.values()),
                 "weekly_weight_averages":_weekly_weight_averages(d1,d2,mmap.values()),
+                "period_comparison":_period_comparison_data(self.user["id"], d1, d2),
                 "energy":{"days":energy_days,"totals":{k:(round(v,2) if isinstance(v,float) else v) for k,v in totals.items()}}
             })
             return
