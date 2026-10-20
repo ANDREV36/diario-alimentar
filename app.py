@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V79 · Comparação entre períodos no relatório"
+APP_VERSION = "V80 · Tabela acumulada da comparação entre períodos"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -2978,6 +2978,108 @@ def _pdf_period_comparison_page(pdf, dataset, page_no):
     _pdf_footer(pdf, page_no)
 
 
+def _pdf_period_accumulated_table(pdf, dataset, page_no):
+    """Desenha os valores acumulados de cada bloco comparado."""
+    comparison = dataset.get("period_comparison") or {}
+    periods = comparison.get("periods") or []
+    metrics = comparison.get("metrics") or []
+    if not metrics:
+        metrics = [
+            {"key": key, "label": label, "unit": unit, "color": color}
+            for key, _goal_key, label, unit, color in REPORT_METRICS
+        ]
+
+    width, height = landscape(A3)
+    available_width = width - 28 * mm
+    left = 14 * mm
+    header_suffix = ""
+    _pdf_header(
+        pdf,
+        "TABELA DE NUTRIENTES ACUMULADOS",
+        f"{dataset['name']} · cada linha representa um bloco comparado · valores acumulados{header_suffix}",
+        A3,
+    )
+
+    header = ["Período acumulado"] + [f"{metric.get('label', '')}\n{metric.get('unit', '')}" for metric in metrics]
+    data = [header]
+    selected_row = None
+    for row_index, period in enumerate(periods, start=1):
+        label = str(period.get("label") or "")
+        if period.get("selected"):
+            label = "PERÍODO SOLICITADO · " + label
+            selected_row = row_index
+        values = [label]
+        totals = period.get("totals") or {}
+        for metric in metrics:
+            value = float(totals.get(metric.get("key"), 0) or 0)
+            unit = metric.get("unit") or ""
+            if unit == "kcal":
+                text = f"{value:,.0f} kcal".replace(",", ".")
+            elif unit == "mg":
+                text = f"{value:,.0f} mg".replace(",", ".")
+            elif unit == "L":
+                text = f"{value / 1000:.2f} L"
+            else:
+                text = f"{value:,.1f} g".replace(",", "X").replace(".", ",").replace("X", ".")
+            values.append(text)
+        data.append(values)
+
+    first_width = 42 * mm
+    remaining_width = max(1 * mm, available_width - first_width)
+    table = Table(
+        data,
+        colWidths=[first_width] + [remaining_width / max(1, len(metrics))] * len(metrics),
+        repeatRows=1,
+    )
+    style_commands = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10243a")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 7.2),
+        ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+        ("ALIGN", (0, 0), (0, -1), "LEFT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTSIZE", (0, 1), (-1, -1), 7.0),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f6f9fc")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]
+    if selected_row is not None:
+        style_commands.extend([
+            ("BACKGROUND", (0, selected_row), (-1, selected_row), colors.HexColor("#dbeafe")),
+            ("FONTNAME", (0, selected_row), (-1, selected_row), "Helvetica-Bold"),
+            ("TEXTCOLOR", (0, selected_row), (-1, selected_row), colors.HexColor("#0f3b72")),
+        ])
+    table.setStyle(TableStyle(style_commands))
+
+    note = "Valores acumulados reais registrados em cada bloco. O período destacado em azul é o período solicitado; os demais são os blocos imediatamente anteriores até completar 60 dias."
+    note_y = height - 55 * mm
+    pdf.setFillColor(colors.HexColor("#334155"))
+    pdf.setFont("Helvetica", 8)
+    pdf.drawString(left, note_y, note)
+
+    available_height = height - 73 * mm
+    fragments = table.split(available_width, available_height) or [table]
+    for fragment_index, fragment in enumerate(fragments):
+        if fragment_index > 0:
+            pdf.showPage()
+            page_no += 1
+            _pdf_header(
+                pdf,
+                "TABELA DE NUTRIENTES ACUMULADOS",
+                f"{dataset['name']} · continuação da tabela · valores acumulados",
+                A3,
+            )
+            pdf.setFillColor(colors.HexColor("#334155"))
+            pdf.setFont("Helvetica", 8)
+            pdf.drawString(left, height - 55 * mm, "Continuação dos blocos comparados nos últimos 60 dias.")
+        fragment_width, fragment_height = fragment.wrap(available_width, available_height)
+        fragment.drawOn(pdf, left, height - 65 * mm - fragment_height)
+        _pdf_footer(pdf, page_no)
+    return page_no
+
+
 def _pdf_daily_charts_page(pdf, dataset, page_no):
     """Exibe todos os nutrientes em gráficos diários com os valores de cada dia."""
     width, height = _pdf_header(
@@ -3503,6 +3605,11 @@ def build_food_report_pdf(user_id, start, end):
     pdf.showPage()
     page_no += 1
     _pdf_period_comparison_page(pdf, dataset, page_no)
+
+    # Página seguinte: valores acumulados de cada bloco comparado.
+    pdf.showPage()
+    page_no += 1
+    page_no = _pdf_period_accumulated_table(pdf, dataset, page_no)
 
     # Páginas seguintes: calendário completo. Cada página recebe somente
     # as semanas que cabem naturalmente; uma semana extensa não é achatada.
