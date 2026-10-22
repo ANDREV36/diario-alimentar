@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V81 · Tabela acumulada no telefone e no PDF"
+APP_VERSION = "V82 · Pratos prontos porcionados"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -757,6 +757,29 @@ def init_db():
             UNIQUE(usuario_id, alimento_id, nome)
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pratos_prontos(
+            id BIGSERIAL PRIMARY KEY,
+            usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            nome TEXT NOT NULL,
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(usuario_id, nome)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pratos_prontos_itens(
+            id BIGSERIAL PRIMARY KEY,
+            prato_id BIGINT NOT NULL REFERENCES pratos_prontos(id) ON DELETE CASCADE,
+            ordem INTEGER NOT NULL DEFAULT 0,
+            alimento_id INTEGER NOT NULL,
+            alimento_nome TEXT NOT NULL,
+            quantidade_g REAL NOT NULL,
+            unidade TEXT NOT NULL DEFAULT 'g'
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_pratos_prontos_usuario ON pratos_prontos(usuario_id, nome)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_pratos_prontos_itens_prato ON pratos_prontos_itens(prato_id, ordem)")
     for table in ("consumo", "hidratacao"):
         exists = c.execute("""
             SELECT 1 FROM information_schema.columns
@@ -905,7 +928,7 @@ def _copy_diary_data(c, source_id, target_id, actor_id):
         raise ValueError("Ative o usuário de teste antes de copiar os dados.")
 
     # Não mistura históricos: o destino deve estar sem conteúdo de Diário.
-    data_tables=("consumo","hidratacao","medicoes_corporais","gasto_ativo_diario","alimentos_usuario","favoritos","porcoes")
+    data_tables=("consumo","hidratacao","medicoes_corporais","gasto_ativo_diario","alimentos_usuario","favoritos","porcoes","pratos_prontos")
     occupied=[]
     for table in data_tables:
         row=c.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE usuario_id=?",(target_id,)).fetchone()
@@ -956,6 +979,18 @@ def _copy_diary_data(c, source_id, target_id, actor_id):
             vals=[mapped_food_id(row.get("alimento_id")) if f=="alimento_id" else row.get(f) for f in fields]
             c.execute(f"INSERT INTO {table}(usuario_id,"+", ".join(fields)+") VALUES(? ,"+",".join("?" for _ in fields)+")",[target_id]+vals)
         counts[table]=len(rows)
+    dish_map={}
+    dish_rows=c.execute("SELECT id,nome,criado_em,atualizado_em FROM pratos_prontos WHERE usuario_id=? ORDER BY id",(source_id,)).fetchall()
+    dish_item_count=0
+    for dish in dish_rows:
+        new_dish=c.execute("INSERT INTO pratos_prontos(usuario_id,nome,criado_em,atualizado_em) VALUES(?,?,?,?) RETURNING id",(target_id,dish.get("nome"),dish.get("criado_em"),dish.get("atualizado_em"))).fetchone()
+        dish_map[int(dish["id"])]=int(new_dish["id"])
+        items=c.execute("SELECT ordem,alimento_id,alimento_nome,quantidade_g,unidade FROM pratos_prontos_itens WHERE prato_id=? ORDER BY ordem,id",(dish["id"],)).fetchall()
+        for item in items:
+            c.execute("INSERT INTO pratos_prontos_itens(prato_id,ordem,alimento_id,alimento_nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?)",(new_dish["id"],item.get("ordem") or 0,mapped_food_id(item.get("alimento_id")),item.get("alimento_nome"),item.get("quantidade_g"),item.get("unidade") or "g"))
+            dish_item_count+=1
+    counts["pratos_prontos"]=len(dish_rows)
+    counts["pratos_prontos_itens"]=dish_item_count
     pref=c.execute("SELECT historico_gasto_inicial_concluido FROM preferencias_usuario WHERE usuario_id=?",(source_id,)).fetchone()
     if pref:
         c.execute("UPDATE preferencias_usuario SET historico_gasto_inicial_concluido=?,atualizado_em=NOW() WHERE usuario_id=?",(bool(pref.get("historico_gasto_inicial_concluido")),target_id))
@@ -4129,7 +4164,8 @@ main{height:auto!important;min-height:calc(100vh - 70px)!important;overflow:visi
 <input id="search" class="search" placeholder="Digite o nome do alimento..."><div id="foods" class="foods"></div>
 <div class="add"><input id="weight" type="number" value="100" min="0.1" step="0.1"><select id="quantityUnit" aria-label="Unidade da quantidade" style="width:72px;border:1px solid #ffffff25;border-radius:10px;background:#16263a;color:#fff;font-weight:bold"><option value="g">g</option><option value="ml">ml</option></select><button onclick="add()">ADICIONAR</button></div>
 <div id="sel" class="sel">Nenhum alimento selecionado.</div>
-<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:9px"><button onclick="favoriteChosen()" style="flex:1;padding:10px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">☆ FAVORITO</button><button onclick="savePortion()" style="flex:1;padding:10px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">💾 SALVAR PORÇÃO</button></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:9px"><button onclick="favoriteChosen()" style="flex:1;padding:10px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">☆ FAVORITO</button><button onclick="savePortion()" style="flex:1;padding:10px;border:1px solid #ffffff30;border-radius:10px;background:#16263a;color:#fff;font-weight:bold">💾 SALVAR PORÇÃO</button><button onclick="openDishBuilder()" style="flex:1;padding:10px;border:1px solid #38bdf866;border-radius:10px;background:#0f2a45;color:#bae6fd;font-weight:bold">🍽️ CRIAR PRATO</button></div>
+<div id="dishBuilder" style="display:none;margin-top:10px"></div>
 <div id="personalLists" style="margin-top:10px"></div>
 <button id="newBase" style="display:none;margin-top:9px;width:100%;padding:11px;border:1px solid #111827;border-radius:10px;background:#111827;color:white;font-weight:bold" onclick="openNewFood()">NOVO ALIMENTO</button>
 <button id="editBase" style="display:none;margin-top:9px;width:100%;padding:11px;border:1px solid #ddd;border-radius:10px;background:white;font-weight:bold" onclick="openFoodEditor()">EDITAR ALIMENTO DA BASE</button></div>
@@ -4887,12 +4923,43 @@ async function deletePortion(id){
   if(!confirm("Excluir esta porção salva?"))return;
   try{await api("/api/portion/"+Number(id),{method:"DELETE"});await loadPersonalLists()}catch(e){alert(e.message)}
 }
+let dishDraft=[];
+function openDishBuilder(){dishDraft=[];renderDishBuilder()}
+function closeDishBuilder(){dishDraft=[];const box=document.getElementById("dishBuilder");if(box){box.style.display="none";box.innerHTML=""}}
+function renderDishBuilder(){
+  const box=document.getElementById("dishBuilder");if(!box)return;
+  box.style.display="block";
+  const rows=dishDraft.length?dishDraft.map((item,index)=>`<div style="display:flex;gap:6px;align-items:center;padding:7px 0;border-bottom:1px solid #ffffff15"><span style="flex:1;color:#fff;font-size:12px">${esc(item.alimento_nome)}<small style="display:block;color:#94a3b8">${fmt(item.quantidade_g)} ${esc(item.unidade)}</small></span><button type="button" onclick="removeDishDraft(${index})" style="width:30px;padding:5px;border:1px solid #fecaca55;border-radius:7px;background:#7f1d1d;color:#fff">✕</button></div>`).join(""):"<div style='color:#94a3b8;font-size:12px;padding:7px 0'>Nenhum alimento adicionado. Selecione um alimento, ajuste a quantidade e toque em ADICIONAR AO PRATO.</div>";
+  box.innerHTML=`<div style="padding:11px;border:1px solid #38bdf866;border-radius:11px;background:#0f2a45"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b style="color:#bae6fd">🍽️ Montar prato pronto</b><button type="button" onclick="closeDishBuilder()" style="padding:5px 8px;border:1px solid #ffffff30;border-radius:7px;background:#16263a;color:#cbd5e1">FECHAR</button></div><p style="margin:6px 0;color:#cbd5e1;font-size:11px;line-height:1.35">Selecione cada alimento e sua quantidade. Ao salvar, o prato ficará disponível para lançar todos os alimentos de uma vez.</p><div>${rows}</div><div style="display:flex;gap:6px;margin-top:9px"><button type="button" onclick="addChosenToDish()" style="flex:1;padding:9px;border:0;border-radius:8px;background:#38bdf8;color:#082f49;font-weight:bold">ADICIONAR AO PRATO</button><button type="button" onclick="saveDish()" style="flex:1;padding:9px;border:0;border-radius:8px;background:#22c55e;color:#06210f;font-weight:bold">SALVAR PRATO</button></div></div>`;
+}
+function addChosenToDish(){
+  if(!chosen){alert("Selecione um alimento primeiro.");return}
+  const q=Number(document.getElementById("weight").value),unit=document.getElementById("quantityUnit").value;
+  if(!(q>0)){alert("Informe uma quantidade válida.");return}
+  dishDraft.push({alimento_id:Number(chosen.id),alimento_nome:chosen.nome,quantidade_g:q,unidade:unit});renderDishBuilder();
+}
+function removeDishDraft(index){dishDraft.splice(index,1);renderDishBuilder()}
+async function saveDish(){
+  if(!dishDraft.length){alert("Adicione pelo menos um alimento ao prato.");return}
+  const name=prompt("Nome do prato pronto (ex.: almoço de frango):","");if(name===null)return;
+  if(!name.trim()){alert("Informe um nome para o prato.");return}
+  try{await api("/api/dish",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({nome:name.trim(),items:dishDraft})});closeDishBuilder();await loadPersonalLists();alert("Prato pronto salvo.")}catch(e){alert(e.message)}
+}
+async function addSavedDish(id){
+  if(!confirm("Lançar todos os alimentos deste prato no diário?"))return;
+  try{const j=await api("/api/dish/consume",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prato_id:Number(id),data:day.value})});await refresh();alert(`${j.count||0} alimentos do prato foram lançados no diário.`)}catch(e){alert("Não foi possível lançar o prato: "+e.message)}
+}
+async function deleteDish(id){
+  if(!confirm("Excluir este prato pronto? Os alimentos já lançados no diário serão preservados."))return;
+  try{await api("/api/dish/"+Number(id),{method:"DELETE"});await loadPersonalLists()}catch(e){alert(e.message)}
+}
 async function loadPersonalLists(){
   const box=document.getElementById("personalLists");if(!box)return;
   try{
-    const [fav,port]=await Promise.all([api("/api/favorites"),api("/api/portions")]);
+    const [fav,port,dishes]=await Promise.all([api("/api/favorites"),api("/api/portions"),api("/api/dishes")]);
     const fitems=fav.map(f=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(f.alimento_id)},${JSON.stringify(f.alimento_nome)},Number(document.getElementById("weight").value)||100,document.getElementById("quantityUnit").value)' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(f.alimento_nome)}</button><button onclick="deleteFavorite(${Number(f.id)})" title="Excluir favorito" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
     const pitems=port.map(p=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(p.alimento_id)},${JSON.stringify(p.alimento_nome)},${Number(p.quantidade_g)||0},${JSON.stringify(p.unidade||"g")})' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(p.alimento_nome)} · ${esc(p.nome)} (${fmt(p.quantidade_g)} ${esc(p.unidade||"g")})</button><button onclick="deletePortion(${Number(p.id)})" title="Excluir porção" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
+    const ditemitems=dishes.map(d=>{const count=Array.isArray(d.items)?d.items.length:0;const summary=(d.items||[]).slice(0,3).map(item=>`${esc(item.alimento_nome)} ${fmt(item.quantidade_g)} ${esc(item.unidade||"g")}`).join(" · ");return `<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick="addSavedDish(${Number(d.id)})" style="flex:1;text-align:left;padding:8px 10px;border:1px solid #38bdf866;border-radius:9px;background:#0f2a45;color:#bae6fd;cursor:pointer"><b>🍽️ ${esc(d.nome)}</b><small style="display:block;color:#94a3b8;margin-top:3px">${count} alimento(s)${summary?" · "+summary:""}</small></button><button onclick="deleteDish(${Number(d.id)})" title="Excluir prato pronto" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`}).join("");
     const fhtml=fav.length?`<div style="margin:8px 0 4px">
       <h2 style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:0">
         <span>⭐ Favoritos (${fav.length})</span>
@@ -4911,7 +4978,8 @@ async function loadPersonalLists(){
       </h2>
       <div id="portionsList" style="display:block;margin-top:12px">${pitems}</div>
     </div>`:"";
-    box.innerHTML=fhtml+phtml;
+    const dhtml=dishes.length?`<div style="margin:8px 0 4px"><h2 style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:0"><span>🍽️ Pratos prontos (${dishes.length})</span><button onclick="togglePersonalSection('dishesList',this)" aria-expanded="true" style="width:42px;height:34px;padding:0;border:1px solid #38bdf866;border-radius:10px;background:#0f2a45;color:#bae6fd;font-size:20px;line-height:1;cursor:pointer" title="Mostrar ou ocultar pratos prontos">▼</button></h2><div id="dishesList" style="display:block;margin-top:12px">${ditemitems}</div></div>`:"";
+    box.innerHTML=fhtml+phtml+dhtml;
   }catch(e){box.innerHTML=""}
 }
 const editFields=[["nome","Nome","text"],["energia_kcal","Calorias (kcal)","number"],["proteina_g","Proteína (g)","number"],["carboidrato_g","Carboidratos (g)","number"],["lipidios_g","Gorduras (g)","number"],["fibra_g","Fibras (g)","number"],["colesterol_mg","Colesterol (mg)","number"],["calcio_mg","Cálcio (mg)","number"],["magnesio_mg","Magnésio (mg)","number"],["manganes_mg","Manganês (mg)","number"],["fosforo_mg","Fósforo (mg)","number"],["ferro_mg","Ferro (mg)","number"],["sodio_mg","Sódio (mg)","number"],["potassio_mg","Potássio (mg)","number"],["cobre_mg","Cobre (mg)","number"],["zinco_mg","Zinco (mg)","number"],["vitamina_c_mg","Vitamina C (mg)","number"],["tiamina_mg","B1 — Tiamina (mg)","number"],["riboflavina_mg","B2 — Riboflavina (mg)","number"],["niacina_mg","B3 — Niacina (mg)","number"],["piridoxina_mg","B6 — Piridoxina (mg)","number"]];
@@ -6480,6 +6548,16 @@ class H(BaseHTTPRequestHandler):
             try:r=c.execute("SELECT id,alimento_id,alimento_nome,nome,quantidade_g,unidade FROM porcoes WHERE usuario_id=? ORDER BY alimento_nome,nome",(self.user["id"],)).fetchall()
             finally:c.close()
             self.js([dict(x) for x in r]);return
+        if p.path=="/api/dishes":
+            c=ddb()
+            try:
+                dishes=c.execute("SELECT id,nome,criado_em,atualizado_em FROM pratos_prontos WHERE usuario_id=? ORDER BY nome",(self.user["id"],)).fetchall()
+                result=[]
+                for dish in dishes:
+                    items=c.execute("SELECT id,ordem,alimento_id,alimento_nome,quantidade_g,unidade FROM pratos_prontos_itens WHERE prato_id=? ORDER BY ordem,id",(dish["id"],)).fetchall()
+                    result.append({**dict(dish),"items":[dict(item) for item in items]})
+            finally:c.close()
+            self.js(result);return
         if p.path.startswith("/api/consume/"):
             i=int(p.path.rsplit("/",1)[1]);c=ddb()
             try:r=c.execute("SELECT * FROM consumo WHERE id=? AND usuario_id=?",(i,self.user["id"])).fetchone()
@@ -6871,6 +6949,64 @@ class H(BaseHTTPRequestHandler):
                 if unidade not in ("g","ml"): raise ValueError("Unidade inválida.")
                 if not nome or not label or q<=0:raise ValueError("Informe nome, porção e quantidade válida.")
                 c=ddb();c.execute("INSERT INTO porcoes(usuario_id,alimento_id,alimento_nome,nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?) ON CONFLICT(usuario_id,alimento_id,nome) DO UPDATE SET quantidade_g=EXCLUDED.quantidade_g,unidade=EXCLUDED.unidade,alimento_nome=EXCLUDED.alimento_nome",(self.user["id"],aid,nome,label,q,unidade));c.commit();self.js({"ok":True})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+        if self.path=="/api/dish":
+            c=None
+            try:
+                x=self.body();name=re.sub(r"\s+", " ", str(x.get("nome","")).strip());items=x.get("items")
+                if not name or len(name)>120:raise ValueError("Informe um nome para o prato com até 120 caracteres.")
+                if not isinstance(items,list) or not 1<=len(items)<=50:raise ValueError("Inclua entre 1 e 50 alimentos no prato.")
+                c=ddb();clean=[]
+                for order,item in enumerate(items):
+                    aid=int(item.get("alimento_id"));food_name=re.sub(r"\s+", " ", str(item.get("alimento_nome","")).strip());q=float(item.get("quantidade_g",0));unit=str(item.get("unidade","g")).lower()
+                    if aid==0 or not food_name or not math.isfinite(q) or not 0<q<=5000:raise ValueError("Alimento ou quantidade inválidos no prato.")
+                    if unit not in ("g","ml"):raise ValueError("Unidade inválida no prato.")
+                    if aid<0:
+                        if not c.execute("SELECT 1 FROM alimentos_usuario WHERE id=? AND usuario_id=? AND ativo=TRUE",(-aid,self.user["id"])).fetchone():raise ValueError("Um alimento pessoal do prato não está mais disponível.")
+                    else:
+                        source=ndb()
+                        try:exists=source.execute("SELECT 1 FROM alimentos WHERE id=?",(aid,)).fetchone()
+                        finally:source.close()
+                        if not exists:raise ValueError("Um alimento da base do prato não foi encontrado.")
+                    clean.append((order,aid,food_name,q,unit))
+                dish=c.execute("INSERT INTO pratos_prontos(usuario_id,nome) VALUES(?,?) ON CONFLICT(usuario_id,nome) DO UPDATE SET atualizado_em=NOW() RETURNING id",(self.user["id"],name)).fetchone()
+                c.execute("DELETE FROM pratos_prontos_itens WHERE prato_id=?",(dish["id"],))
+                for order,aid,food_name,q,unit in clean:
+                    c.execute("INSERT INTO pratos_prontos_itens(prato_id,ordem,alimento_id,alimento_nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?)",(dish["id"],order,aid,food_name,q,unit))
+                c.commit();self.js({"ok":True,"id":dish["id"],"count":len(clean)})
+            except Exception as e:
+                if c:c.rollback()
+                self.js({"error":str(e)},400)
+            finally:
+                if c:c.close()
+            return
+        if self.path=="/api/dish/consume":
+            c=None
+            try:
+                x=self.body();dish_id=int(x.get("prato_id"));record_date=str(x.get("data") or today_sp().isoformat())
+                try:date.fromisoformat(record_date)
+                except Exception:raise ValueError("Data inválida.")
+                c=ddb();dish=c.execute("SELECT id,nome FROM pratos_prontos WHERE id=? AND usuario_id=?",(dish_id,self.user["id"])).fetchone()
+                if not dish:raise ValueError("Prato pronto não encontrado.")
+                items=c.execute("SELECT alimento_id,alimento_nome,quantidade_g,unidade FROM pratos_prontos_itens WHERE prato_id=? ORDER BY ordem,id",(dish_id,)).fetchall()
+                if not items:raise ValueError("Este prato não possui alimentos cadastrados.")
+                meal=meal_for_time()
+                for item in items:
+                    aid=int(item["alimento_id"]);unit=str(item.get("unidade") or "g")
+                    if aid<0:
+                        if not c.execute("SELECT 1 FROM alimentos_usuario WHERE id=? AND usuario_id=? AND ativo=TRUE",(-aid,self.user["id"])).fetchone():raise ValueError("Um alimento pessoal do prato não está mais disponível.")
+                    else:
+                        source=ndb()
+                        try:exists=source.execute("SELECT 1 FROM alimentos WHERE id=?",(aid,)).fetchone()
+                        finally:source.close()
+                        if not exists:raise ValueError("Um alimento da base do prato não foi encontrado.")
+                    c.execute("INSERT INTO consumo(usuario_id,data,refeicao,alimento_id,alimento_nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?,?)",(self.user["id"],record_date,meal,aid,item["alimento_nome"],item["quantidade_g"],unit))
+                c.commit();self.js({"ok":True,"count":len(items),"prato":dish["nome"],"refeicao":meal})
             except Exception as e:
                 if c:c.rollback()
                 self.js({"error":str(e)},400)
@@ -7294,6 +7430,8 @@ class H(BaseHTTPRequestHandler):
                 i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM favoritos WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True});return
             if self.path.startswith("/api/portion/"):
                 i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM porcoes WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True});return
+            if self.path.startswith("/api/dish/"):
+                i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM pratos_prontos WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True});return
             i=int(self.path.rsplit("/",1)[1]);c=ddb();c.execute("DELETE FROM consumo WHERE id=? AND usuario_id=?",(i,self.user["id"]));c.commit();c.close();self.js({"ok":True})
         except Exception as e:self.js({"error":str(e)},400)
 
