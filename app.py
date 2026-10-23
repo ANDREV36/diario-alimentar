@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V82 · Pratos prontos porcionados"
+APP_VERSION = "V84 · Nutrientes compactos nos pratos prontos"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -3912,6 +3912,12 @@ main{
 .item{
   background:rgba(7,20,35,.28)!important;
 }
+.item>div:first-child{min-width:0;flex:1}
+.foodNutrientLine{display:flex;align-items:center;gap:7px;max-width:100%;margin-top:4px;color:#bfdbfe;font-size:10px;line-height:1.2;white-space:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.foodNutrientLine::-webkit-scrollbar{display:none}
+.foodNutrient{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto}
+.foodNutrientIcon{font-size:10px;line-height:1}
+.foodNutrientValue{color:#e2e8f0;font-variant-numeric:tabular-nums}
 .bottomDashboard,.bottomGoal{
   background:rgba(7,22,38,.64)!important;
 }
@@ -4959,7 +4965,7 @@ async function loadPersonalLists(){
     const [fav,port,dishes]=await Promise.all([api("/api/favorites"),api("/api/portions"),api("/api/dishes")]);
     const fitems=fav.map(f=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(f.alimento_id)},${JSON.stringify(f.alimento_nome)},Number(document.getElementById("weight").value)||100,document.getElementById("quantityUnit").value)' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(f.alimento_nome)}</button><button onclick="deleteFavorite(${Number(f.id)})" title="Excluir favorito" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
     const pitems=port.map(p=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(p.alimento_id)},${JSON.stringify(p.alimento_nome)},${Number(p.quantidade_g)||0},${JSON.stringify(p.unidade||"g")})' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(p.alimento_nome)} · ${esc(p.nome)} (${fmt(p.quantidade_g)} ${esc(p.unidade||"g")})</button><button onclick="deletePortion(${Number(p.id)})" title="Excluir porção" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
-    const ditemitems=dishes.map(d=>{const count=Array.isArray(d.items)?d.items.length:0;const summary=(d.items||[]).slice(0,3).map(item=>`${esc(item.alimento_nome)} ${fmt(item.quantidade_g)} ${esc(item.unidade||"g")}`).join(" · ");return `<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick="addSavedDish(${Number(d.id)})" style="flex:1;text-align:left;padding:8px 10px;border:1px solid #38bdf866;border-radius:9px;background:#0f2a45;color:#bae6fd;cursor:pointer"><b>🍽️ ${esc(d.nome)}</b><small style="display:block;color:#94a3b8;margin-top:3px">${count} alimento(s)${summary?" · "+summary:""}</small></button><button onclick="deleteDish(${Number(d.id)})" title="Excluir prato pronto" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`}).join("");
+    const ditemitems=dishes.map(d=>{const count=Array.isArray(d.items)?d.items.length:0;const summary=(d.items||[]).slice(0,3).map(item=>`${esc(item.alimento_nome)} ${fmt(item.quantidade_g)} ${esc(item.unidade||"g")}`).join(" · ");const n=d.nutrientes||{};const nutrientLine=foodNutrientLine({kcal:n.energia_kcal,carboidrato_g:n.carboidrato_g,proteina_g:n.proteina_g,lipidios_g:n.lipidios_g,fibra_g:n.fibra_g,sodio_mg:n.sodio_mg});return `<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick="addSavedDish(${Number(d.id)})" style="flex:1;text-align:left;padding:8px 10px;border:1px solid #38bdf866;border-radius:9px;background:#0f2a45;color:#bae6fd;cursor:pointer"><b>🍽️ ${esc(d.nome)}</b><small style="display:block;color:#94a3b8;margin-top:3px">${count} alimento(s)${summary?" · "+summary:""}</small>${nutrientLine}</button><button onclick="deleteDish(${Number(d.id)})" title="Excluir prato pronto" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`}).join("");
     const fhtml=fav.length?`<div style="margin:8px 0 4px">
       <h2 style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:0">
         <span>⭐ Favoritos (${fav.length})</span>
@@ -5331,6 +5337,8 @@ function renderGoalCards(j){
   const el=document.getElementById("goalCards");if(!el)return;
   el.innerHTML=data.map(([icon,label,value,target,unit,limit])=>{const p=pct(value,target);return `<button type="button" class="goalMiniCard ${limit?"limit":""}" onclick="openSummary()"><small>${icon} ${label}</small><b>${fmt(value)} / ${fmt(target)} ${unit}</b><i style="width:${p}%"></i><small>${fmt(p)}% da meta</small></button>`}).join("");
 }
+function fmtFoodNutrient(value,unit){const n=Number(value||0);if(unit==="kcal"||unit==="mg")return Math.round(n).toLocaleString("pt-BR");return n.toLocaleString("pt-BR",{minimumFractionDigits:1,maximumFractionDigits:1})}
+function foodNutrientLine(x){return `<div class="foodNutrientLine" aria-label="Nutrientes deste alimento"><span class="foodNutrient" title="Calorias"><span class="foodNutrientIcon">🔥</span><span class="foodNutrientValue">${fmtFoodNutrient(x.kcal,"kcal")} kcal</span></span><span class="foodNutrient" title="Carboidratos"><span class="foodNutrientIcon">🍚</span><span class="foodNutrientValue">${fmtFoodNutrient(x.carboidrato_g,"g")} g</span></span><span class="foodNutrient" title="Proteína"><span class="foodNutrientIcon">💪</span><span class="foodNutrientValue">${fmtFoodNutrient(x.proteina_g,"g")} g</span></span><span class="foodNutrient" title="Gorduras"><span class="foodNutrientIcon">🥑</span><span class="foodNutrientValue">${fmtFoodNutrient(x.lipidios_g,"g")} g</span></span><span class="foodNutrient" title="Fibras"><span class="foodNutrientIcon">🌱</span><span class="foodNutrientValue">${fmtFoodNutrient(x.fibra_g,"g")} g</span></span><span class="foodNutrient" title="Sódio"><span class="foodNutrientIcon">🧂</span><span class="foodNutrientValue">${fmtFoodNutrient(x.sodio_mg,"mg")} mg</span></span></div>`}
 let bodyMeasurementLoadedDate="";
 function syncBodyMeasurementForm(measurement){
   const weightInput=document.getElementById("bodyWeightInput"),waterInput=document.getElementById("bodyWaterInput"),status=document.getElementById("bodyMeasurementStatus"),currentDate=String(day.value||"");
@@ -5369,7 +5377,7 @@ async function refresh(){
     const consumed=Array.isArray(j.items)?j.items:[];
     const goals=j.goals||{};
     renderGoalSource(j.goal_context);
-    items.innerHTML=consumed.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" "+esc(x.unidade||"g")+" · "+fmt(x.kcal)+" kcal</div></div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
+    items.innerHTML=consumed.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" "+esc(x.unidade||"g")+"</div>"+foodNutrientLine(x)+"</div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
     if(consumed.length){const toggle=document.getElementById("consumedFoodsToggle");items.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
     try{draw(partial,j.partial||{});}catch(e){console.error("nutrientes:",e)}
     try{drawWater(Number(j.water||0),Number(goals.agua_ml||0),j.water_entries||[]);drawEnergyBalance(j.energy||{});}catch(e){console.error("hidratação:",e)}
@@ -6272,7 +6280,7 @@ class H(BaseHTTPRequestHandler):
                 aid=int(x["alimento_id"])
                 f=food_nutrient_cache.get(aid)
                 z=x["quantidade_g"]/100
-                items.append({"id":x["id"],"refeicao":x["refeicao"],"alimento_nome":x["alimento_nome"],"quantidade_g":x["quantidade_g"],"unidade":x.get("unidade","g"),"kcal":(f["energia_kcal"] or 0)*z if f else 0})
+                items.append({"id":x["id"],"refeicao":x["refeicao"],"alimento_nome":x["alimento_nome"],"quantidade_g":x["quantidade_g"],"unidade":x.get("unidade","g"),"kcal":(f["energia_kcal"] or 0)*z if f else 0,"proteina_g":(f["proteina_g"] or 0)*z if f else 0,"carboidrato_g":(f["carboidrato_g"] or 0)*z if f else 0,"lipidios_g":(f["lipidios_g"] or 0)*z if f else 0,"fibra_g":(f["fibra_g"] or 0)*z if f else 0,"sodio_mg":(f["sodio_mg"] or 0)*z if f else 0})
             c=ddb()
             try:
                 water=c.execute("SELECT COALESCE(SUM(quantidade_ml),0) AS total_water FROM hidratacao WHERE usuario_id=? AND data=?",(self.user["id"],d,)).fetchone()["total_water"]
@@ -6555,7 +6563,10 @@ class H(BaseHTTPRequestHandler):
                 result=[]
                 for dish in dishes:
                     items=c.execute("SELECT id,ordem,alimento_id,alimento_nome,quantidade_g,unidade FROM pratos_prontos_itens WHERE prato_id=? ORDER BY ordem,id",(dish["id"],)).fetchall()
-                    result.append({**dict(dish),"items":[dict(item) for item in items]})
+                    food_cache=_food_nutrient_cache(items,self.user["id"])
+                    totals=calc(items,self.user["id"],food_cache)
+                    nutrients={key:round(float(totals.get(key) or 0),2) for key in ("energia_kcal","proteina_g","carboidrato_g","lipidios_g","fibra_g","sodio_mg")}
+                    result.append({**dict(dish),"items":[dict(item) for item in items],"nutrientes":nutrients})
             finally:c.close()
             self.js(result);return
         if p.path.startswith("/api/consume/"):
