@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V84 · Nutrientes compactos nos pratos prontos"
+APP_VERSION = "V85 · Nutrientes compactos para celular vertical"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -3913,11 +3913,12 @@ main{
   background:rgba(7,20,35,.28)!important;
 }
 .item>div:first-child{min-width:0;flex:1}
-.foodNutrientLine{display:flex;align-items:center;gap:7px;max-width:100%;margin-top:4px;color:#bfdbfe;font-size:10px;line-height:1.2;white-space:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.foodNutrientLine{display:flex;align-items:center;justify-content:space-between;gap:2px;width:100%;max-width:100%;min-width:0;margin-top:4px;color:#bfdbfe;font-size:8px;line-height:1.1;white-space:nowrap;overflow:hidden}
 .foodNutrientLine::-webkit-scrollbar{display:none}
-.foodNutrient{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto}
-.foodNutrientIcon{font-size:10px;line-height:1}
-.foodNutrientValue{color:#e2e8f0;font-variant-numeric:tabular-nums}
+.foodNutrient{display:inline-flex;align-items:center;gap:1px;min-width:0;flex:0 1 auto}
+.foodNutrientIcon{font-size:8px;line-height:1}
+.foodNutrientValue{color:#e2e8f0;font-size:8px;font-variant-numeric:tabular-nums;letter-spacing:-.15px}
+@media(max-width:520px){.foodNutrientLine{gap:1px;font-size:7px}.foodNutrientIcon,.foodNutrientValue{font-size:7px;letter-spacing:-.25px}}
 .bottomDashboard,.bottomGoal{
   background:rgba(7,22,38,.64)!important;
 }
@@ -5338,7 +5339,7 @@ function renderGoalCards(j){
   el.innerHTML=data.map(([icon,label,value,target,unit,limit])=>{const p=pct(value,target);return `<button type="button" class="goalMiniCard ${limit?"limit":""}" onclick="openSummary()"><small>${icon} ${label}</small><b>${fmt(value)} / ${fmt(target)} ${unit}</b><i style="width:${p}%"></i><small>${fmt(p)}% da meta</small></button>`}).join("");
 }
 function fmtFoodNutrient(value,unit){const n=Number(value||0);if(unit==="kcal"||unit==="mg")return Math.round(n).toLocaleString("pt-BR");return n.toLocaleString("pt-BR",{minimumFractionDigits:1,maximumFractionDigits:1})}
-function foodNutrientLine(x){return `<div class="foodNutrientLine" aria-label="Nutrientes deste alimento"><span class="foodNutrient" title="Calorias"><span class="foodNutrientIcon">🔥</span><span class="foodNutrientValue">${fmtFoodNutrient(x.kcal,"kcal")} kcal</span></span><span class="foodNutrient" title="Carboidratos"><span class="foodNutrientIcon">🍚</span><span class="foodNutrientValue">${fmtFoodNutrient(x.carboidrato_g,"g")} g</span></span><span class="foodNutrient" title="Proteína"><span class="foodNutrientIcon">💪</span><span class="foodNutrientValue">${fmtFoodNutrient(x.proteina_g,"g")} g</span></span><span class="foodNutrient" title="Gorduras"><span class="foodNutrientIcon">🥑</span><span class="foodNutrientValue">${fmtFoodNutrient(x.lipidios_g,"g")} g</span></span><span class="foodNutrient" title="Fibras"><span class="foodNutrientIcon">🌱</span><span class="foodNutrientValue">${fmtFoodNutrient(x.fibra_g,"g")} g</span></span><span class="foodNutrient" title="Sódio"><span class="foodNutrientIcon">🧂</span><span class="foodNutrientValue">${fmtFoodNutrient(x.sodio_mg,"mg")} mg</span></span></div>`}
+function foodNutrientLine(x){return `<div class="foodNutrientLine" aria-label="Nutrientes deste alimento"><span class="foodNutrient" title="Calorias"><span class="foodNutrientIcon">🔥</span><span class="foodNutrientValue">${fmtFoodNutrient(x.kcal,"kcal")}kcal</span></span><span class="foodNutrient" title="Carboidratos"><span class="foodNutrientIcon">🍚</span><span class="foodNutrientValue">${fmtFoodNutrient(x.carboidrato_g,"g")}g</span></span><span class="foodNutrient" title="Proteína"><span class="foodNutrientIcon">💪</span><span class="foodNutrientValue">${fmtFoodNutrient(x.proteina_g,"g")}g</span></span><span class="foodNutrient" title="Gorduras"><span class="foodNutrientIcon">🥑</span><span class="foodNutrientValue">${fmtFoodNutrient(x.lipidios_g,"g")}g</span></span><span class="foodNutrient" title="Fibras"><span class="foodNutrientIcon">🌱</span><span class="foodNutrientValue">${fmtFoodNutrient(x.fibra_g,"g")}g</span></span><span class="foodNutrient" title="Sódio"><span class="foodNutrientIcon">🧂</span><span class="foodNutrientValue">${fmtFoodNutrient(x.sodio_mg,"mg")}mg</span></span></div>`}
 let bodyMeasurementLoadedDate="";
 function syncBodyMeasurementForm(measurement){
   const weightInput=document.getElementById("bodyWeightInput"),waterInput=document.getElementById("bodyWaterInput"),status=document.getElementById("bodyMeasurementStatus"),currentDate=String(day.value||"");
