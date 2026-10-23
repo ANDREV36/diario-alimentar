@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V86 · Nutrientes maiores e mais agrupados"
+APP_VERSION = "V87 · Nutrientes 15% maiores"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -3913,12 +3913,12 @@ main{
   background:rgba(7,20,35,.28)!important;
 }
 .item>div:first-child{min-width:0;flex:1}
-.foodNutrientLine{display:flex;align-items:center;justify-content:flex-start;gap:3px;width:100%;max-width:100%;min-width:0;margin-top:4px;color:#bfdbfe;font-size:9px;line-height:1.1;white-space:nowrap;overflow:hidden}
+.foodNutrientLine{display:flex;align-items:center;justify-content:flex-start;gap:3px;width:100%;max-width:100%;min-width:0;margin-top:4px;color:#bfdbfe;font-size:10.3px;line-height:1.1;white-space:nowrap;overflow:hidden}
 .foodNutrientLine::-webkit-scrollbar{display:none}
 .foodNutrient{display:inline-flex;align-items:center;gap:0;min-width:0;flex:0 1 auto}
-.foodNutrientIcon{font-size:9px;line-height:1}
-.foodNutrientValue{color:#e2e8f0;font-size:9px;font-variant-numeric:tabular-nums;letter-spacing:-.25px}
-@media(max-width:520px){.foodNutrientLine{gap:2px;font-size:8.5px}.foodNutrientIcon,.foodNutrientValue{font-size:8.5px;letter-spacing:-.35px}}
+.foodNutrientIcon{font-size:10.3px;line-height:1}
+.foodNutrientValue{color:#e2e8f0;font-size:10.3px;font-variant-numeric:tabular-nums;letter-spacing:-.25px}
+@media(max-width:520px){.foodNutrientLine{gap:2px;font-size:9.8px}.foodNutrientIcon,.foodNutrientValue{font-size:9.8px;letter-spacing:-.35px}}
 .bottomDashboard,.bottomGoal{
   background:rgba(7,22,38,.64)!important;
 }
