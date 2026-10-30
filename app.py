@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V87 · Nutrientes 15% maiores"
+APP_VERSION = "V88 · Edição de pratos prontos salvos"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -4930,7 +4930,7 @@ async function deletePortion(id){
   if(!confirm("Excluir esta porção salva?"))return;
   try{await api("/api/portion/"+Number(id),{method:"DELETE"});await loadPersonalLists()}catch(e){alert(e.message)}
 }
-let dishDraft=[];
+let dishDraft=[],savedDishesCache=[],dishEditId=null,dishEditName="",dishEditItems=[];
 function openDishBuilder(){dishDraft=[];renderDishBuilder()}
 function closeDishBuilder(){dishDraft=[];const box=document.getElementById("dishBuilder");if(box){box.style.display="none";box.innerHTML=""}}
 function renderDishBuilder(){
@@ -4960,13 +4960,30 @@ async function deleteDish(id){
   if(!confirm("Excluir este prato pronto? Os alimentos já lançados no diário serão preservados."))return;
   try{await api("/api/dish/"+Number(id),{method:"DELETE"});await loadPersonalLists()}catch(e){alert(e.message)}
 }
+function closeDishEditor(){dishEditId=null;dishEditName="";dishEditItems=[];const box=document.getElementById("dishBuilder");if(box){box.style.display="none";box.innerHTML=""}}
+function openDishEditor(id){const dish=savedDishesCache.find(x=>Number(x.id)===Number(id));if(!dish){alert("Não foi possível localizar esse prato. Atualize a lista e tente novamente.");return}dishEditId=Number(dish.id);dishEditName=String(dish.nome||"");dishEditItems=(dish.items||[]).map(item=>({alimento_id:Number(item.alimento_id),alimento_nome:String(item.alimento_nome||""),quantidade_g:Number(item.quantidade_g)||0,unidade:item.unidade==="ml"?"ml":"g"}));renderDishEditor();document.getElementById("dishBuilder")?.scrollIntoView({behavior:"smooth",block:"center"})}
+function renderDishEditor(){
+  const box=document.getElementById("dishBuilder");if(!box)return;
+  box.style.display="block";
+  const rows=dishEditItems.length?dishEditItems.map((item,index)=>`<div style="padding:9px;margin:6px 0;border:1px solid #ffffff20;border-radius:9px;background:#0b1e32"><b style="display:block;color:#fff;font-size:12px">${index+1}. ${esc(item.alimento_nome)}</b><div style="display:flex;flex-wrap:wrap;gap:6px;align-items:end;margin-top:7px"><label style="flex:1 1 92px;color:#cbd5e1;font-size:10px">Quantidade<input type="number" min="0.1" max="5000" step="0.1" value="${esc(item.quantidade_g)}" oninput="dishEditItems[${index}].quantidade_g=this.value" style="display:block;width:100%;box-sizing:border-box;padding:7px;border:1px solid #ffffff25;border-radius:7px;background:#16263a;color:#fff"></label><label style="flex:0 0 66px;color:#cbd5e1;font-size:10px">Unidade<select onchange="dishEditItems[${index}].unidade=this.value" style="display:block;width:100%;padding:7px;border:1px solid #ffffff25;border-radius:7px;background:#16263a;color:#fff"><option value="g" ${item.unidade==="g"?"selected":""}>g</option><option value="ml" ${item.unidade==="ml"?"selected":""}>ml</option></select></label><button type="button" onclick="replaceDishEditItem(${index})" style="flex:1 1 130px;padding:8px;border:1px solid #38bdf866;border-radius:7px;background:#0f2a45;color:#bae6fd;font-size:11px;font-weight:bold">TROCAR ALIMENTO SELECIONADO</button><button type="button" onclick="removeDishEditItem(${index})" title="Remover item" style="flex:0 0 36px;padding:8px;border:1px solid #fecaca55;border-radius:7px;background:#7f1d1d;color:#fff">✕</button></div></div>`).join(""):"<div style='padding:9px;color:#fcd34d;font-size:12px'>O prato está sem alimentos. Selecione um alimento acima e use ADICIONAR ITEM.</div>";
+  box.innerHTML=`<div style="padding:11px;border:1px solid #38bdf866;border-radius:11px;background:#0f2a45"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b style="color:#bae6fd">✏️ Editar prato pronto</b><button type="button" onclick="closeDishEditor()" style="padding:5px 8px;border:1px solid #ffffff30;border-radius:7px;background:#16263a;color:#cbd5e1">FECHAR</button></div><label style="display:block;margin-top:9px;color:#cbd5e1;font-size:11px">Nome do prato<input maxlength="120" value="${esc(dishEditName)}" oninput="dishEditName=this.value" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:9px;border:1px solid #ffffff25;border-radius:8px;background:#16263a;color:#fff"></label><p style="margin:7px 0;color:#cbd5e1;font-size:11px;line-height:1.35">Edite quantidades, troque ou remova itens. Para trocar/adicionar, selecione primeiro o alimento na busca acima.</p><div>${rows}</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:9px"><button type="button" onclick="addChosenToEditedDish()" style="flex:1;padding:9px;border:1px solid #38bdf866;border-radius:8px;background:#16263a;color:#bae6fd;font-weight:bold">＋ ADICIONAR ITEM SELECIONADO</button><button type="button" onclick="saveEditedDish()" style="flex:1;padding:9px;border:0;border-radius:8px;background:#22c55e;color:#06210f;font-weight:bold">SALVAR ALTERAÇÕES</button></div></div>`;
+}
+function replaceDishEditItem(index){if(!chosen){alert("Selecione primeiro um alimento na busca acima.");return}if(!dishEditItems[index])return;dishEditItems[index].alimento_id=Number(chosen.id);dishEditItems[index].alimento_nome=String(chosen.nome||"");dishEditItems[index].unidade=foodUnit(chosen);renderDishEditor()}
+function removeDishEditItem(index){dishEditItems.splice(index,1);renderDishEditor()}
+function addChosenToEditedDish(){if(!chosen){alert("Selecione primeiro um alimento na busca acima.");return}const q=Number(document.getElementById("weight").value),unit=document.getElementById("quantityUnit").value;if(!(q>0&&q<=5000)){alert("Informe uma quantidade entre 0,1 e 5.000.");return}dishEditItems.push({alimento_id:Number(chosen.id),alimento_nome:String(chosen.nome||""),quantidade_g:q,unidade:unit==="ml"?"ml":"g"});renderDishEditor()}
+async function saveEditedDish(){
+  const name=String(dishEditName||"").trim();if(!dishEditId||!name){alert("Informe o nome do prato.");return}if(!dishEditItems.length){alert("O prato precisa ter pelo menos um alimento.");return}
+  const items=dishEditItems.map(item=>({alimento_id:Number(item.alimento_id),alimento_nome:String(item.alimento_nome||""),quantidade_g:Number(item.quantidade_g),unidade:item.unidade==="ml"?"ml":"g"}));
+  if(items.some(item=>!Number.isInteger(item.alimento_id)||item.alimento_id===0||!item.alimento_nome||!Number.isFinite(item.quantidade_g)||item.quantidade_g<=0||item.quantidade_g>5000)){alert("Confira os alimentos e as quantidades do prato.");return}
+  try{await api("/api/dish/"+dishEditId,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({nome:name,items})});closeDishEditor();await loadPersonalLists();alert("Prato pronto atualizado.")}catch(e){alert("Não foi possível salvar as alterações: "+e.message)}
+}
 async function loadPersonalLists(){
   const box=document.getElementById("personalLists");if(!box)return;
   try{
-    const [fav,port,dishes]=await Promise.all([api("/api/favorites"),api("/api/portions"),api("/api/dishes")]);
+    const [fav,port,dishes]=await Promise.all([api("/api/favorites"),api("/api/portions"),api("/api/dishes")]);savedDishesCache=dishes;
     const fitems=fav.map(f=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(f.alimento_id)},${JSON.stringify(f.alimento_nome)},Number(document.getElementById("weight").value)||100,document.getElementById("quantityUnit").value)' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(f.alimento_nome)}</button><button onclick="deleteFavorite(${Number(f.id)})" title="Excluir favorito" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
     const pitems=port.map(p=>`<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick='addSavedFood(${Number(p.alimento_id)},${JSON.stringify(p.alimento_nome)},${Number(p.quantidade_g)||0},${JSON.stringify(p.unidade||"g")})' style="flex:1;text-align:left;padding:8px 10px;border:1px solid #ffffff25;border-radius:9px;background:#172b42;color:#fff;cursor:pointer">${esc(p.alimento_nome)} · ${esc(p.nome)} (${fmt(p.quantidade_g)} ${esc(p.unidade||"g")})</button><button onclick="deletePortion(${Number(p.id)})" title="Excluir porção" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`).join("");
-    const ditemitems=dishes.map(d=>{const count=Array.isArray(d.items)?d.items.length:0;const summary=(d.items||[]).slice(0,3).map(item=>`${esc(item.alimento_nome)} ${fmt(item.quantidade_g)} ${esc(item.unidade||"g")}`).join(" · ");const n=d.nutrientes||{};const nutrientLine=foodNutrientLine({kcal:n.energia_kcal,carboidrato_g:n.carboidrato_g,proteina_g:n.proteina_g,lipidios_g:n.lipidios_g,fibra_g:n.fibra_g,sodio_mg:n.sodio_mg});return `<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick="addSavedDish(${Number(d.id)})" style="flex:1;text-align:left;padding:8px 10px;border:1px solid #38bdf866;border-radius:9px;background:#0f2a45;color:#bae6fd;cursor:pointer"><b>🍽️ ${esc(d.nome)}</b><small style="display:block;color:#94a3b8;margin-top:3px">${count} alimento(s)${summary?" · "+summary:""}</small>${nutrientLine}</button><button onclick="deleteDish(${Number(d.id)})" title="Excluir prato pronto" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`}).join("");
+    const ditemitems=dishes.map(d=>{const count=Array.isArray(d.items)?d.items.length:0;const summary=(d.items||[]).slice(0,3).map(item=>`${esc(item.alimento_nome)} ${fmt(item.quantidade_g)} ${esc(item.unidade||"g")}`).join(" · ");const n=d.nutrientes||{};const nutrientLine=foodNutrientLine({kcal:n.energia_kcal,carboidrato_g:n.carboidrato_g,proteina_g:n.proteina_g,lipidios_g:n.lipidios_g,fibra_g:n.fibra_g,sodio_mg:n.sodio_mg});return `<div style="display:flex;gap:5px;align-items:center;margin:3px 0"><button onclick="addSavedDish(${Number(d.id)})" style="flex:1;text-align:left;padding:8px 10px;border:1px solid #38bdf866;border-radius:9px;background:#0f2a45;color:#bae6fd;cursor:pointer"><b>🍽️ ${esc(d.nome)}</b><small style="display:block;color:#94a3b8;margin-top:3px">${count} alimento(s)${summary?" · "+summary:""}</small>${nutrientLine}</button><button type="button" onclick="openDishEditor(${Number(d.id)})" title="Editar prato pronto" style="width:42px;padding:7px;border:1px solid #7dd3fc66;border-radius:8px;background:#12304a;color:#bae6fd;font-size:15px;cursor:pointer">✏️</button><button onclick="deleteDish(${Number(d.id)})" title="Excluir prato pronto" style="width:34px;padding:7px;border:1px solid #fecaca55;border-radius:8px;background:#7f1d1d;color:#fff;cursor:pointer">✕</button></div>`}).join("");
     const fhtml=fav.length?`<div style="margin:8px 0 4px">
       <h2 style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:0">
         <span>⭐ Favoritos (${fav.length})</span>
@@ -7392,6 +7409,38 @@ class H(BaseHTTPRequestHandler):
         if not user:return
         if not self.verify_csrf(): return
         try:
+            if self.path.startswith("/api/dish/"):
+                dish_id=int(self.path.rsplit("/",1)[1]);x=self.body();name=re.sub(r"\s+", " ", str(x.get("nome", "")).strip());items=x.get("items")
+                if not name or len(name)>120:raise ValueError("Informe um nome para o prato com até 120 caracteres.")
+                if not isinstance(items,list) or not 1<=len(items)<=50:raise ValueError("O prato precisa ter entre 1 e 50 alimentos.")
+                c=ddb()
+                try:
+                    dish=c.execute("SELECT id FROM pratos_prontos WHERE id=? AND usuario_id=?",(dish_id,self.user["id"])).fetchone()
+                    if not dish:raise ValueError("Prato pronto não encontrado.")
+                    duplicate=c.execute("SELECT id FROM pratos_prontos WHERE usuario_id=? AND nome=? AND id<>?",(self.user["id"],name,dish_id)).fetchone()
+                    if duplicate:raise ValueError("Você já tem outro prato pronto com esse nome.")
+                    clean=[]
+                    for order,item in enumerate(items):
+                        aid=int(item.get("alimento_id"));food_name=re.sub(r"\s+", " ", str(item.get("alimento_nome", "")).strip());q=float(item.get("quantidade_g",0));unit=str(item.get("unidade","g")).lower()
+                        if aid==0 or not food_name or not math.isfinite(q) or not 0<q<=5000:raise ValueError("Alimento ou quantidade inválidos no prato.")
+                        if unit not in ("g","ml"):raise ValueError("Unidade inválida no prato.")
+                        if aid<0:
+                            if not c.execute("SELECT 1 FROM alimentos_usuario WHERE id=? AND usuario_id=? AND ativo=TRUE",(-aid,self.user["id"])).fetchone():raise ValueError("Um alimento pessoal do prato não está mais disponível.")
+                        else:
+                            source=ndb()
+                            try:exists=source.execute("SELECT 1 FROM alimentos WHERE id=?",(aid,)).fetchone()
+                            finally:source.close()
+                            if not exists:raise ValueError("Um alimento da base do prato não foi encontrado.")
+                        clean.append((order,aid,food_name,q,unit))
+                    c.execute("UPDATE pratos_prontos SET nome=?,atualizado_em=NOW() WHERE id=? AND usuario_id=?",(name,dish_id,self.user["id"]))
+                    c.execute("DELETE FROM pratos_prontos_itens WHERE prato_id=?",(dish_id,))
+                    for order,aid,food_name,q,unit in clean:
+                        c.execute("INSERT INTO pratos_prontos_itens(prato_id,ordem,alimento_id,alimento_nome,quantidade_g,unidade) VALUES(?,?,?,?,?,?)",(dish_id,order,aid,food_name,q,unit))
+                    c.commit();self.js({"ok":True,"id":dish_id,"count":len(clean)})
+                except Exception:
+                    c.rollback();raise
+                finally:c.close()
+                return
             if self.path.startswith("/api/food/"):
                 i=int(self.path.rsplit("/",1)[1])
                 if i>=0: raise ValueError("A base nutricional compartilhada não pode ser alterada por este cadastro.")
