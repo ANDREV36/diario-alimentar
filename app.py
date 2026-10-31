@@ -75,7 +75,7 @@ if IS_PRODUCTION and len(SESSION_SECRET) < 32:
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(48)
 VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-APP_VERSION = "V89 · Cartões de pratos alinhados no celular"
+APP_VERSION = "V90 · Total diário de alimentos sólidos"
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_JSON_BODY = 1 * 1024 * 1024
@@ -1867,6 +1867,21 @@ def _calendar_food_groups(foods):
     return result
 
 
+def _solid_food_weight_grams(foods):
+    """Soma apenas alimentos registrados em gramas; líquidos em ml não entram."""
+    total = 0.0
+    for food in foods or []:
+        if str(food.get("unidade") or "g").strip().lower() != "g":
+            continue
+        try:
+            quantity = float(food.get("quantidade_g") or 0)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(quantity) and quantity > 0:
+            total += quantity
+    return round(total, 1)
+
+
 def _calendar_week_profiles(dataset, month_start):
     """Retorna o tamanho natural de cada semana do mês para paginação."""
     month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
@@ -1889,7 +1904,7 @@ def _calendar_week_profiles(dataset, month_start):
         profiles.append({
             "week_index": week_index,
             "max_foods": max_foods,
-            "natural_height": max(86.0, 43.0 + max(1, max_foods) * line_height),
+            "natural_height": max(86.0, 49.0 + max(1, max_foods) * line_height),
         })
     return grid_start, profiles
 
@@ -1961,7 +1976,7 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no, week_start=0, w
                 max_foods = max(max_foods, len((day_rows.get(current_date) or {}).get("foods", [])))
         food_font = max(3.4, min(5.2, 5.2 - max(0, max_foods - 12) * 0.08))
         line_height = food_font + 1.0
-        week_data.append({"max_foods": max_foods, "food_font": food_font, "line_height": line_height, "required_height": max(86.0, 43.0 + max(1, max_foods) * line_height)})
+        week_data.append({"max_foods": max_foods, "food_font": food_font, "line_height": line_height, "required_height": max(86.0, 49.0 + max(1, max_foods) * line_height)})
 
     available_height = body_top - bottom
     required_total = sum(item["required_height"] for item in week_data)
@@ -1969,7 +1984,7 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no, week_start=0, w
     if required_total > available_height and required_total > 0:
         # Uma semana isolada muito extensa ainda pode precisar de fonte menor,
         # mas nunca invade o cabeçalho ou os totais inferiores.
-        fixed_overhead = 43.0
+        fixed_overhead = 49.0
         content_need = sum(item["max_foods"] * item["line_height"] for item in week_data)
         content_space = max(0.0, available_height - fixed_overhead * max(1, week_count))
         scale = min(1.0, content_space / content_need) if content_need > 0 else 1.0
@@ -2089,6 +2104,12 @@ def _pdf_month_calendar_page(pdf, dataset, month_start, page_no, week_start=0, w
                 text_y -= line_height
 
             pdf.setFillColor(colors.HexColor("#0f172a"))
+            pdf.setFont("Helvetica-Bold", 5.2)
+            solid_weight = _solid_food_weight_grams(foods)
+            solid_weight_text = f"{solid_weight:,.1f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+            if solid_weight_text.endswith(",0"):
+                solid_weight_text = solid_weight_text[:-2]
+            pdf.drawString(x + 3, cell_y + 23, f"Peso dos sólidos: {solid_weight_text} g")
             pdf.setFont("Helvetica-Bold", 5.2)
             pdf.drawString(x + 3, cell_y + 16, f"Cons.: {_compact_number(consumed_kcal, 'kcal')} kcal")
             pdf.setFont("Helvetica", 5.1)
@@ -3919,6 +3940,7 @@ main{
 .foodNutrientIcon{font-size:10.3px;line-height:1}
 .foodNutrientValue{color:#e2e8f0;font-size:10.3px;font-variant-numeric:tabular-nums;letter-spacing:-.25px}
 @media(max-width:520px){.foodNutrientLine{gap:2px;font-size:9.8px}.foodNutrientIcon,.foodNutrientValue{font-size:9.8px;letter-spacing:-.35px}}
+#solidFoodTotal{margin:9px 0 0;padding:8px 10px;border-top:1px solid #ffffff2b;border-radius:0 0 8px 8px;background:rgba(15,42,69,.42);color:#bae6fd;text-align:right;font-size:12px;font-weight:700}
 .dishSavedRow{display:grid;grid-template-columns:minmax(0,1fr) 32px 32px;align-items:center;gap:4px;width:100%;max-width:100%;min-width:0;margin:4px 0;box-sizing:border-box}
 .dishSavedCard{display:grid;grid-template-rows:15px 1fr 12px;gap:2px;width:100%;height:78px;min-width:0;min-height:78px;max-height:78px;padding:7px 8px;box-sizing:border-box;overflow:hidden;text-align:left}
 .dishSavedName{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:15px}
@@ -5404,6 +5426,7 @@ async function refresh(){
     const goals=j.goals||{};
     renderGoalSource(j.goal_context);
     items.innerHTML=consumed.map(x=>"<div class='item'><div><div class='name'>"+esc(x.alimento_nome)+"</div><div class='info'>"+esc(x.refeicao)+" · "+fmt(x.quantidade_g)+" "+esc(x.unidade||"g")+"</div>"+foodNutrientLine(x)+"</div><div class='act'><button onclick='edit("+x.id+")'>Alterar</button><button onclick='del("+x.id+")'>Excluir</button></div></div>").join("")||"<div class='empty'>Nenhum alimento neste dia.</div>";
+    if(consumed.length){const solidGrams=consumed.reduce((sum,x)=>{const q=Number(x.quantidade_g),unit=String(x.unidade||"g").trim().toLowerCase();return sum+(unit==="g"&&Number.isFinite(q)&&q>0?q:0)},0),solidLabel=Number(solidGrams.toFixed(1)).toLocaleString("pt-BR",{maximumFractionDigits:1});items.insertAdjacentHTML("beforeend","<div id='solidFoodTotal'>Peso total dos alimentos sólidos: "+solidLabel+" g</div>")}
     if(consumed.length){const toggle=document.getElementById("consumedFoodsToggle");items.style.display="block";if(toggle){toggle.textContent="▲";toggle.setAttribute("aria-expanded","true");}}
     try{draw(partial,j.partial||{});}catch(e){console.error("nutrientes:",e)}
     try{drawWater(Number(j.water||0),Number(goals.agua_ml||0),j.water_entries||[]);drawEnergyBalance(j.energy||{});}catch(e){console.error("hidratação:",e)}
